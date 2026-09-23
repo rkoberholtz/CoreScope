@@ -16,7 +16,7 @@
  *   (h) sonifyPacket() with a synthetic packet does not throw and exercises
  *       parsePacketBytes/voice.play paths (mocked AudioContext)
  *   (i) localStorage persistence for live-audio-enabled / bpm / volume
- *   (j) metal + synthmetal + technoir voices: listed in the (now visible) voice select,
+ *   (j) every added voice (see ALL_VOICES below): listed in the (now visible) voice select,
  *       selectable, play every packet type without a voice error, survive reload
  *
  * Stable selectors: #liveAudioToggle, #audioControls, #audioBpmSlider,
@@ -265,12 +265,13 @@ async function main() {
       visible: sel.parentElement.style.display !== 'none',
     };
   });
-  if (['constellation', 'metal', 'synthmetal', 'technoir'].every(v => selectState.options.includes(v))) pass('voice select lists constellation + metal + synthmetal + technoir');
+  const ALL_VOICES = ['constellation', 'metal', 'synthmetal', 'technoir', 'ambient'];
+  if (ALL_VOICES.every(v => selectState.options.includes(v))) pass(`voice select lists all ${ALL_VOICES.length} voices`);
   else fail(`voice select options: ${selectState.options.join(', ')}`);
   if (selectState.visible) pass('voice select visible with 2+ voices');
   else fail('voice select hidden despite 2+ voices');
 
-  for (const voice of ['technoir', 'synthmetal', 'metal']) {
+  for (const voice of ['ambient', 'technoir', 'synthmetal', 'metal']) {
     await page.selectOption('#audioVoiceSelect', voice);
     const sel = await page.evaluate(() => ({
       name: window.MeshAudio.getVoiceName(),
