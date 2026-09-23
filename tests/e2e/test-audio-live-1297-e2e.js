@@ -265,13 +265,13 @@ async function main() {
       visible: sel.parentElement.style.display !== 'none',
     };
   });
-  const ALL_VOICES = ['constellation', 'metal', 'synthmetal', 'technoir', 'ambient', 'dub', 'acid'];
+  const ALL_VOICES = ['constellation', 'metal', 'synthmetal', 'technoir', 'ambient', 'dub', 'acid', 'lofi'];
   if (ALL_VOICES.every(v => selectState.options.includes(v))) pass(`voice select lists all ${ALL_VOICES.length} voices`);
   else fail(`voice select options: ${selectState.options.join(', ')}`);
   if (selectState.visible) pass('voice select visible with 2+ voices');
   else fail('voice select hidden despite 2+ voices');
 
-  for (const voice of ['acid', 'dub', 'ambient', 'technoir', 'synthmetal', 'metal']) {
+  for (const voice of ['lofi', 'acid', 'dub', 'ambient', 'technoir', 'synthmetal', 'metal']) {
     await page.selectOption('#audioVoiceSelect', voice);
     const sel = await page.evaluate(() => ({
       name: window.MeshAudio.getVoiceName(),

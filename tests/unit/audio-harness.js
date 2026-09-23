@@ -96,6 +96,7 @@ const ALL_VOICE_FILES = [
   'public/audio-v5-ambient.js',
   'public/audio-v6-dub.js',
   'public/audio-v7-acid.js',
+  'public/audio-v8-lofi.js',
 ];
 
 // Checks every voice must pass: registration (constellation stays default), all

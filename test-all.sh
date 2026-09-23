@@ -21,6 +21,7 @@ node tests/unit/test-area-filter.js
 node tests/unit/test-audio-acid.js
 node tests/unit/test-audio-ambient.js
 node tests/unit/test-audio-dub.js
+node tests/unit/test-audio-lofi.js
 node tests/unit/test-audio-metal.js
 node tests/unit/test-audio-synthkit.js
 node tests/unit/test-audio-synthmetal.js
