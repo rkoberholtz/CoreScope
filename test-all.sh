@@ -19,6 +19,7 @@ node tests/unit/test-analytics-channels-integration.js
 node tests/unit/test-anl1-tooltip-render.js
 node tests/unit/test-area-filter.js
 node tests/unit/test-audio-ambient.js
+node tests/unit/test-audio-dub.js
 node tests/unit/test-audio-metal.js
 node tests/unit/test-audio-synthkit.js
 node tests/unit/test-audio-synthmetal.js

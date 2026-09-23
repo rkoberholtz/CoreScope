@@ -94,6 +94,7 @@ const ALL_VOICE_FILES = [
   'public/audio-v3-synthmetal.js',
   'public/audio-v4-technoir.js',
   'public/audio-v5-ambient.js',
+  'public/audio-v6-dub.js',
 ];
 
 // Checks every voice must pass: registration (constellation stays default), all
