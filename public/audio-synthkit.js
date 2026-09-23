@@ -1,5 +1,5 @@
 // Synth kit — shared instruments and effects for the synth-based voices
-// (synthmetal, technoir). Exposed as MeshAudio.synthkit.
+// (synthmetal, technoir, ambient, dub, acid, lofi). Exposed as MeshAudio.synthkit.
 // Effects buses are built lazily, once per AudioContext, and shared by every packet.
 
 (function () {
@@ -53,6 +53,43 @@
       panL.connect(masterGain);
       panR.connect(masterGain);
       return { input, delays: [left, right] };
+    },
+    // Dub echo: one long delay with heavy, darkening, thinning feedback (capped
+    // well below 1 so it can't run away). Time set per packet like 'delay'.
+    dubecho(audioCtx, masterGain) {
+      const input = audioCtx.createGain();
+      const hp = audioCtx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = 250;
+      const echo = audioCtx.createDelay(2);
+      const lp = audioCtx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 1800;
+      const fb = audioCtx.createGain();
+      fb.gain.value = 0.65;
+      const out = audioCtx.createGain();
+      out.gain.value = 0.8;
+      input.connect(hp);
+      hp.connect(echo);
+      echo.connect(out);
+      echo.connect(lp);
+      lp.connect(fb);
+      fb.connect(echo);
+      out.connect(masterGain);
+      return { input, delays: [echo] };
+    },
+    // Vinyl crackle: faint hiss with sparse random clicks, looped per packet
+    crackle(audioCtx) {
+      const sr = audioCtx.sampleRate || 44100;
+      const buffer = audioCtx.createBuffer(1, Math.floor(sr * 2), sr);
+      const d = buffer.getChannelData(0);
+      let click = 0;
+      for (let i = 0; i < d.length; i++) {
+        if (Math.random() < 20 / sr) click = 0.3 + Math.random() * 0.5; // ~20 clicks/s
+        d[i] = (Math.random() * 2 - 1) * (0.02 + click);
+        click *= 0.8;
+      }
+      return { buffer };
     },
     // Stereo chorus: two short delays swept by one slow LFO in opposite directions
     chorus(audioCtx, masterGain) {
@@ -108,6 +145,13 @@
   // Next 16th on the shared grid, so concurrent packets lock together
   function gridStart(audioCtx, sixteenth) {
     return Math.ceil((audioCtx.currentTime + 0.02) / sixteenth) * sixteenth;
+  }
+
+  // Time of a grid step with swing: odd 16ths are pushed late by swing × a 16th.
+  // Start swung riffs on an 8th boundary (gridStart(ctx, 2 * sixteenth)) so the
+  // odd/even steps line up with every other packet.
+  function stepTime(t0, step, sixteenth, swing) {
+    return t0 + step * sixteenth + (step % 2 ? (swing || 0) * sixteenth : 0);
   }
 
   // Per-packet mix: gain → glue limiter → master
@@ -194,6 +238,111 @@
       });
     });
     return stopAt;
+  }
+
+  // Two-operator FM: a sine modulator at freq × ratio drives the carrier's pitch,
+  // with its depth (index) decaying — bells (inharmonic ratio) or electric piano
+  // (ratio 1). preset: { ratio, index: [peak, settled], indexDecay, attack, decay,
+  // sustain, release, level }. opts: { sends, pitchMod (node → both detunes) }
+  function playFM(audioCtx, dest, preset, midis, start, dur, opts) {
+    const p = preset;
+    const o = opts || {};
+    const end = Math.max(start + dur, start + 0.04);
+    const env = audioCtx.createGain();
+    const peak = p.level / midis.length;
+    const decayEnd = Math.min(end, start + p.attack + p.decay);
+    env.gain.setValueAtTime(0.0001, start);
+    env.gain.exponentialRampToValueAtTime(peak, start + Math.min(p.attack, dur));
+    env.gain.exponentialRampToValueAtTime(Math.max(peak * p.sustain, 0.0001), Math.max(decayEnd, start + Math.min(p.attack, dur) + 0.01));
+    env.gain.setTargetAtTime(0.0001, end, p.release / 3);
+    env.connect(dest);
+    const sendNodes = connectSends(audioCtx, env, o.sends);
+
+    const stopAt = end + p.release + 0.1;
+    let live = 0;
+    midis.forEach((midi) => {
+      const freq = midiToFreq(midi);
+      const carrier = audioCtx.createOscillator();
+      const mod = audioCtx.createOscillator();
+      const depth = audioCtx.createGain();
+      carrier.type = 'sine';
+      mod.type = 'sine';
+      carrier.frequency.setValueAtTime(freq, start);
+      mod.frequency.setValueAtTime(freq * p.ratio, start);
+      depth.gain.setValueAtTime(freq * p.index[0], start);
+      depth.gain.exponentialRampToValueAtTime(Math.max(freq * p.index[1], 0.01), start + p.indexDecay);
+      mod.connect(depth);
+      depth.connect(carrier.frequency);
+      carrier.connect(env);
+      if (o.pitchMod) { o.pitchMod.connect(carrier.detune); o.pitchMod.connect(mod.detune); }
+      [carrier, mod].forEach((osc) => {
+        osc.start(start);
+        osc.stop(stopAt);
+        live++;
+        osc.onended = () => {
+          osc.disconnect();
+          if (osc === mod) depth.disconnect();
+          if (--live === 0) { env.disconnect(); sendNodes.forEach((g) => g.disconnect()); }
+        };
+      });
+    });
+    return stopAt;
+  }
+
+  // 303-style acid step: one saw through a very resonant lowpass whose envelope
+  // snaps open on each note; accents open further and play louder, slides glide
+  // in from the previous note. ev: { midi, accent, slide, prevMidi }
+  // p: { cutoff, q, envMod, decay, level }
+  function playAcid(audioCtx, dest, ev, start, dur, p) {
+    const osc = audioCtx.createOscillator();
+    const filter = audioCtx.createBiquadFilter();
+    const env = audioCtx.createGain();
+    const freq = midiToFreq(ev.midi);
+    const end = Math.max(start + dur, start + 0.03);
+    osc.type = 'sawtooth';
+    if (ev.slide && ev.prevMidi != null) {
+      osc.frequency.setValueAtTime(midiToFreq(ev.prevMidi), start);
+      osc.frequency.exponentialRampToValueAtTime(freq, start + 0.06);
+    } else {
+      osc.frequency.setValueAtTime(freq, start);
+    }
+    filter.type = 'lowpass';
+    filter.Q.value = p.q;
+    const peakCut = p.cutoff * (1 + p.envMod * (ev.accent ? 1.6 : 1));
+    filter.frequency.setValueAtTime(peakCut, start);
+    filter.frequency.exponentialRampToValueAtTime(p.cutoff, start + p.decay * (ev.accent ? 0.6 : 1));
+    const level = p.level * (ev.accent ? 1.4 : 1);
+    env.gain.setValueAtTime(ev.slide ? level * 0.8 : 0.0001, start);
+    env.gain.exponentialRampToValueAtTime(level, start + 0.003);
+    env.gain.setValueAtTime(level, end);
+    env.gain.exponentialRampToValueAtTime(0.0001, end + 0.02);
+    osc.connect(filter);
+    filter.connect(env);
+    env.connect(dest);
+    osc.start(start);
+    osc.stop(end + 0.05);
+    osc.onended = () => { osc.disconnect(); filter.disconnect(); env.disconnect(); };
+    return end + 0.05;
+  }
+
+  // Looped vinyl crackle under a packet, from the shared 'crackle' buffer
+  function playCrackle(audioCtx, dest, buffer, start, end, level) {
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    src.loop = true;
+    const bp = audioCtx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 2500;
+    bp.Q.value = 0.7;
+    const g = audioCtx.createGain();
+    g.gain.value = level;
+    src.connect(bp);
+    bp.connect(g);
+    g.connect(dest);
+    src.start(start);
+    src.stop(end);
+    src.onended = () => { src.disconnect(); bp.disconnect(); g.disconnect(); };
+    return end;
   }
 
   // Plucked saw bass. p: { cutoff: [open, closed], q, level, maxDecay }
@@ -296,7 +445,7 @@
   }
 
   MeshAudio.synthkit = {
-    bus, gridStart, createMix, duck,
-    playSynth, playBass, playKick, playSnare, playHat,
+    bus, gridStart, stepTime, createMix, duck,
+    playSynth, playFM, playAcid, playBass, playKick, playSnare, playHat, playCrackle,
   };
 })();
