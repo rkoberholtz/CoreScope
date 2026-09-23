@@ -17,9 +17,13 @@ building blocks, and how to test a new voice.
 | `metal` | `public/audio-v2-metal.js` | Distorted drop-D guitar: power chords, palm-mute chugs, leads, bends |
 | `synthmetal` | `public/audio-v3-synthmetal.js` | Metal guitar + supersaws, octave bass, kick/gated snare, ping-pong delay |
 | `technoir` | `public/audio-v4-technoir.js` | Dark 80s synthwave: driving bass, drum machine, chorused pads |
+| `ambient` | `public/audio-v5-ambient.js` | Slow FM bells and drone pads in a big hall, not tied to the beat |
+| `dub` | `public/audio-v6-dub.js` | One-drop drums, offbeat skanks into a long feedback echo, sirens |
+| `acid` | `public/audio-v7-acid.js` | TB-303 patterns from packet bytes over four-on-the-floor drums |
+| `lofi` | `public/audio-v8-lofi.js` | Swung boom-bap, electric-piano jazz chords, tape wobble, crackle |
 
-`metal` doubles as a guitar rig that other voices reuse. `synthmetal` and
-`technoir` are built on the shared synth kit (`public/audio-synthkit.js`).
+`metal` doubles as a guitar rig that other voices reuse. Every voice after it
+is built on the shared synth kit (`public/audio-synthkit.js`).
 
 ## How it fits together
 
@@ -38,8 +42,9 @@ live.js ──(each packet)──▶ MeshAudio.sonifyPacket(pkt)          public
   gain (the volume slider), BPM, the voice registry and the enabled/voice/BPM/
   volume settings in `localStorage`. It also exposes shared helpers for voices.
 - **`public/audio-synthkit.js`** (`MeshAudio.synthkit`) holds shared instruments
-  (supersaw, bass, kick, snare, hi-hat) and effects buses (gated reverb, hall,
-  ping-pong delay, chorus).
+  (supersaw, FM bell/electric piano, 303 acid, bass, kick, snare, hi-hat, vinyl
+  crackle) and effects buses (gated reverb, hall, ping-pong delay, dub echo,
+  chorus).
 - **`public/audio-v*.js`** are the voices. Each is an IIFE that calls
   `MeshAudio.registerVoice(...)` when it loads.
 - **`public/index.html`** loads them in order. Load order matters (see below).
@@ -117,15 +122,19 @@ Load `audio-synthkit.js` before any voice that uses it.
 
 | Function | Purpose |
 |----------|---------|
-| `bus(audioCtx, masterGain, name)` | Lazily builds, once per `AudioContext`, and returns a shared bus: `'noise'` (`{ buffer }`), `'gated'`, `'hall'`, `'chorus'` (`{ input }`), `'delay'` (`{ input, delays: [left, right] }`; set `delays[i].delayTime.value` per packet to follow BPM) |
+| `bus(audioCtx, masterGain, name)` | Lazily builds, once per `AudioContext`, and returns a shared bus: `'noise'` and `'crackle'` (`{ buffer }`), `'gated'`, `'hall'`, `'chorus'` (`{ input }`), `'delay'` (ping-pong) and `'dubecho'` (`{ input, delays: [...] }`; set `delays[i].delayTime.value` per packet to follow BPM) |
 | `gridStart(audioCtx, sixteenth)` | Next 16th-note boundary on a global grid. Start riffs here so overlapping packets stay in time |
+| `stepTime(t0, step, sixteenth, swing?)` | Time of a grid step, with odd 16ths pushed late by `swing` × a 16th. Start swung riffs with `gridStart(ctx, 2 * sixteenth)` |
 | `createMix(audioCtx, masterGain, level)` | Per-packet `{ mix, nodes }`: gain → glue limiter → master. Disconnect `nodes` when done |
 | `duck(gainParam, t, recover, depth?)` | Sidechain "pump": dips a bus on a kick |
 | `playSynth(ctx, dest, preset, midis, start, dur, { glideFrom?, sends? })` | Detuned oscillator stack through an enveloped resonant lowpass. `preset = { type?, detunes, cutoff: [start, peak, end], filterAttack?, q, attack, sustain, release, level }`. `sends = [[busInput, amount], ...]` |
+| `playFM(ctx, dest, preset, midis, start, dur, { sends?, pitchMod? })` | Two-operator FM: bells (inharmonic `ratio`) or electric piano (`ratio: 1`). `preset = { ratio, index: [peak, settled], indexDecay, attack, decay, sustain, release, level }`. `pitchMod` is a node (e.g. an LFO gain in cents) fed into every oscillator's detune |
+| `playAcid(ctx, dest, { midi, accent, slide, prevMidi }, start, dur, { cutoff, q, envMod, decay, level })` | One TB-303 step: resonant filter envelope, accents, slides |
 | `playBass(ctx, dest, midi, start, dur, { cutoff: [open, closed], q, level, maxDecay }?)` | Plucked saw bass |
 | `playKick(ctx, dest, start, { from, to, sweep, decay, level }?)` | Sine kick with pitch drop |
 | `playSnare(ctx, dest, noiseBuffer, start, sends?, { level, decay, body }?)` | Noise snare with tonal body |
 | `playHat(ctx, dest, noiseBuffer, start, level)` | Closed hi-hat |
+| `playCrackle(ctx, dest, crackleBuffer, start, end, level)` | Looped vinyl crackle under a packet |
 
 Every `play*` function returns the time its nodes stop, so you can track the
 packet's end time. Each one disconnects its own nodes in `onended`.
@@ -142,10 +151,10 @@ uses it.
 
 ### 1. Create the file
 
-Name it `public/audio-v<N>-<name>.js`. A minimal working voice:
+Name it `public/audio-v<N>-<name>.js` (the next free number is 9). A minimal working voice:
 
 ```js
-// Voice v5: "Chime" — one triangle-wave note per sampled byte
+// Voice v9: "Chime" — one triangle-wave note per sampled byte
 (function () {
   'use strict';
 
@@ -192,7 +201,7 @@ Add a script tag after the voices it depends on and before `audio-lab.js`,
 matching the existing tags:
 
 ```html
-<script src="audio-v5-chime.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+<script src="audio-v9-chime.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
 ```
 
 The order is `audio.js` → `audio-synthkit.js` → `audio-v1-constellation.js`
@@ -224,7 +233,9 @@ cheap on a busy mesh (30K+ packets, several arriving per second).
   voice has drums or a groove, start on `kit.gridStart()` so concurrent packets
   lock together.
 - **Budget oscillators.** Stay at or below **128 oscillators per packet** in the
-  worst case (the longest payload, the highest `obsCount`, every type). Use
+  worst case (the longest payload, the highest `obsCount`, every type). For a
+  sine sub bass, use `playSynth` with `type: 'sine'` and one detune rather
+  than a new instrument. Use
   `sampleBytes` to bound the note count. Limit detuned stacks to 3–5
   oscillators.
 - **Never build expensive nodes per packet.** Convolvers (reverb), long delays
@@ -270,7 +281,7 @@ parameter automation:
 const assert = require('assert');
 const { loadAudio, playOnce, reaches, parsed } = require('./audio-harness');
 
-const ctx = loadAudio(['public/audio-v1-constellation.js', 'public/audio-v5-chime.js']);
+const ctx = loadAudio(['public/audio-v1-constellation.js', 'public/audio-v9-chime.js']);
 const chime = ctx._meshAudioVoices.chime;
 
 // Render one packet and inspect the graph
@@ -279,9 +290,15 @@ assert.ok(r.dur > 0);
 r.nodes.filter((n) => n.kind === 'osc').forEach((o) => assert.ok(reaches(o, r.master)));
 ```
 
-Worth covering (see `test-audio-technoir.js` for a full example):
+`voiceBasics(test, ctx, name, budget)` from the harness runs the checks every
+voice needs: registration with `constellation` still the default, every
+oscillator heard or modulating, the worst-case oscillator budget, deterministic
+`arrange()`, and engine integration. Load all voices with `loadAudio(ALL_VOICE_FILES)`
+after adding yours to `ALL_VOICE_FILES`. See `test-audio-dub.js` for a compact
+example, and `test-audio-technoir.js` for a longer one.
 
-- the voice registers and `constellation` is still the default
+Also worth covering:
+
 - `arrange()` output for each type: notes in the intended scale, rhythm on the
   grid, fallback for unknown types, same bytes giving the same result
 - the audio graph: every oscillator reaches the master; effects are shared
@@ -308,8 +325,8 @@ The image copies `public/` into `/app/public` at build time. To try a voice on
 an existing container without rebuilding:
 
 ```sh
-docker cp public/audio-v5-chime.js <container>:/app/public/
-docker exec <container> sed -i 's#\(<script src="audio-v4-technoir.js[^>]*></script>\)#\1\n  <script src="audio-v5-chime.js?v=__BUST__"></script>#' /app/public/index.html
+docker cp public/audio-v9-chime.js <container>:/app/public/
+docker exec <container> sed -i 's#\(<script src="audio-v8-lofi.js[^>]*></script>\)#\1\n  <script src="audio-v9-chime.js?v=__BUST__"></script>#' /app/public/index.html
 docker restart <container>   # re-applies cache busting
 ```
 
