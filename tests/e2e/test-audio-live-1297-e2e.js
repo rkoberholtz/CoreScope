@@ -16,6 +16,8 @@
  *   (h) sonifyPacket() with a synthetic packet does not throw and exercises
  *       parsePacketBytes/voice.play paths (mocked AudioContext)
  *   (i) localStorage persistence for live-audio-enabled / bpm / volume
+ *   (j) metal + synthmetal + technoir voices: listed in the (now visible) voice select,
+ *       selectable, play every packet type without a voice error, survive reload
  *
  * Stable selectors: #liveAudioToggle, #audioControls, #audioBpmSlider,
  * #audioBpmVal, #audioVolSlider, #audioVolVal, #audioVoiceSelect.
@@ -63,14 +65,16 @@ async function main() {
   // without real audio hardware. Capture invocations on window.__audioStub.
   await page.addInitScript(() => {
     window.__audioStub = { gainNodes: 0, oscillators: 0, contexts: 0 };
+    const param = () => ({ value: 0, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {}, setTargetAtTime() {} });
     function makeNode() {
       return {
         connect() { return makeNode(); },
         disconnect() {},
         start() {},
         stop() {},
-        gain: { value: 0, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} },
-        frequency: { value: 0, setValueAtTime() {}, linearRampToValueAtTime() {} },
+        gain: param(),
+        frequency: param(),
+        detune: param(),
         Q: { value: 0 },
         pan: { value: 0 },
         threshold: { value: 0 },
@@ -79,6 +83,7 @@ async function main() {
         attack: { value: 0 },
         release: { value: 0 },
         type: 'sine',
+        delayTime: param(),
       };
     }
     class FakeAudioContext {
@@ -86,6 +91,7 @@ async function main() {
         window.__audioStub.contexts += 1;
         this.state = 'running';
         this.currentTime = 0;
+        this.sampleRate = 8000;
         this.destination = makeNode();
       }
       createGain() { window.__audioStub.gainNodes += 1; return makeNode(); }
@@ -93,6 +99,11 @@ async function main() {
       createBiquadFilter() { return makeNode(); }
       createDynamicsCompressor() { return makeNode(); }
       createStereoPanner() { return makeNode(); }
+      createWaveShaper() { return makeNode(); }
+      createDelay() { return makeNode(); }
+      createConvolver() { return makeNode(); }
+      createBufferSource() { return makeNode(); }
+      createBuffer(ch, len) { const d = new Float32Array(len); return { getChannelData: () => d }; }
       createPanner() { return makeNode(); }
       resume() { this.state = 'running'; return Promise.resolve(); }
       suspend() { this.state = 'suspended'; return Promise.resolve(); }
@@ -243,6 +254,63 @@ async function main() {
   } else {
     fail(`localStorage persistence: ${JSON.stringify(ls)}`);
   }
+
+  // (j) metal voice
+  const voiceErrors = [];
+  page.on('console', (m) => { if (m.type() === 'error' && m.text().includes('[audio] voice error')) voiceErrors.push(m.text()); });
+  const selectState = await page.evaluate(() => {
+    const sel = document.getElementById('audioVoiceSelect');
+    return {
+      options: Array.from(sel.options).map(o => o.value),
+      visible: sel.parentElement.style.display !== 'none',
+    };
+  });
+  if (['constellation', 'metal', 'synthmetal', 'technoir'].every(v => selectState.options.includes(v))) pass('voice select lists constellation + metal + synthmetal + technoir');
+  else fail(`voice select options: ${selectState.options.join(', ')}`);
+  if (selectState.visible) pass('voice select visible with 2+ voices');
+  else fail('voice select hidden despite 2+ voices');
+
+  for (const voice of ['technoir', 'synthmetal', 'metal']) {
+    await page.selectOption('#audioVoiceSelect', voice);
+    const sel = await page.evaluate(() => ({
+      name: window.MeshAudio.getVoiceName(),
+      stored: localStorage.getItem('live-audio-voice'),
+    }));
+    if (sel.name === voice && sel.stored === voice) pass(`selecting ${voice} switches + persists the voice`);
+    else fail(`${voice} selection: ${JSON.stringify(sel)}`);
+
+    // Fresh page per voice: the engine caps concurrent packets (MAX_VOICES), and
+    // earlier voices' riffs would otherwise still hold every slot.
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.MeshAudio && document.querySelectorAll('#audioVoiceSelect option').length > 0);
+    const restored = await page.evaluate(() => window.MeshAudio.getVoiceName());
+    if (restored !== voice) fail(`${voice} not restored after reload (got ${restored})`);
+
+    const osc = await page.evaluate(() => {
+      const before = window.__audioStub.oscillators;
+      ['ADVERT', 'GRP_TXT', 'TXT_MSG', 'TRACE', 'UNKNOWN'].forEach(t => {
+        window.MeshAudio.sonifyPacket({
+          raw: '010203' + '00112233445566778899aabbccddeeff',
+          observation_count: 4,
+          decoded: { header: { payloadTypeName: t }, payload: {}, path: { hops: [] } },
+        });
+      });
+      return window.__audioStub.oscillators - before;
+    });
+    if (osc > 0 && voiceErrors.length === 0) pass(`${voice} voice played all types (oscillators +${osc})`);
+    else fail(`${voice} voice: oscΔ=${osc} errors=${voiceErrors.join(' | ')}`);
+  }
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  // Audio controls are restored after live.js's init awaits (map config, nodes),
+  // so wait for the voice select to be populated, not just present.
+  await page.waitForFunction(() => window.MeshAudio && document.querySelectorAll('#audioVoiceSelect option').length > 0);
+  const afterReload = await page.evaluate(() => ({
+    engine: window.MeshAudio.getVoiceName(),
+    select: document.getElementById('audioVoiceSelect').value,
+  }));
+  if (afterReload.engine === 'metal' && afterReload.select === 'metal') pass('metal voice restored after reload');
+  else fail(`after reload: ${JSON.stringify(afterReload)}`);
 
   // Toggle OFF should re-hide
   await page.evaluate(() => {

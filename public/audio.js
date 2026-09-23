@@ -40,6 +40,25 @@
     return scale[Math.min(idx, scale.length - 1)];
   }
 
+  // Evenly sample sqrt(len) bytes, clamped to [minN, maxN] notes.
+  function sampleBytes(bytes, minN, maxN) {
+    const n = Math.max(minN, Math.min(maxN, Math.ceil(Math.sqrt(bytes.length))));
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(bytes[Math.floor((i / n) * bytes.length)]);
+    return out;
+  }
+
+  // Stereo position: longitude when the packet carries coordinates, a small
+  // random spread for routed packets without them, centre otherwise.
+  function panFor(parsed) {
+    const { payload, hops } = parsed;
+    if (payload.lat !== undefined && payload.lon !== undefined) {
+      return Math.max(-1, Math.min(1, mapRange(payload.lon, -125, -65, -1, 1)));
+    }
+    if (hops.length > 0) return (Math.random() - 0.5) * 0.6;
+    return 0;
+  }
+
   function tempoMultiplier() {
     return 120 / bpm;
   }
@@ -209,6 +228,6 @@
     restore,
     getContext() { return audioCtx; },
     // Helpers for voice modules
-    helpers: { buildScale, midiToFreq, mapRange, quantizeToScale },
+    helpers: { buildScale, midiToFreq, mapRange, quantizeToScale, panFor, sampleBytes },
   };
 })();

@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  const { buildScale, midiToFreq, mapRange, quantizeToScale } = MeshAudio.helpers;
+  const { buildScale, midiToFreq, mapRange, quantizeToScale, panFor, sampleBytes } = MeshAudio.helpers;
 
   // Scales per payload type
   const SCALES = {
@@ -26,27 +26,15 @@
   const DEFAULT_SYNTH = SYNTHS.ADVERT;
 
   function play(audioCtx, masterGain, parsed, opts) {
-    const { payloadBytes, typeName, hopCount, obsCount, payload, hops } = parsed;
+    const { payloadBytes, typeName, hopCount, obsCount } = parsed;
     const tm = opts.tempoMultiplier;
 
     const scale = SCALES[typeName] || DEFAULT_SCALE;
     const synthConfig = SYNTHS[typeName] || DEFAULT_SYNTH;
 
-    // Sample sqrt(len) bytes evenly
-    const noteCount = Math.max(2, Math.min(10, Math.ceil(Math.sqrt(payloadBytes.length))));
-    const sampledBytes = [];
-    for (let i = 0; i < noteCount; i++) {
-      const idx = Math.floor((i / noteCount) * payloadBytes.length);
-      sampledBytes.push(payloadBytes[idx]);
-    }
+    const sampledBytes = sampleBytes(payloadBytes, 2, 10);
 
-    // Pan from longitude
-    let panValue = 0;
-    if (payload.lat !== undefined && payload.lon !== undefined) {
-      panValue = Math.max(-1, Math.min(1, mapRange(payload.lon, -125, -65, -1, 1)));
-    } else if (hops.length > 0) {
-      panValue = (Math.random() - 0.5) * 0.6;
-    }
+    const panValue = panFor(parsed);
 
     // Filter from hops
     const filterFreq = mapRange(Math.min(hopCount, 10), 1, 10, 8000, 800);
