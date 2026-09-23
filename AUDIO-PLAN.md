@@ -2,6 +2,8 @@
 
 *Turn raw packet bytes into generative music.*
 
+> Writing a new voice? See [docs/audio-voices.md](docs/audio-voices.md).
+
 ## What Every Packet Has (guaranteed)
 - `raw_hex` — melody source
 - `hop_count` — note duration + filter cutoff
