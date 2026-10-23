@@ -191,10 +191,13 @@
   //   lobes:  Map pk → Float64Array(SECTORS), each link stretching its own
   //           bearing out to its distance × 1.1, tapering to nothing over
   //           ±11.25°, so a proven link always sits inside the outline.
+  //   partners: Map pk → [{ lat, lon }] of the other ends, from which the
+  //           terrain provider estimates the node's antenna height.
   function linkReach(nodes, edges) {
     var pos = new Map();
     (nodes || []).forEach(function (n) { var p = position(n); if (p && n.public_key) pos.set(n.public_key, p); });
-    var dists = new Map(), lobes = new Map();
+    var dists = new Map(), lobes = new Map(), partners = new Map();
+    function partner(pk, p) { var l = partners.get(pk); if (l) l.push({ lat: p[0], lon: p[1] }); else partners.set(pk, [{ lat: p[0], lon: p[1] }]); }
     function lobe(pk, bearing, len) {
       var e = lobes.get(pk);
       if (!e) { e = new Float64Array(SECTORS); lobes.set(pk, e); }
@@ -214,6 +217,7 @@
       var dx = (b[1] - a[1]) * M_PER_DEG * cos, dy = (b[0] - a[0]) * M_PER_DEG;
       var d = Math.sqrt(dx * dx + dy * dy);
       dist(e.source, d); dist(e.target, d);
+      partner(e.source, b); partner(e.target, a);
       if (!(d > 0)) return;
       var fwd = Math.atan2(dx, dy);
       lobe(e.source, fwd, d * LINK_MARGIN);
@@ -225,7 +229,7 @@
       var r = percentile(l, RADIUS_PCT) * LINK_MARGIN;
       radius.set(pk, Math.min(MAX_RADIUS_M, Math.max(MIN_RADIUS_M, r)));
     });
-    return { radius: radius, lobes: lobes };
+    return { radius: radius, lobes: lobes, partners: partners };
   }
 
   // reachFor combines the three into per-sector reach:
@@ -658,9 +662,17 @@
     return '<span class="mc-scope-tag" title="' + title + '">' + text + '</span>';
   }
 
+  var MAST_TITLE = {
+    set: 'Antenna height set by the operator',
+    links: 'Antenna height raised from its proven links: the lowest mast that gives most of them line of sight over the terrain',
+    default: 'Antenna height assumed (10 m): its links do not show it needs more, or it has none',
+  };
+
   // scopePopupHtml: one section per scope under the click, each listing its
-  // repeaters with why they are listed. Every name is escaped.
-  function scopePopupHtml(scopes, nodes) {
+  // repeaters with why they are listed, and the antenna height the terrain
+  // model used for them (antennaOf(pk) → { antennaM, source }, when known).
+  // Every name is escaped.
+  function scopePopupHtml(scopes, nodes, antennaOf) {
     return '<div class="mc-scope-pop">' + scopes.map(function (scope) {
       var members = scopeMembers(scope, nodes);
       var nConf = members.filter(function (m) { return m.conf; }).length;
@@ -673,6 +685,10 @@
         if (m.conf && m.conf.declared) tags += tagHtml('declared', 'It lists this region when asked');
         if (m.carrying) tags += tagHtml('carrying', 'Seen relaying this region\'s traffic');
         if (!m.placed) tags += tagHtml('no position', 'Has no position, so it is not part of the outline');
+        var mast = antennaOf && antennaOf(pk);
+        if (mast && MAST_TITLE[mast.source]) {
+          tags += tagHtml((mast.source === 'links' ? '~' : '') + Math.round(mast.antennaM) + ' m mast' + (mast.source === 'set' ? ' (set)' : ''), MAST_TITLE[mast.source]);
+        }
         return '<li><a href="#/nodes/' + encodeURIComponent(pk) + '">' + escapeHtml(n.name || pk.slice(0, 8)) + '</a> ' + tags + '</li>';
       }).join('');
       var more = members.length > POPUP_ROWS ? '<li class="mc-scope-pop-more">+' + (members.length - POPUP_ROWS) + ' more</li>' : '';
@@ -686,7 +702,9 @@
   // createOverlay owns the layer, the cache, hover and the pulses for one
   // Leaflet map. opts: floorM, pulseMs, loadLinks (() => Promise of neighbor
   // graph edges), terrain (a terrain-reach.js provider: extentsFor and
-  // status), and setTimeout/clearTimeout/raf for tests.
+  // status), loadAntennaHeights (() => Promise of { pubkey or prefix:
+  // metres }, operator-set antenna heights), and setTimeout/clearTimeout/raf
+  // for tests.
   //   setNodes(nodes)   new node list; recomputes changed scopes when visible
   //   setLinks(edges)   neighbor graph edges the reach shapes follow
   //   setVisible(bool)  adds or removes the layer; computes lazily
@@ -711,7 +729,8 @@
     var links = null;
     var reach = null;       // linkReach(nodes, links), rebuilt when either changes
     var shapes = new Map(); // pubkey → { shape, key }, rebuilt with reach
-    var terrain = new Map(); // pubkey → { key, ext } from the terrain provider
+    var terrain = new Map(); // pubkey → { key, ext, meta } from the terrain provider
+    var heights = null;      // operator antenna heights, { key: metres }; null until loaded
     var terrainAsked = new Set(); // pk|key requested and not yet answered
     var renderQueued = false;
     var visible = false;
@@ -733,10 +752,26 @@
     });
 
     function radiusOf(n) { return (reach && reach.radius.get(n.public_key)) || NO_LINK_RADIUS_M; }
-    // The terrain request for a node: its position and radius. A result is
-    // only used while it still matches, so one computed for a node list that
-    // has since moved on is ignored.
-    function terrainKey(n) { var p = position(n); return p[0] + ',' + p[1] + '|' + Math.round(radiusOf(n)); }
+    // The operator's antenna height for a node: its pubkey, or the longest
+    // configured prefix of it.
+    function heightOf(n) {
+      if (!heights) return 0;
+      var pk = String(n.public_key || '').toLowerCase(), best = '', m = 0;
+      Object.keys(heights).forEach(function (k) {
+        if (k.length > best.length && pk.indexOf(k) === 0) { best = k; m = heights[k]; }
+      });
+      return m;
+    }
+    function partnersOf(n) { return (reach && reach.partners.get(n.public_key)) || []; }
+    // The terrain request for a node: its position, radius, and what its
+    // antenna height comes from. A result is only used while it still
+    // matches, so one computed for a node list that has since moved on is
+    // ignored.
+    function terrainKey(n) {
+      var p = position(n), h = heightOf(n);
+      return p[0] + ',' + p[1] + '|' + Math.round(radiusOf(n)) + '|' +
+        (h ? 'a' + h : 'L' + partnersOf(n).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4); }).sort().join(';'));
+    }
 
     // A node in several scopes is shaped once.
     function shaped(n) {
@@ -755,23 +790,42 @@
     // answer reshapes that one node and queues a render, at most one a frame.
     function requestTerrain(members) {
       if (!opts.terrain) return;
+      // Wait for the operator's heights, so a set height is never first
+      // computed as an estimate.
+      if (opts.loadAntennaHeights && heights === null) { loadHeights(); return; }
       var items = [];
       members.forEach(function (n) {
         var k = terrainKey(n), t = terrain.get(n.public_key), ask = n.public_key + '|' + k;
         if ((t && t.key === k) || terrainAsked.has(ask)) return;
         terrainAsked.add(ask);
-        var p = position(n);
-        items.push({ pk: n.public_key, lat: p[0], lon: p[1], R: radiusOf(n), key: k });
+        var p = position(n), h = heightOf(n);
+        var it = { pk: n.public_key, lat: p[0], lon: p[1], R: radiusOf(n), key: k };
+        if (h) it.antennaM = h; else it.links = partnersOf(n);
+        items.push(it);
       });
       if (!items.length) return;
       var keyOf = new Map(items.map(function (it) { return [it.pk, it.key]; }));
-      Promise.resolve(opts.terrain.extentsFor(items, function (pk, ext) {
-        terrain.set(pk, { key: keyOf.get(pk), ext: ext });
+      Promise.resolve(opts.terrain.extentsFor(items, function (pk, ext, meta) {
+        terrain.set(pk, { key: keyOf.get(pk), ext: ext, meta: meta || null });
         shapes.delete(pk);
         queueRender();
       })).then(done, done);
       function done() { items.forEach(function (it) { terrainAsked.delete(it.pk + '|' + it.key); }); queueRender(); }
     }
+
+    var heightsAsked = false;
+    function loadHeights() {
+      if (heightsAsked) return;
+      heightsAsked = true;
+      Promise.resolve(opts.loadAntennaHeights()).then(function (h) {
+        var clean = {};
+        Object.keys(h || {}).forEach(function (k) { if (h[k] > 0) clean[String(k).toLowerCase()] = Number(h[k]); });
+        heights = clean;
+      }, function () { heights = {}; }).then(queueRender);
+    }
+
+    // The click box's antenna note for a node, once its terrain is known.
+    function antennaOf(pk) { var t = terrain.get(pk); return t && t.meta; }
 
     function queueRender() {
       if (renderQueued) return;
@@ -901,7 +955,7 @@
       if (!scopes.length) return;
       clearHover();
       popup.setLatLng(e.latlng);
-      popup.setContent(scopePopupHtml(scopes, nodes));
+      popup.setContent(scopePopupHtml(scopes, nodes, antennaOf));
       popup.openOn(map);
     }
     map.on('mousemove', onMove);
@@ -987,6 +1041,7 @@
   // ── Scope list ───────────────────────────────────────────────────────────
 
   var TERRAIN_NOTE = 'Each repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links. ' +
+    'Antenna heights are the operator\'s where set; otherwise 10 m, raised where a repeater\'s links need more (click an outline to see them). ' +
     'Terrain: AWS Terrain Tiles (Mapzen; SRTM, USGS 3DEP and others), bare earth: buildings and trees are not in it.';
   var NO_TERRAIN_NOTE = 'Terrain unavailable: outlines show each repeater\'s range from its two-way links, stretched to proven links, with no terrain trimming.';
 

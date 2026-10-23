@@ -131,6 +131,89 @@ test('terrainExtents walks 72 rays', () => {
   assert.strictEqual(ext[18], 14000);                   // 90° = ray 18
 });
 
+console.log('\n=== terrain-reach.js: antenna height ===');
+
+// Ground 50 m everywhere, plus round hills at given spots (radius r, 150 m
+// unless given).
+const hillsAt = (list) => terrain((x, y) => {
+  for (const h of list) if (Math.hypot(x - h.x, y - h.y) < (h.r || 150)) return h.top;
+  return 50;
+});
+// The height a link of length D needs at its near end, from one obstruction
+// of height top at distance d: both ends on 50 m ground, far antenna 10 m,
+// 10 m tolerance, the earth's bulge included. The formula requiredHeight
+// documents, worked independently here.
+function need(top, d, D) {
+  const f = d / D, bulge = d * (D - d) / (2 * 4 / 3 * 6371008.8);
+  return (top + bulge - 10 - 60 * f) / (1 - f) - 50;
+}
+// A narrow hill on the sample at 1,980 m (the walk samples every 60 m).
+const SPOT = 1980;
+const at = (eastM, northM) => offset(O.lat, O.lon, eastM, northM);
+
+test('requiredHeight: a 150 m hill near the middle of a 4 km link (~168 m)', () => {
+  const t = hillsAt([{ x: SPOT, y: 0, top: 150, r: 10 }]);
+  const h = TR.requiredHeight(t, O, at(4000, 0), 10);
+  const want = need(150, SPOT, 4000);
+  assert.ok(Math.abs(h - want) < 1, 'required ' + h + ', worked ' + want);
+});
+
+test('requiredHeight: a wide hill is limited by its far edge, not its middle', () => {
+  // 300 m across, centred on the midpoint: the sample at 2,100 m, past the
+  // middle, needs the most (the line is lower there relative to the hill).
+  const t = hillsAt([{ x: 2000, y: 0, top: 150 }]);
+  const h = TR.requiredHeight(t, O, at(4000, 0), 10);
+  assert.ok(Math.abs(h - need(150, 2100, 4000)) < 1 && h > need(150, 2000, 4000), 'required ' + h);
+});
+
+test('requiredHeight: over flat ground any height will do', () => {
+  assert.ok(TR.requiredHeight(flat, O, at(4000, 0), 10) < 0);
+});
+
+test('estimateAntenna: the 75th percentile of what its links need, rounded', () => {
+  // A narrow hill on each of four 4 km links, sized so they need 5, 20, 30
+  // and 100 m: the 75th percentile is 47.5, rounded to 48.
+  const topFor = (req) => { const f = SPOT / 4000; return (req + 50) * (1 - f) + 60 * f + 10; };
+  const t = hillsAt([
+    { x: SPOT, y: 0, top: topFor(5), r: 10 }, { x: 0, y: SPOT, top: topFor(20), r: 10 },
+    { x: -SPOT, y: 0, top: topFor(30), r: 10 }, { x: 0, y: -SPOT, top: topFor(100), r: 10 },
+  ]);
+  const est = TR.estimateAntenna(t, O.lat, O.lon, [at(4000, 0), at(0, 4000), at(-4000, 0), at(0, -4000)]);
+  assert.strictEqual(est.source, 'links');
+  assert.strictEqual(est.links, 4);
+  assert.ok(Math.abs(est.m - 48) <= 1, 'estimate ' + est.m);
+});
+
+test('estimateAntenna: links only raise the 10 m default, up to 60 m', () => {
+  const huge = hillsAt([{ x: 2000, y: 0, top: 150 }]);
+  assert.strictEqual(TR.estimateAntenna(huge, O.lat, O.lon, [at(4000, 0)]).m, 60);
+  // A link that works from ground level says nothing against a real mast.
+  const easy = TR.estimateAntenna(flat, O.lat, O.lon, [at(4000, 0)]);
+  assert.deepStrictEqual([easy.m, easy.source, easy.links], [10, 'default', 1]);
+  const none = TR.estimateAntenna(flat, O.lat, O.lon, []);
+  assert.deepStrictEqual([none.m, none.source], [10, 'default']);
+  const tooFar = TR.estimateAntenna(flat, O.lat, O.lon, [at(50000, 0)]);
+  assert.strictEqual(tooFar.source, 'default', 'a link past 40 km is not profiled');
+});
+
+// A low ridge, 20 m above the plain, 2 km west. A 10 m mast is shadowed by
+// it; a 40 m mast leaves only a short shadow behind it (2.15-2.53 km, under
+// the 600 m a shadow must last), so the ray runs on.
+const lowRidgeWest = terrain((x) => (x < -1850 && x > -2150 ? 70 : 50));
+
+test('a taller antenna sees over the ridge a short one was shadowed by', () => {
+  const low = TR.rayCut(lowRidgeWest, O.lat, O.lon, deg(270), 14000, 10);
+  const high = TR.rayCut(lowRidgeWest, O.lat, O.lon, deg(270), 14000, 40);
+  assert.ok(low < 2400, 'a 10 m mast should be cut at the ridge: ' + low);
+  assert.strictEqual(high, 14000);
+});
+
+test('a high ridge close by shadows even a tall mast (first shadow)', () => {
+  // 100 m above the plain at 2 km: a 120 m mast still leaves receivers
+  // hidden from 2.15 to ~7.9 km, far past 600 m.
+  assert.ok(TR.rayCut(ridgeWest, O.lat, O.lon, deg(270), 14000, 120) < 2400);
+});
+
 console.log('\n=== terrain-reach.js: provider ===');
 
 // Fake tile fetcher: renders a terrain function into z11 tiles, as the
@@ -174,6 +257,55 @@ test('the provider fetches only the tiles around the repeater and reports progre
   });
 });
 
+test('the provider uses an operator height, or estimates one from links, and says which', () => {
+  // The low ridge 2 km west, and a hill 3 km north, 300 m across (a few
+  // tile pixels at z11), that a 6 km link across it needs ~50 m to clear.
+  const f = tileFetcher((x, y) => {
+    if (x < -1850 && x > -2150) return 70;
+    if (Math.abs(x) < 150 && Math.abs(y - 3000) < 150) return 90;
+    return 50;
+  });
+  const p = TR.createTerrainProvider({ fetchTile: f.fetchTile, storage: memStore(), yieldFn: immediate });
+  const meta = {};
+  return p.extentsFor([
+    { pk: 'set', lat: O.lat, lon: O.lon, R: 6000, antennaM: 40 },
+    { pk: 'est', lat: O.lat, lon: O.lon, R: 6000, links: [at(0, 6000)] },
+    { pk: 'none', lat: O.lat, lon: O.lon, R: 6000 },
+  ], (pk, ext, m) => { meta[pk] = Object.assign({ west: ext[54] }, m); }).then(() => {
+    assert.deepStrictEqual([meta.set.antennaM, meta.set.source], [40, 'set']);
+    assert.strictEqual(meta.set.west, 6000, 'a 40 m mast clears the low ridge');
+    assert.strictEqual(meta.est.source, 'links');
+    // need(90, 3000, 6000) = 50 m at the hill's middle; its far edge and the
+    // pixel smoothing push it up, the 60 m cap holds it.
+    assert.ok(meta.est.antennaM >= 45 && meta.est.antennaM <= 60, 'estimated ' + meta.est.antennaM);
+    assert.strictEqual(meta.est.west, 6000, 'the estimated mast clears the ridge too');
+    assert.deepStrictEqual([meta.none.antennaM, meta.none.source], [10, 'default']);
+    assert.ok(meta.none.west < 2400, 'a 10 m mast is cut at the ridge');
+  });
+});
+
+test('the estimated height survives a reload with the cached result', () => {
+  const store = memStore();
+  const mk = () => TR.createTerrainProvider({ fetchTile: tileFetcher(() => 50).fetchTile, storage: store, yieldFn: immediate });
+  const item = { pk: 'a', lat: O.lat, lon: O.lon, R: 2000, links: [at(3000, 0)] };
+  return mk().extentsFor([item]).then(() => {
+    let meta = null;
+    const p2 = mk();
+    return p2.extentsFor([item], (pk, ext, m) => { meta = m; }).then(() => {
+      assert.strictEqual(p2.stats().computed, 0, 'recomputed after reload');
+      assert.deepStrictEqual([meta.antennaM, meta.source], [10, 'default']);
+    });
+  });
+});
+
+test('a link added or lost re-estimates the height', () => {
+  const p = TR.createTerrainProvider({ fetchTile: tileFetcher(() => 50).fetchTile, storage: memStore(), yieldFn: immediate });
+  const base = { pk: 'a', lat: O.lat, lon: O.lon, R: 2000 };
+  return p.extentsFor([Object.assign({ links: [at(3000, 0)] }, base)])
+    .then(() => p.extentsFor([Object.assign({ links: [at(3000, 0), at(0, 3000)] }, base)]))
+    .then(() => assert.strictEqual(p.stats().computed, 2));
+});
+
 test('two requests for the same tile share one fetch', () => {
   const f = tileFetcher(() => 50);
   const p = TR.createTerrainProvider({ fetchTile: f.fetchTile, storage: memStore(), yieldFn: immediate });
@@ -190,7 +322,7 @@ test('results are cached, persisted, and reused after a reload without fetching'
   const f = tileFetcher(() => 50);
   const p = TR.createTerrainProvider({ fetchTile: f.fetchTile, storage: store, yieldFn: immediate });
   return p.extentsFor([{ pk: 'a', lat: O.lat, lon: O.lon, R: 3000 }]).then(() => {
-    assert.ok(store.s['meshcore-terrain-reach-v1'], 'not persisted');
+    assert.ok(store.s['meshcore-terrain-reach-v2'], 'not persisted');
     const f2 = tileFetcher(() => 50);
     const p2 = TR.createTerrainProvider({ fetchTile: f2.fetchTile, storage: store, yieldFn: immediate });
     return p2.extentsFor([{ pk: 'a', lat: O.lat, lon: O.lon, R: 3000 }]).then(res => {
@@ -220,7 +352,7 @@ test('the persisted cache is capped, oldest entries dropped first', () => {
   const p = TR.createTerrainProvider({ fetchTile: tileFetcher(() => 50).fetchTile, storage: store, yieldFn: immediate, maxEntries: 3 });
   const list = [0, 1, 2, 3, 4].map(i => ({ pk: 'n' + i, lat: O.lat, lon: O.lon, R: 1000 }));
   return p.extentsFor(list).then(() => {
-    const saved = JSON.parse(store.s['meshcore-terrain-reach-v1']);
+    const saved = JSON.parse(store.s['meshcore-terrain-reach-v2']);
     const keys = Object.keys(saved.data);
     assert.strictEqual(keys.length, 3);
     assert.ok(keys.every(k => /^n[234]@/.test(k)), keys.join(' '));
@@ -239,7 +371,7 @@ test('when tiles fail, reach falls back to the radius and status says so; nothin
   return p.extentsFor([{ pk: 'a', lat: O.lat, lon: O.lon, R: 5000 }]).then(res => {
     assert.ok(Array.from(res.get('a')).every(v => v === 5000));
     assert.strictEqual(p.status(), 'unavailable');
-    assert.ok(!store.s['meshcore-terrain-reach-v1'] || !/a@/.test(store.s['meshcore-terrain-reach-v1']), 'fallback persisted');
+    assert.ok(!store.s['meshcore-terrain-reach-v2'] || !/a@/.test(store.s['meshcore-terrain-reach-v2']), 'fallback persisted');
   });
 });
 

@@ -1077,6 +1077,9 @@ type ThemeResponse struct {
 type MapConfigResponse struct {
 	Center []float64 `json:"center"`
 	Zoom   int       `json:"zoom"`
+	// AntennaHeights: validated mapDefaults.antennaHeights (see
+	// cleanAntennaHeights); omitted when none are configured.
+	AntennaHeights map[string]float64 `json:"antennaHeights,omitempty"`
 }
 
 type ClientConfigResponse struct {

@@ -643,6 +643,72 @@ test('an answer for a node that has since moved is ignored', () => {
   });
 });
 
+test('without a set height, the request carries the link partners to estimate it from', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain();
+  const seen = [];
+  t.extentsFor = ((orig) => (items, onP) => { items.forEach(it => seen.push(it)); return orig(items, onP); })(t.extentsFor);
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
+  o.setVisible(true);
+  o.setLinks([two('h0', 'e1')]);
+  o.setNodes([T_NODES[0], EAST]);
+  return tick().then(() => {
+    const h = seen.filter(it => it.pk === 'h0').pop();
+    assert.ok(h && !h.antennaM, 'no height was set');
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(h.links)), [{ lat: EAST.lat, lon: EAST.lon }]);
+  });
+});
+
+test('an operator height (longest matching prefix) is sent instead, and requests wait for it', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain();
+  const seen = [];
+  t.extentsFor = ((orig) => (items, onP) => { items.forEach(it => seen.push(it)); return orig(items, onP); })(t.extentsFor);
+  let resolveHeights;
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadAntennaHeights: () => new Promise(r => { resolveHeights = r; }) }, sync));
+  o.setVisible(true);
+  o.setNodes([Object.assign({}, T_NODES[0], { public_key: 'h0aaaaaaaabbbb' })]);
+  assert.strictEqual(seen.length, 0, 'asked before the heights were known');
+  resolveHeights({ 'H0AAAAAA': 15, 'h0aaaaaaaa': 25 });
+  return tick().then(tick).then(() => {
+    const h = seen.pop();
+    assert.ok(h, 'never asked');
+    assert.strictEqual(h.antennaM, 25, 'the longer prefix should win');
+    assert.ok(!h.links, 'links sent despite a set height');
+  });
+});
+
+test('a new link changes what the height is estimated from, so it is asked again', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain();
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
+  o.setVisible(true);
+  o.setNodes([T_NODES[0], EAST, NORTH]);
+  o.setLinks([two('h0', 'e1')]);
+  return tick().then(() => {
+    const before = t.calls.flat().filter(c => c.pk === 'h0').length;
+    o.setLinks([two('h0', 'e1'), two('h0', 'n1')]);
+    return tick().then(() => assert.ok(t.calls.flat().filter(c => c.pk === 'h0').length > before, 'not asked again'));
+  });
+});
+
+test('the click box shows the mast height the terrain model used, and where it came from', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const t = fakeTerrain();
+  const meta = { h0: { antennaM: 23.6, source: 'links' }, e1: { antennaM: 25, source: 'set' } };
+  t.extentsFor = ((orig) => (items, onP) => orig(items, (pk, ext) => onP(pk, ext, meta[pk] || { antennaM: 10, source: 'default' })))(t.extentsFor);
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
+  o.setVisible(true);
+  o.setNodes([T_NODES[0], Object.assign({ transported_scopes: ['#home'] }, EAST), Object.assign({ transported_scopes: ['#home'] }, NORTH)]);
+  return tick().then(() => {
+    map.fire('click', { latlng: { lat: HOME.lat, lng: HOME.lon }, sourceTarget: map });
+    const html = rec.popup.content;
+    assert.ok(/~24 m mast</.test(html), 'estimated mast: ' + html);
+    assert.ok(/25 m mast \(set\)</.test(html), 'set mast');
+    assert.ok(/>10 m mast</.test(html), 'assumed mast');
+  });
+});
+
 test('the list says when terrain is unavailable, and credits the source when it is used', () => {
   const run = (state) => {
     const { S } = listSandbox('#/map');

@@ -736,8 +736,10 @@
       // api()'s cache, fetched only while the contours are on.
       reachOverlay = window.ScopeContours.createOverlay(L, map, {
         loadLinks: () => api('/analytics/neighbor-graph', { ttl: CLIENT_TTL.analyticsRF }).then(d => (d && d.edges) || []),
-        // Line of sight over elevation tiles trims each repeater's reach.
+        // Line of sight over elevation tiles trims each repeater's reach;
+        // antenna heights the operator set in config replace the estimate.
         terrain: window.TerrainReach ? window.TerrainReach.shared() : null,
+        loadAntennaHeights: () => api('/config/map', { ttl: 3600 }).then(d => (d && d.antennaHeights) || {}),
       });
       reachOverlay.setOnly(filters.regionScope);
       window.ScopeContours.mountScopeList(document.getElementById('mcScopeList'), reachOverlay);

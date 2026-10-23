@@ -13,8 +13,18 @@
    keyed by repeater, position, radius and model parameters, so a reload
    costs nothing.
 
+   Antenna height above ground is the input that matters most, and adverts
+   do not carry it. In order of preference:
+     set:     the operator's figure (mapDefaults.antennaHeights in config)
+     links:   raised from its proven two-way links: for each, the lowest
+              antenna that gives the link line of sight over the terrain
+              between them (far end at 10 m); the 75th percentile of those,
+              when that is more than 10 m, up to 60 m. Links only prove a
+              lower bound, so they never lower it below the default.
+     default: 10 m, for a repeater whose links need no more, or has none
+
    Model, hardcoded for now (customizer is a follow-up):
-     antenna 10 m above ground, receiver 2 m, earth curvature with k = 4/3,
+     receiver 2 m, earth curvature with k = 4/3,
      an obstruction up to 10 m above the line of sight is tolerated (LoRa
      diffracts round small ones), and a shadow must last 600 m to end a ray,
      so the brief shadow just behind a small bump does not.
@@ -26,7 +36,10 @@
   var TILE = 256;
   var RAYS = 72;
   var STEP_M = 60;
-  var ANTENNA_M = 10;
+  var ANTENNA_M = 10;        // default, and the far end of a link
+  var EST_MAX_M = 60;
+  var EST_PCT = 0.75;
+  var LINK_MAX_M = 40000;    // longer links are not profiled (tiles)
   var RX_M = 2;
   var TOLERANCE_M = 10;
   var SHADOW_M = 600;
@@ -35,8 +48,8 @@
   var M_PER_DEG = 111320;
   var MAX_TILES = 64;       // decoded tiles held: 64 x 256 KB
   var MAX_ENTRIES = 3000;   // persisted results
-  var STORE_KEY = 'meshcore-terrain-reach-v1';
-  var PARAMS = 'z' + ZOOM + 'a' + ANTENNA_M + 'r' + RX_M + 't' + TOLERANCE_M + 's' + SHADOW_M;
+  var STORE_KEY = 'meshcore-terrain-reach-v2';
+  var PARAMS = 'z' + ZOOM + 'a' + ANTENNA_M + 'r' + RX_M + 't' + TOLERANCE_M + 's' + SHADOW_M + 'e' + EST_MAX_M + 'p' + EST_PCT;
   var TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/';
 
   // tileOf returns fractional slippy-map tile coordinates of a point.
@@ -63,10 +76,10 @@
   // clockwise) and returns how far a receiver keeps line of sight to the
   // antenna, up to maxM. sample(lat, lon) gives ground elevation in metres,
   // NaN where unknown; unknown terrain ends nothing, so the ray runs to maxM.
-  function rayCut(sample, lat, lon, bearing, maxM) {
+  function rayCut(sample, lat, lon, bearing, maxM, antennaM) {
     var h0 = sample(lat, lon);
     if (!isFinite(h0)) return maxM;
-    var hA = h0 + ANTENNA_M;
+    var hA = h0 + (antennaM > 0 ? antennaM : ANTENNA_M);
     var kR2 = 2 * K * EARTH_R;
     var dLat = Math.cos(bearing) / M_PER_DEG;
     var dLon = Math.sin(bearing) / (M_PER_DEG * Math.cos(lat * Math.PI / 180));
@@ -111,10 +124,62 @@
   }
 
   // terrainExtents walks RAYS rays; ray i points at bearing i * 360/RAYS.
-  function terrainExtents(sample, lat, lon, maxM) {
+  function terrainExtents(sample, lat, lon, maxM, antennaM) {
     var out = new Float64Array(RAYS);
-    for (var i = 0; i < RAYS; i++) out[i] = rayCut(sample, lat, lon, i * 2 * Math.PI / RAYS, maxM);
+    for (var i = 0; i < RAYS; i++) out[i] = rayCut(sample, lat, lon, i * 2 * Math.PI / RAYS, maxM, antennaM);
     return out;
+  }
+
+  function distM(a, b) {
+    var cos = Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
+    var dx = (b.lon - a.lon) * M_PER_DEG * cos, dy = (b.lat - a.lat) * M_PER_DEG;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  // requiredHeight: the lowest antenna height above ground at a that gives
+  // the link a-b line of sight, with b's antenna hB above its ground. The
+  // line from a's antenna to b's must pass within TOLERANCE_M of every
+  // ground point between them, where the ground is raised by the earth's
+  // bulge, d(D-d)/2kR. For a point at d that needs
+  //   A >= (g - tol - B * d/D) / (1 - d/D)
+  // in absolute heights; the most any point needs, minus a's ground.
+  // Negative when a is already clear at ground level; NaN when terrain is
+  // missing.
+  function requiredHeight(sample, a, b, hB) {
+    var D = distM(a, b);
+    var gA = sample(a.lat, a.lon), gB = sample(b.lat, b.lon);
+    if (!isFinite(gA) || !isFinite(gB) || !(D > STEP_M)) return NaN;
+    var B = gB + hB, kR2 = 2 * K * EARTH_R, need = -Infinity;
+    for (var d = STEP_M; d < D - STEP_M / 2; d += STEP_M) {
+      var f = d / D;
+      var g = sample(a.lat + (b.lat - a.lat) * f, a.lon + (b.lon - a.lon) * f);
+      if (!isFinite(g)) return NaN;
+      g += d * (D - d) / kR2;
+      var A = (g - TOLERANCE_M - B * f) / (1 - f);
+      if (A > need) need = A;
+    }
+    return need === -Infinity ? -Infinity : need - gA;
+  }
+
+  // estimateAntenna: the 75th percentile of what its links require, so most
+  // of its proven links have line of sight; one freak long link, or a
+  // reflection the terrain cannot explain, does not set it. A link that works
+  // from a low mast says nothing against a taller one, so the estimate only
+  // ever raises the default 10 m, up to 60 m.
+  // { m, source: 'links' (raised) | 'default', links: how many counted }.
+  function estimateAntenna(sample, lat, lon, links) {
+    var a = { lat: lat, lon: lon }, req = [];
+    (links || []).forEach(function (b) {
+      if (!b || !(distM(a, b) <= LINK_MAX_M)) return;
+      var h = requiredHeight(sample, a, b, ANTENNA_M);
+      if (h === -Infinity || isFinite(h)) req.push(h === -Infinity ? 0 : h);
+    });
+    if (!req.length) return { m: ANTENNA_M, source: 'default', links: 0 };
+    req.sort(function (x, y) { return x - y; });
+    var f = EST_PCT * (req.length - 1), i = Math.floor(f), t = f - i;
+    var p = i + 1 < req.length ? req[i] + (req[i + 1] - req[i]) * t : req[i];
+    if (!(p > ANTENNA_M)) return { m: ANTENNA_M, source: 'default', links: req.length };
+    return { m: Math.round(Math.min(EST_MAX_M, p)), source: 'links', links: req.length };
   }
 
   // ── Tiles ────────────────────────────────────────────────────────────────
@@ -143,7 +208,10 @@
   // opts: fetchTile(z, x, y) → Promise<Float32Array(65536)> (the browser
   // fetcher by default), storage (localStorage), yieldFn (between
   // repeaters, so the page stays responsive), maxEntries.
-  //   extentsFor([{ pk, lat, lon, R }], onProgress) → Promise<Map pk → ext>
+  //   extentsFor([{ pk, lat, lon, R, antennaM?, links? }], onProgress)
+  //       → Promise<Map pk → ext>; onProgress(pk, ext, { antennaM, source })
+  //       antennaM: the operator's height (source 'set'); otherwise it is
+  //       estimated from links ([{ lat, lon }] of its two-way partners)
   //   status()  'ok' | 'unavailable' (a tile failed) | 'idle'
   function createTerrainProvider(opts) {
     opts = opts || {};
@@ -153,7 +221,7 @@
     var maxEntries = opts.maxEntries || MAX_ENTRIES;
     var tiles = new Map();     // 'x/y' → Float32Array; LRU order
     var inflight = new Map();  // 'x/y' → Promise
-    var results = new Map();   // key → Float64Array
+    var results = new Map();   // key → { ext: Float64Array, antennaM, source }
     var order = [];            // persisted keys, oldest first
     var computed = 0, failures = 0, used = false;
     var queue = Promise.resolve();
@@ -165,7 +233,10 @@
         var saved = JSON.parse(raw);
         if (!saved || !saved.data) return;
         order = Array.isArray(saved.order) ? saved.order.filter(function (k) { return saved.data[k]; }) : Object.keys(saved.data);
-        order.forEach(function (k) { results.set(k, Float64Array.from(saved.data[k])); });
+        order.forEach(function (k) {
+          var d = saved.data[k];
+          results.set(k, { ext: Float64Array.from(d.e), antennaM: d.a, source: d.s });
+        });
       } catch (e) { order = []; }
     })();
 
@@ -174,12 +245,21 @@
         if (!storage) return;
         while (order.length > maxEntries) results.delete(order.shift());
         var data = {};
-        order.forEach(function (k) { data[k] = Array.prototype.map.call(results.get(k), function (v) { return Math.round(v / 10) * 10; }); });
+        order.forEach(function (k) {
+          var r = results.get(k);
+          data[k] = { e: Array.prototype.map.call(r.ext, function (v) { return Math.round(v / 10) * 10; }), a: r.antennaM, s: r.source };
+        });
         storage.setItem(STORE_KEY, JSON.stringify({ order: order, data: data }));
       } catch (e) { /* full or denied: the memory cache still works */ }
     }
 
-    function keyOf(it) { return it.pk + '@' + it.lat + ',' + it.lon + '|' + Math.round(it.R) + '|' + PARAMS; }
+    // The antenna part: the operator's height, or the links an estimate
+    // would be drawn from (a link added or lost re-estimates).
+    function antennaKey(it) {
+      if (it.antennaM > 0) return 'a' + it.antennaM;
+      return 'L' + (it.links || []).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4); }).sort().join(';');
+    }
+    function keyOf(it) { return it.pk + '@' + it.lat + ',' + it.lon + '|' + Math.round(it.R) + '|' + antennaKey(it) + '|' + PARAMS; }
 
     function loadTile(x, y) {
       var k = x + '/' + y;
@@ -200,10 +280,19 @@
       return p;
     }
 
-    // The tiles a repeater's rays can touch: the box of its radius.
+    // The tiles a repeater's rays can touch, the box of its radius, and,
+    // when its height is to be estimated, the paths to its partners.
     function tilesFor(it) {
       var dLat = it.R / M_PER_DEG, dLon = it.R / (M_PER_DEG * Math.cos(it.lat * Math.PI / 180));
-      var a = tileOf(it.lat + dLat, it.lon - dLon, ZOOM), b = tileOf(it.lat - dLat, it.lon + dLon, ZOOM);
+      var n = it.lat + dLat, s = it.lat - dLat, w = it.lon - dLon, e = it.lon + dLon;
+      if (!(it.antennaM > 0)) {
+        (it.links || []).forEach(function (b) {
+          if (!(distM(it, b) <= LINK_MAX_M)) return;
+          if (b.lat > n) n = b.lat; if (b.lat < s) s = b.lat;
+          if (b.lon < w) w = b.lon; if (b.lon > e) e = b.lon;
+        });
+      }
+      var a = tileOf(n, w, ZOOM), b = tileOf(s, e, ZOOM);
       var out = [];
       for (var y = Math.floor(a.fy); y <= Math.floor(b.fy); y++) {
         for (var x = Math.floor(a.fx); x <= Math.floor(b.fx); x++) out.push([x, y]);
@@ -238,17 +327,20 @@
         var set = new Map(), complete = true;
         need.forEach(function (xy, i) { if (arrs[i]) set.set(xy[0] + '/' + xy[1], arrs[i]); else complete = false; });
         computed++;
+        var set_ = it.antennaM > 0;
         if (!complete) {
           // Some terrain is missing: fall back to the radius all round, and
           // keep it out of the cache so a later visit tries the tiles again.
           var flat = new Float64Array(RAYS);
           flat.fill(it.R);
-          return flat;
+          return { ext: flat, antennaM: set_ ? it.antennaM : ANTENNA_M, source: set_ ? 'set' : 'default' };
         }
-        var ext = terrainExtents(sampler(set), it.lat, it.lon, it.R);
-        results.set(key, ext);
+        var sample = sampler(set);
+        var est = set_ ? { m: it.antennaM, source: 'set' } : estimateAntenna(sample, it.lat, it.lon, it.links);
+        var res = { ext: terrainExtents(sample, it.lat, it.lon, it.R, est.m), antennaM: est.m, source: est.source };
+        results.set(key, res);
         order.push(key);
-        return ext;
+        return res;
       });
     }
 
@@ -261,9 +353,9 @@
         var run = queue.then(function () {
           var chain = Promise.resolve();
           (items || []).forEach(function (it) {
-            chain = chain.then(function () { return one(it); }).then(function (ext) {
-              out.set(it.pk, ext);
-              if (onProgress) onProgress(it.pk, ext);
+            chain = chain.then(function () { return one(it); }).then(function (res) {
+              out.set(it.pk, res.ext);
+              if (onProgress) onProgress(it.pk, res.ext, { antennaM: res.antennaM, source: res.source });
               return yieldFn();
             });
           });
@@ -290,6 +382,9 @@
     tileOf: tileOf,
     decodeTerrarium: decodeTerrarium,
     rayCut: rayCut,
+    requiredHeight: requiredHeight,
+    estimateAntenna: estimateAntenna,
+    defaultAntenna: ANTENNA_M,
     terrainExtents: terrainExtents,
     createTerrainProvider: createTerrainProvider,
     shared: shared,

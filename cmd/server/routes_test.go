@@ -2042,6 +2042,60 @@ func TestConfigMapWithCustomDefaults(t *testing.T) {
 	}
 }
 
+// The reach contours read per-repeater antenna heights from here. Keys are
+// pubkeys or unique hex prefixes (>= 8 chars), lowercased; anything that is
+// not hex or not a plausible height above ground is dropped.
+func TestConfigMapAntennaHeights(t *testing.T) {
+	db := setupTestDB(t)
+	seedTestData(t, db)
+	cfg := &Config{Port: 3000}
+	cfg.MapDefaults.AntennaHeights = map[string]float64{
+		"78E60E1AF2FAE339": 25, // prefix, uppercase: kept, lowercased
+		"0351561ed221d125d5ecc40b751c33c9935357453e7a2ae90b056f8570cc01fb": 8.5, // full key
+		"abc":               12,  // too short to identify a node
+		"not-a-hex-key-xyz": 12,  // not hex
+		"aaaaaaaabbbbbbbb":  0,   // not a height
+		"ccccccccdddddddd":  500, // not a height above ground
+	}
+	hub := NewHub()
+	srv := NewServer(db, cfg, hub)
+	router := mux.NewRouter()
+	srv.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/api/config/map", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var body MapConfigResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]float64{
+		"78e60e1af2fae339": 25,
+		"0351561ed221d125d5ecc40b751c33c9935357453e7a2ae90b056f8570cc01fb": 8.5,
+	}
+	if len(body.AntennaHeights) != len(want) {
+		t.Fatalf("antennaHeights = %v, want %v", body.AntennaHeights, want)
+	}
+	for k, v := range want {
+		if body.AntennaHeights[k] != v {
+			t.Errorf("antennaHeights[%s] = %v, want %v", k, body.AntennaHeights[k], v)
+		}
+	}
+}
+
+func TestConfigMapOmitsAntennaHeightsWhenUnset(t *testing.T) {
+	_, router := setupTestServer(t)
+	req := httptest.NewRequest("GET", "/api/config/map", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if strings.Contains(w.Body.String(), "antennaHeights") {
+		t.Errorf("antennaHeights present without config: %s", w.Body.String())
+	}
+}
+
 func TestHandlerErrorPaths(t *testing.T) {
 	// Create a DB that will error on queries by dropping the view/tables
 	db := setupTestDB(t)
