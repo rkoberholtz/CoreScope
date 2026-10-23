@@ -531,7 +531,8 @@
             <label for="mcRegionFilter" class="sr-only">Show nodes with evidence for a region scope</label>
             <select id="mcRegionFilter" title="Show nodes that declare a region scope or were seen carrying its traffic">${regionFilterOptionsHtml([], filters.regionScope)}</select>
             <div id="mcRegionHint" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
-            <label for="mcScopeContours" title="Outline the area within 8 km of the nodes that handle each region scope. Solid: seen carrying its traffic. Dashed: only declare it. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Reach contours</label>
+            <label for="mcScopeContours" title="Outline the area the nodes that handle each region scope are proven to reach, following their direct links. Solid: seen carrying its traffic. Dashed: only declare it. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Reach contours</label>
+            <div id="mcScopeList" class="mc-scope-list" hidden></div>
           </fieldset>
           <fieldset class="mc-section">
             <legend class="mc-label">Filters</legend>
@@ -731,8 +732,13 @@
     if (filters.clustering && clusterGroup) clusterGroup.addTo(map);
     routeLayer = L.layerGroup().addTo(map);
     if (window.ScopeContours) {
-      reachOverlay = window.ScopeContours.createOverlay(L, map, {});
+      // Reach follows the neighbor graph: one bulk call, shared through
+      // api()'s cache, fetched only while the contours are on.
+      reachOverlay = window.ScopeContours.createOverlay(L, map, {
+        loadLinks: () => api('/analytics/neighbor-graph', { ttl: CLIENT_TTL.analyticsRF }).then(d => (d && d.edges) || []),
+      });
       reachOverlay.setOnly(filters.regionScope);
+      window.ScopeContours.mountScopeList(document.getElementById('mcScopeList'), reachOverlay);
       reachOverlay.setVisible(filters.scopeContours);
     }
     // Exposed for the #1374 route renderer (window.MeshRoute) and its E2E tests.

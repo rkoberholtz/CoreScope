@@ -1,7 +1,7 @@
 /* Region scope reach contours for the map and live pages.
 
-   For each MeshCore region scope, outline the area within a fixed radius of
-   the nodes that handle it, merged into one shape per cluster. Two kinds:
+   For each MeshCore region scope, outline the area the nodes that handle it
+   are proven to reach, merged into one shape per cluster. Two kinds:
 
    - observed: nodes whose full pubkey appears in the path of traffic for the
      scope (transported_scopes, #1751/#1902). Drawn solid.
@@ -9,20 +9,34 @@
      been seen carrying it. Drawn dashed, because a declaration is
      configuration, not evidence of reach.
 
-   Everything is computed from the node list the page already loaded, so the
-   overlay makes no request of its own. The outline is a marching-squares
-   contour of a distance field: within each cluster of nodes, every grid
-   vertex holds its distance to the nearest node, and the contour is drawn at
-   the radius. Results are cached per scope and recomputed only when that
-   scope's members or their positions change.
+   A node's reach follows its links, not a circle. Around the compass in 16
+   sectors, it reaches as far as the farthest node it has a proven direct
+   link with in that sector (the neighbor graph, /api/analytics/neighbor-graph,
+   ambiguous links left out), and a small floor where it has none. Terrain is
+   in the data: a repeater that only ever links east draws a lobe to the east.
+   Interpolating between sector centres keeps the shape smooth.
 
-   The radius (8 km, matching coverage.nyme.sh) and pulse duration are fixed
-   for now; exposing them in the customizer is a follow-up. */
+   The outline is a marching-squares contour of a field: within each cluster
+   of nodes, every grid vertex holds min over nodes of distance / reach in that
+   direction, and the contour is drawn at 1. Results are cached per scope and
+   recomputed only when its members, their positions or their reach change.
+
+   Hover is hit-tested from the map's own mousemove, not from the outlines:
+   the live map draws canvases above them, and overlapping scopes should all
+   be named. The outlines take no pointer events, so they never block a click.
+
+   The floor (1.5 km), sector count and pulse duration are fixed for now;
+   exposing them in the customizer is a follow-up. */
 (function () {
   'use strict';
 
-  var DEFAULT_RADIUS_M = 8000;
+  var DEFAULT_FLOOR_M = 1500;
   var DEFAULT_PULSE_MS = 1500;
+  var SECTORS = 16;
+  var SECTOR_RAD = 2 * Math.PI / SECTORS;
+  // A link proves the far node hears this one; the outline is drawn a little
+  // past it so the linked node sits inside rather than on the edge.
+  var LINK_MARGIN = 1.1;
   var PANE = 'mcScopeContoursPane';
   // Under overlayPane (400) and markerPane (600): outlines never cover a
   // route line or a node marker.
@@ -32,6 +46,7 @@
   // A cluster's grid is capped at this many vertices. Past it the cell grows,
   // so a scope spread over a large area costs the same as a compact one.
   var MAX_VERTICES = 250000;
+  var HIDDEN_KEY = 'meshcore-scope-contours-hidden';
 
   // normRegion mirrors the server's normScope (scope_audit.go): strip one
   // leading '#', nothing else, so the map, the audit and the live feed spell
@@ -97,35 +112,136 @@
     return (h % PALETTE_SIZE) + 1;
   }
 
+  // ── Reach from links ─────────────────────────────────────────────────────
+
+  // sectorOf maps a bearing (radians, 0 = north, clockwise) to the sector
+  // whose centre is nearest: sector i is centred on i * 360/SECTORS degrees.
+  function sectorOf(bearing) {
+    var s = Math.round(bearing / SECTOR_RAD) % SECTORS;
+    return s < 0 ? s + SECTORS : s;
+  }
+
+  // linkExtents returns Map pubkey → Float64Array(SECTORS): for each sector,
+  // the distance in metres to the farthest node it has a proven link with in
+  // that direction, times LINK_MARGIN. 0 means no link that way. Only links
+  // between two placed nodes count, and never an ambiguous one (a hop prefix
+  // that could be several nodes). A link counts for both of its ends.
+  // O(links).
+  function linkExtents(nodes, edges) {
+    var pos = new Map();
+    (nodes || []).forEach(function (n) { var p = position(n); if (p && n.public_key) pos.set(n.public_key, p); });
+    var out = new Map();
+    function ext(pk) {
+      var e = out.get(pk);
+      if (!e) { e = new Float64Array(SECTORS); out.set(pk, e); }
+      return e;
+    }
+    (edges || []).forEach(function (e) {
+      if (!e || e.ambiguous || e.source === e.target) return;
+      var a = pos.get(e.source), b = pos.get(e.target);
+      if (!a || !b) return;
+      var cos = Math.cos(((a[0] + b[0]) / 2) * Math.PI / 180);
+      var dx = (b[1] - a[1]) * M_PER_DEG * cos, dy = (b[0] - a[0]) * M_PER_DEG;
+      var d = Math.sqrt(dx * dx + dy * dy) * LINK_MARGIN;
+      if (!(d > 0)) return;
+      var fwd = Math.atan2(dx, dy);
+      var ea = ext(e.source), eb = ext(e.target);
+      var sa = sectorOf(fwd), sb = sectorOf(fwd + Math.PI);
+      if (d > ea[sa]) ea[sa] = d;
+      if (d > eb[sb]) eb[sb] = d;
+    });
+    return out;
+  }
+
+  // shapeFor builds the reach shape of one node: its position plus per-sector
+  // reach with the floor applied. A node with no links is a floor circle.
+  // box is the shape's extent in metres west/east/south/north of the node,
+  // so a lobe to the east costs a strip, not a square around the node.
+  function shapeFor(n, extents, floorM) {
+    var p = position(n);
+    var e = new Float64Array(SECTORS);
+    var src = extents && extents.get(n.public_key);
+    var max = floorM, min = Infinity;
+    for (var i = 0; i < SECTORS; i++) {
+      e[i] = src && src[i] > floorM ? src[i] : floorM;
+      if (e[i] > max) max = e[i];
+      if (e[i] < min) min = e[i];
+    }
+    var shape = { lat: p[0], lon: p[1], ext: e, maxExt: max, minExt: min, uniform: max === min };
+    shape.box = max === min ? [-max, max, -max, max] : shapeBox(shape);
+    return shape;
+  }
+
+  // shapeBox samples the boundary at 4 points per sector. Between samples the
+  // boundary can bulge by under 0.2% of the reach, which the 2-cell margin
+  // the field fill adds covers.
+  function shapeBox(shape) {
+    var b = [0, 0, 0, 0], n = SECTORS * 4;
+    for (var k = 0; k < n; k++) {
+      var t = (k / n) * 2 * Math.PI, r = reachAt(shape, t);
+      var x = r * Math.sin(t), y = r * Math.cos(t);
+      if (x < b[0]) b[0] = x; if (x > b[1]) b[1] = x;
+      if (y < b[2]) b[2] = y; if (y > b[3]) b[3] = y;
+    }
+    return b;
+  }
+
+  // bearingOf is atan2(dx, dy), the compass bearing of an offset, as a
+  // polynomial: error under 2.1e-4 rad (0.012°, measured), far below what a
+  // 22.5° sector blend can show, at a fraction of Math.atan2's cost in the
+  // per-vertex fill.
+  function bearingOf(dx, dy) {
+    var ax = Math.abs(dy), ay = Math.abs(dx);
+    var hi = ax > ay ? ax : ay;
+    if (hi === 0) return 0;
+    var a = (ax < ay ? ax : ay) / hi, q = a * a;
+    var r = ((-0.0464964749 * q + 0.15931422) * q - 0.327622764) * q * a + a;
+    if (ay > ax) r = 1.5707963267948966 - r;
+    if (dy < 0) r = Math.PI - r;
+    return dx < 0 ? -r : r;
+  }
+
+  // reachAt interpolates a shape's reach at a bearing between the two nearest
+  // sector centres.
+  function reachAt(shape, bearing) {
+    if (shape.uniform) return shape.ext[0];
+    var f = bearing / SECTOR_RAD;
+    if (f < 0) f += SECTORS;
+    var i = Math.floor(f), t = f - i;
+    i %= SECTORS;
+    return shape.ext[i] + (shape.ext[(i + 1) % SECTORS] - shape.ext[i]) * t;
+  }
+
   // ── Geometry ─────────────────────────────────────────────────────────────
 
-  // clusters splits points into groups whose discs can touch (within 2R of
-  // each other), so each group gets its own compact grid and projection.
-  // Spatial hash with cells at least 2R wide: only the 3x3 neighbourhood is
-  // checked, so this is linear in the point count.
-  function clusters(pts, radiusM) {
-    var reach = 2 * radiusM;
-    var maxAbsLat = 0;
-    pts.forEach(function (p) { maxAbsLat = Math.max(maxAbsLat, Math.abs(p[0])); });
+  // clusters splits shapes into groups that can touch (centres within the sum
+  // of their longest reaches), so each group gets its own compact grid and
+  // projection. Spatial hash with cells at least twice the longest reach:
+  // only the 3x3 neighbourhood is checked, so this is linear in the count.
+  function clusters(shapes) {
+    var maxAbsLat = 0, maxExt = 0;
+    shapes.forEach(function (s) { maxAbsLat = Math.max(maxAbsLat, Math.abs(s.lat)); maxExt = Math.max(maxExt, s.maxExt); });
+    var reach = 2 * maxExt;
     var latCell = reach / M_PER_DEG;
-    // The smallest cos in the set makes every cell at least 2R wide wherever
-    // a point is, so no pair within reach lands two cells apart.
+    // The smallest cos in the set makes every cell at least that wide
+    // wherever a shape is, so no pair within reach lands two cells apart.
     var lonCell = Math.min(360, reach / (M_PER_DEG * Math.max(0.01, Math.cos(maxAbsLat * Math.PI / 180))));
-    var parent = pts.map(function (_, i) { return i; });
+    var parent = shapes.map(function (_, i) { return i; });
     function find(i) { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; }
     var cells = new Map();
     var keyOf = function (cy, cx) { return cy + ',' + cx; };
-    pts.forEach(function (p, i) {
-      var cy = Math.floor(p[0] / latCell), cx = Math.floor(p[1] / lonCell);
+    shapes.forEach(function (p, i) {
+      var cy = Math.floor(p.lat / latCell), cx = Math.floor(p.lon / lonCell);
       for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
           var bucket = cells.get(keyOf(cy + dy, cx + dx));
           if (!bucket) continue;
           for (var k = 0; k < bucket.length; k++) {
-            var j = bucket[k], q = pts[j];
-            var cos = Math.cos(((p[0] + q[0]) / 2) * Math.PI / 180);
-            var ey = (p[0] - q[0]) * M_PER_DEG, ex = (p[1] - q[1]) * M_PER_DEG * cos;
-            if (ey * ey + ex * ex <= reach * reach) parent[find(i)] = find(j);
+            var j = bucket[k], q = shapes[j];
+            var cos = Math.cos(((p.lat + q.lat) / 2) * Math.PI / 180);
+            var ey = (p.lat - q.lat) * M_PER_DEG, ex = (p.lon - q.lon) * M_PER_DEG * cos;
+            var touch = p.maxExt + q.maxExt;
+            if (ey * ey + ex * ex <= touch * touch) parent[find(i)] = find(j);
           }
         }
       }
@@ -134,7 +250,7 @@
       cells.get(own).push(i);
     });
     var byRoot = new Map();
-    pts.forEach(function (p, i) {
+    shapes.forEach(function (p, i) {
       var r = find(i);
       if (!byRoot.has(r)) byRoot.set(r, []);
       byRoot.get(r).push(p);
@@ -151,48 +267,79 @@
     [[2, 3]], [[0, 2]], null, [[1, 2]], [[3, 1]], [[0, 1]], [[3, 0]], [],
   ];
 
-  // clusterRings traces the radius contour around one cluster of points.
-  function clusterRings(pts, radiusM) {
-    var lat0 = 0, lon0 = 0;
-    pts.forEach(function (p) { lat0 += p[0]; lon0 += p[1]; });
-    lat0 /= pts.length; lon0 /= pts.length;
+  // Scratch buffers shared by every clusterRings call, grown to the largest
+  // grid seen and never past MAX_VERTICES (the cell grows instead), so a
+  // rebuild allocates nothing per cluster. The edge index is not cleared
+  // between clusters: an entry counts only if its stamp is this call's.
+  var scratch = { field: null, first: null, second: null, stamp: null, rowLo: null, rowHi: null, gen: 0 };
+  function scratchBuf(name, Ctor, n) {
+    if (!scratch[name] || scratch[name].length < n) scratch[name] = new Ctor(n);
+    return scratch[name];
+  }
+
+  // Saddle resolutions: A cuts off bottom-right and top-left, B bottom-left
+  // and top-right.
+  var SADDLE_A = [[0, 1], [2, 3]], SADDLE_B = [[3, 0], [1, 2]];
+
+  // clusterRings traces the reach contour around one cluster of shapes.
+  function clusterRings(shapes) {
+    var lat0 = 0, lon0 = 0, minExt = Infinity;
+    shapes.forEach(function (s) { lat0 += s.lat; lon0 += s.lon; if (s.minExt < minExt) minExt = s.minExt; });
+    lat0 /= shapes.length; lon0 /= shapes.length;
     var kx = M_PER_DEG * Math.cos(lat0 * Math.PI / 180), ky = M_PER_DEG;
-    var xy = pts.map(function (p) { return [(p[1] - lon0) * kx, (p[0] - lat0) * ky]; });
+    var xy = shapes.map(function (s) { return [(s.lon - lon0) * kx, (s.lat - lat0) * ky]; });
 
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    xy.forEach(function (p) {
-      if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
-      if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
+    xy.forEach(function (p, k) {
+      var b = shapes[k].box;
+      if (p[0] + b[0] < minX) minX = p[0] + b[0]; if (p[0] + b[1] > maxX) maxX = p[0] + b[1];
+      if (p[1] + b[2] < minY) minY = p[1] + b[2]; if (p[1] + b[3] > maxY) maxY = p[1] + b[3];
     });
-    var cell = radiusM / 4;
-    var span = function (c) { return { nx: Math.ceil((maxX - minX + 2 * (radiusM + 2 * c)) / c) + 1, ny: Math.ceil((maxY - minY + 2 * (radiusM + 2 * c)) / c) + 1 }; };
+    // The smallest reach over 2.5 still traces a floor circle within 5% (the
+    // contour is interpolated, not stepped); finer cells cost the square.
+    // The vertex cap coarsens it for a sprawling cluster.
+    var cell = minExt / 2.5;
+    var span = function (c) { return { nx: Math.ceil((maxX - minX + 4 * c) / c) + 1, ny: Math.ceil((maxY - minY + 4 * c) / c) + 1 }; };
     var dims = span(cell);
     if (dims.nx * dims.ny > MAX_VERTICES) {
       cell *= Math.sqrt((dims.nx * dims.ny) / MAX_VERTICES);
       dims = span(cell);
     }
     var nx = dims.nx, ny = dims.ny;
-    var ox = minX - radiusM - 2 * cell, oy = minY - radiusM - 2 * cell;
+    var ox = minX - 2 * cell, oy = minY - 2 * cell;
 
-    // Distance field, squared: a square root per vertex was most of the
-    // cost, and only the few vertices on the contour need the distance
-    // itself (edgePoint, the saddle centre). Each point fills only its own
-    // square of half-width R + 2 cells: every vertex next to the contour is
-    // within that of the point that puts it there, so the rest stay "far".
-    var r2 = radiusM * radiusM;
-    var far = 9 * r2;
-    var field = new Float64Array(nx * ny).fill(far);
-    var reach = radiusM + 2 * cell;
-    xy.forEach(function (p) {
-      var i0 = Math.max(0, Math.floor((p[0] - reach - ox) / cell)), i1 = Math.min(nx - 1, Math.ceil((p[0] + reach - ox) / cell));
-      var j0 = Math.max(0, Math.floor((p[1] - reach - oy) / cell)), j1 = Math.min(ny - 1, Math.ceil((p[1] + reach - oy) / cell));
+    // Field: distance / reach in that direction, inside where < 1. Each shape
+    // fills only its own box plus 2 cells: every vertex next to the contour
+    // lies within that of the shape that puts it there, so the rest stay
+    // "far". A uniform shape needs no bearing, and neither does a vertex well
+    // inside the floor: its value only has to read as inside, since no
+    // vertex a cell from it can be outside.
+    var far = 3;
+    var field = scratchBuf('field', Float64Array, nx * ny);
+    field.fill(far, 0, nx * ny);
+    var pad = 2 * cell;
+    // rowLo/rowHi: the columns each row's fill touched. A cluster's grid is
+    // its bounding box, mostly empty when the shapes chain across it, and
+    // outside these spans every vertex is far, so the marching pass below
+    // only walks the spans.
+    var rowLo = scratchBuf('rowLo', Int32Array, ny), rowHi = scratchBuf('rowHi', Int32Array, ny);
+    rowLo.fill(nx, 0, ny); rowHi.fill(-1, 0, ny);
+    xy.forEach(function (p, k) {
+      var s = shapes[k], b = s.box;
+      var i0 = Math.max(0, Math.floor((p[0] + b[0] - pad - ox) / cell)), i1 = Math.min(nx - 1, Math.ceil((p[0] + b[1] + pad - ox) / cell));
+      var j0 = Math.max(0, Math.floor((p[1] + b[2] - pad - oy) / cell)), j1 = Math.min(ny - 1, Math.ceil((p[1] + b[3] + pad - oy) / cell));
+      var inv = 1 / s.minExt, core = s.minExt / 2, lim = s.maxExt + pad;
       for (var j = j0; j <= j1; j++) {
+        if (i0 < rowLo[j]) rowLo[j] = i0;
+        if (i1 > rowHi[j]) rowHi[j] = i1;
         var dy = oy + j * cell - p[1];
         for (var i = i0; i <= i1; i++) {
           var dx = ox + i * cell - p[0];
-          var d = dx * dx + dy * dy;
+          var d = Math.sqrt(dx * dx + dy * dy);
+          if (d > lim) continue;
+          var r = (s.uniform || d < core) ? d * inv : d / reachAt(s, bearingOf(dx, dy));
           var idx = j * nx + i;
-          if (d < field[idx]) field[idx] = d;
+          if (r < field[idx]) field[idx] = r;
         }
       }
     });
@@ -202,41 +349,50 @@
     // share an edge id, which is what joins their segments into rings.
     function edgePoint(e) {
       var v = e >> 1, i = v % nx, j = (v - i) / nx;
-      var a = Math.sqrt(field[v]), b, bx = i, by = j;
-      if (e & 1) { b = Math.sqrt(field[v + nx]); by = j + 1; } else { b = Math.sqrt(field[v + 1]); bx = i + 1; }
-      var t = (radiusM - a) / (b - a);
+      var a = field[v], b, bx = i, by = j;
+      if (e & 1) { b = field[v + nx]; by = j + 1; } else { b = field[v + 1]; bx = i + 1; }
+      var t = (1 - a) / (b - a);
       return [ox + (i + (bx - i) * t) * cell, oy + (j + (by - j) * t) * cell];
     }
     // segA/segB: the two endpoint edges of each segment. Every contour edge
     // belongs to exactly two segments, so first/second, indexed by edge id,
     // find a segment's neighbours without a Map or an array per edge.
     var segA = [], segB = [];
-    var first = new Int32Array(2 * nx * ny).fill(-1), second = new Int32Array(2 * nx * ny).fill(-1);
-    function link(e, s) { if (first[e] < 0) first[e] = s; else second[e] = s; }
+    var first = scratchBuf('first', Int32Array, 2 * nx * ny), second = scratchBuf('second', Int32Array, 2 * nx * ny);
+    var stamp = scratchBuf('stamp', Int32Array, 2 * nx * ny);
+    if (++scratch.gen > 0x7ffffff0) { stamp.fill(0); scratch.gen = 1; }
+    var gen = scratch.gen;
+    function link(e, s) {
+      if (stamp[e] !== gen) { stamp[e] = gen; first[e] = s; second[e] = -1; } else second[e] = s;
+    }
+    // The id of side 0 bottom, 1 right, 2 top or 3 left of the cell whose
+    // bottom-left vertex is v.
+    function edgeId(v, side) {
+      return side === 0 ? 2 * v : side === 1 ? 2 * (v + 1) + 1 : side === 2 ? 2 * (v + nx) : 2 * v + 1;
+    }
     function addSeg(e1, e2) {
       var s = segA.length;
       segA.push(e1); segB.push(e2);
       link(e1, s); link(e2, s);
     }
     for (var j = 0; j < ny - 1; j++) {
-      for (var i = 0; i < nx - 1; i++) {
+      var lo = Math.max(0, Math.min(rowLo[j], rowLo[j + 1]) - 1), hi = Math.min(nx - 2, Math.max(rowHi[j], rowHi[j + 1]));
+      for (var i = lo; i <= hi; i++) {
         var v = j * nx + i;
         var bl = field[v], br = field[v + 1], tr = field[v + nx + 1], tl = field[v + nx];
-        var c = (bl < r2 ? 1 : 0) | (br < r2 ? 2 : 0) | (tr < r2 ? 4 : 0) | (tl < r2 ? 8 : 0);
+        var c = (bl < 1 ? 1 : 0) | (br < 1 ? 2 : 0) | (tr < 1 ? 4 : 0) | (tl < 1 ? 8 : 0);
         if (c === 0 || c === 15) continue;
-        var edges = [2 * v, 2 * (v + 1) + 1, 2 * (v + nx), 2 * v + 1];
         var pairs = CASES[c];
         if (!pairs) {
-          var centreIn = (Math.sqrt(bl) + Math.sqrt(br) + Math.sqrt(tr) + Math.sqrt(tl)) / 4 < radiusM;
-          if (c === 5) pairs = centreIn ? [[0, 1], [2, 3]] : [[3, 0], [1, 2]];
-          else pairs = centreIn ? [[3, 0], [1, 2]] : [[0, 1], [2, 3]];
+          var centreIn = (bl + br + tr + tl) / 4 < 1;
+          pairs = c === 5 ? (centreIn ? SADDLE_A : SADDLE_B) : (centreIn ? SADDLE_B : SADDLE_A);
         }
-        for (var k = 0; k < pairs.length; k++) addSeg(edges[pairs[k][0]], edges[pairs[k][1]]);
+        for (var k = 0; k < pairs.length; k++) addSeg(edgeId(v, pairs[k][0]), edgeId(v, pairs[k][1]));
       }
     }
 
     // Join segments into closed rings. The grid border is outside every
-    // disc, so each contour edge is shared by exactly two segments.
+    // shape, so each contour edge is shared by exactly two segments.
     var used = new Uint8Array(segA.length);
     var rings = [];
     for (var s0 = 0; s0 < segA.length; s0++) {
@@ -247,6 +403,7 @@
       var guard = segA.length;
       while (cur !== start && guard-- > 0) {
         ring.push(edgePoint(cur));
+        if (stamp[cur] !== gen) break;
         var next = first[cur];
         if (next < 0 || used[next]) next = second[cur];
         if (next < 0 || used[next]) break;
@@ -260,19 +417,50 @@
     return rings;
   }
 
-  // contourRings returns the outline of every point's radius disc, merged:
+  // contourShapes returns the merged outline of reach shapes (see shapeFor):
   // an array of rings, each [[lat, lon], ...]. Holes come out as rings of
   // their own; Leaflet's evenodd fill draws them as holes.
+  function contourShapes(shapes) {
+    var ok = (shapes || []).filter(function (s) { return s && isFinite(s.lat) && isFinite(s.lon) && s.minExt > 0; });
+    if (!ok.length) return [];
+    var out = [];
+    clusters(ok).forEach(function (c) { Array.prototype.push.apply(out, clusterRings(c)); });
+    return out;
+  }
+
+  // contourRings is the circle case: every point reaches radiusM all round.
   function contourRings(points, radiusM) {
     if (!(radiusM > 0)) return [];
-    var pts = [];
-    (points || []).forEach(function (p) { var ll = position(p); if (ll) pts.push(ll); });
-    if (!pts.length) return [];
-    var out = [];
-    clusters(pts, radiusM).forEach(function (c) {
-      Array.prototype.push.apply(out, clusterRings(c, radiusM));
+    var shapes = [];
+    (points || []).forEach(function (p) { if (position(p)) shapes.push(shapeFor(p, null, radiusM)); });
+    return contourShapes(shapes);
+  }
+
+  // ── Hit testing ──────────────────────────────────────────────────────────
+
+  function ringsBounds(rings) {
+    var b = [Infinity, Infinity, -Infinity, -Infinity];
+    rings.forEach(function (r) {
+      r.forEach(function (p) {
+        if (p[0] < b[0]) b[0] = p[0]; if (p[1] < b[1]) b[1] = p[1];
+        if (p[0] > b[2]) b[2] = p[0]; if (p[1] > b[3]) b[3] = p[1];
+      });
     });
-    return out;
+    return b;
+  }
+
+  // inRings is an even-odd point-in-polygon test over all rings, so a point
+  // in a hole is outside, matching how Leaflet fills them.
+  function inRings(rings, lat, lon) {
+    var inside = false;
+    for (var r = 0; r < rings.length; r++) {
+      var ring = rings[r];
+      for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        var a = ring[i], b = ring[j];
+        if ((a[0] > lat) !== (b[0] > lat) && lon < (b[1] - a[1]) * (lat - a[0]) / (b[0] - a[0]) + a[1]) inside = !inside;
+      }
+    }
+    return inside;
   }
 
   // ── Pulse ────────────────────────────────────────────────────────────────
@@ -303,137 +491,320 @@
 
   // ── Overlay ──────────────────────────────────────────────────────────────
 
-  function signature(members) {
-    return members.map(function (n) { var p = position(n); return n.public_key + '@' + p[0] + ',' + p[1]; }).sort().join('|');
+  function shapeKey(n, s) {
+    return n.public_key + '@' + s.lat + ',' + s.lon + ':' + Array.prototype.map.call(s.ext, Math.round).join(',');
   }
 
   function plural(n) { return n + (n === 1 ? ' node' : ' nodes'); }
 
-  // createOverlay owns the layer, the cache and the pulses for one Leaflet
-  // map. opts: radiusM, pulseMs, and setTimeout/clearTimeout for tests.
-  //   setNodes(nodes)  new node list; recomputes changed scopes when visible
-  //   setVisible(bool) adds or removes the layer; computes lazily
-  //   setOnly(scope)   draw one scope ('' = all)
-  //   pulse(scope)     briefly highlight one scope (live page)
-  //   destroy()        cancel pending pulses
+  function setClass(polys, cls, on) {
+    polys.forEach(function (p) {
+      var el = p.getElement && p.getElement();
+      if (el) el.classList[on ? 'add' : 'remove'](cls);
+    });
+  }
+
+  // createOverlay owns the layer, the cache, hover and the pulses for one
+  // Leaflet map. opts: floorM, pulseMs, loadLinks (() => Promise of neighbor
+  // graph edges), and setTimeout/clearTimeout/raf for tests.
+  //   setNodes(nodes)   new node list; recomputes changed scopes when visible
+  //   setLinks(edges)   neighbor graph edges the reach shapes follow
+  //   setVisible(bool)  adds or removes the layer; computes lazily
+  //   setOnly(scope)    draw one scope ('' = all)
+  //   setHidden(names)  scopes not to draw
+  //   scopes()          [{ scope, colour, observed, declared, hidden }]
+  //   onChange(fn)      called after each render; returns an unsubscribe
+  //   pulse(scope)      briefly highlight one scope (live page)
+  //   destroy()         drop listeners and pending work
   function createOverlay(L, map, opts) {
     opts = opts || {};
-    var radiusM = opts.radiusM || DEFAULT_RADIUS_M;
+    var floorM = opts.floorM || DEFAULT_FLOOR_M;
+    var raf = opts.raf || (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : function (fn) { return setTimeout(fn, 16); });
     if (!map.getPane(PANE)) map.createPane(PANE).style.zIndex = String(PANE_Z);
     // Its own SVG renderer: the live map prefers canvas, which would ignore
-    // the className the colours and pulse are styled through.
+    // the className the colours, hover and pulse are styled through.
     var renderer = L.svg({ pane: PANE });
     var layer = L.layerGroup();
+    var tip = L.tooltip({ direction: 'top', offset: [0, -10], className: 'mc-scope-tip', opacity: 1 });
     var nodes = [];
+    var links = null;
+    var extents = null; // linkExtents(nodes, links), rebuilt when either changes
+    var shapes = new Map(); // pubkey → { shape, key }, rebuilt with extents
     var visible = false;
     var only = '';
+    var hidden = new Set();
     var cache = new Map(); // scope|kind → { sig, rings }
     var drawn = new Map(); // scope → [polygon]
+    var hits = [];         // [{ scope, polys, rings, bounds, text }] for hover
+    var list = [];
+    var listeners = [];
     var computed = 0;
+    var linksSeq = 0;
+    var hovered = [];
+    var moveAt = null, moveQueued = false;
     var pulser = createPulser({
       durationMs: opts.pulseMs, setTimeout: opts.setTimeout, clearTimeout: opts.clearTimeout,
-      onStart: function (s) { setPulsing(s, true); },
-      onEnd: function (s) { setPulsing(s, false); },
+      onStart: function (s) { setClass(drawn.get(s) || [], 'is-pulsing', true); },
+      onEnd: function (s) { setClass(drawn.get(s) || [], 'is-pulsing', false); },
     });
 
-    function setPulsing(scope, on) {
-      (drawn.get(scope) || []).forEach(function (p) {
-        var el = p.getElement && p.getElement();
-        if (el) el.classList[on ? 'add' : 'remove']('is-pulsing');
-      });
+    // A node in several scopes is shaped once.
+    function shaped(n) {
+      var e = shapes.get(n.public_key);
+      if (!e) {
+        var s = shapeFor(n, extents, floorM);
+        e = { shape: s, key: shapeKey(n, s) };
+        shapes.set(n.public_key, e);
+      }
+      return e;
     }
 
     function rings(scope, kind, members) {
+      var entries = members.map(shaped);
       var key = scope + '|' + kind;
-      var sig = signature(members);
+      var sig = entries.map(function (e) { return e.key; }).sort().join('|');
       var hit = cache.get(key);
       if (hit && hit.sig === sig) return hit.rings;
       computed++;
-      var r = contourRings(members, radiusM);
+      var r = contourShapes(entries.map(function (e) { return e.shape; }));
       cache.set(key, { sig: sig, rings: r });
       return r;
     }
 
+    function draw(scope, kind, members, text) {
+      var r = rings(scope, kind, members);
+      if (!r.length) return null;
+      var poly = L.polygon(r, { pane: PANE, renderer: renderer, interactive: false,
+        className: 'mc-scope-area mc-scope-area-' + kind + ' mc-reach-c' + colorIndex(scope) });
+      layer.addLayer(poly);
+      hits.push({ scope: scope, polys: [poly], rings: r, bounds: ringsBounds(r), text: text });
+      return poly;
+    }
+
     function render() {
+      clearHover();
       layer.clearLayers();
       drawn = new Map();
-      if (!visible) return;
-      var groups = groupNodesByScope(nodes);
+      hits = [];
+      var groups = visible ? groupNodesByScope(nodes) : new Map();
+      if (visible && !extents) { extents = linkExtents(nodes, links); shapes = new Map(); }
       var live = new Set();
       var want = normRegion(only);
+      list = [];
       groups.forEach(function (g, scope) {
-        [['observed', g.observed], ['declared', g.declaredOnly]].forEach(function (kv) {
-          if (kv[1].length) live.add(scope + '|' + kv[0]);
-        });
-        if (want && scope !== want) return;
+        list.push({ scope: scope, colour: colorIndex(scope), observed: g.observed.length, declared: g.declaredOnly.length, hidden: hidden.has(scope) });
+        if (g.observed.length) live.add(scope + '|observed');
+        if (g.declaredOnly.length) live.add(scope + '|declared');
+        if ((want && scope !== want) || hidden.has(scope)) return;
         var name = '#' + escapeHtml(scope);
-        var colour = ' mc-reach-c' + colorIndex(scope);
         var polys = [];
         if (g.observed.length) {
-          var ro = rings(scope, 'observed', g.observed);
-          if (ro.length) {
-            polys.push(L.polygon(ro, { pane: PANE, renderer: renderer, className: 'mc-scope-area mc-scope-area-observed' + colour })
-              .bindTooltip(name + ' · carried by ' + plural(g.observed.length), { sticky: true }));
-          }
+          var po = draw(scope, 'observed', g.observed, name + ' · carried by ' + plural(g.observed.length));
+          if (po) polys.push(po);
         }
         if (g.declaredOnly.length) {
-          var rd = rings(scope, 'declared', g.declaredOnly);
-          if (rd.length) {
-            polys.push(L.polygon(rd, { pane: PANE, renderer: renderer, className: 'mc-scope-area mc-scope-area-declared' + colour })
-              .bindTooltip(name + ' · declared by ' + plural(g.declaredOnly.length) + ', not yet seen carrying it', { sticky: true }));
-          }
+          var pd = draw(scope, 'declared', g.declaredOnly, name + ' · declared by ' + plural(g.declaredOnly.length) + ', not yet seen carrying it');
+          if (pd) polys.push(pd);
         }
-        polys.forEach(function (p) { layer.addLayer(p); });
         if (polys.length) drawn.set(scope, polys);
       });
+      list.sort(function (a, b) { return a.scope < b.scope ? -1 : (a.scope > b.scope ? 1 : 0); });
       // Bounded by the scopes in the current node list: a scope that left it
       // leaves the cache too.
-      Array.from(cache.keys()).forEach(function (k) { if (!live.has(k)) cache.delete(k); });
+      if (visible) Array.from(cache.keys()).forEach(function (k) { if (!live.has(k)) cache.delete(k); });
+      listeners.forEach(function (fn) { fn(list, visible); });
     }
+
+    function refreshLinks() {
+      if (!visible || !opts.loadLinks) return;
+      var seq = ++linksSeq;
+      Promise.resolve(opts.loadLinks()).then(function (edges) {
+        if (seq !== linksSeq) return;
+        links = Array.isArray(edges) ? edges : [];
+        extents = null;
+        render();
+      }, function () { /* keep the floor shapes; the next reload retries */ });
+    }
+
+    // ── hover ──
+    function clearHover() {
+      setClass(hovered, 'is-hovered', false);
+      hovered = [];
+      if (map.hasLayer && map.hasLayer(tip)) map.closeTooltip(tip);
+    }
+    function hoverAt(ll) {
+      var lat = ll.lat, lon = ll.lng;
+      var found = [];
+      for (var i = 0; i < hits.length; i++) {
+        var h = hits[i], b = h.bounds;
+        if (lat < b[0] || lat > b[2] || lon < b[1] || lon > b[3]) continue;
+        if (inRings(h.rings, lat, lon)) found.push(h);
+      }
+      clearHover();
+      if (!found.length) return;
+      found.forEach(function (h) { hovered = hovered.concat(h.polys); });
+      setClass(hovered, 'is-hovered', true);
+      tip.setLatLng(ll);
+      tip.setContent(found.map(function (h) { return h.text; }).join('<br>'));
+      map.openTooltip(tip);
+    }
+    function onMove(e) {
+      if (!visible || !hits.length) return;
+      moveAt = e.latlng;
+      if (moveQueued) return;
+      moveQueued = true;
+      raf(function () { moveQueued = false; if (moveAt && visible) hoverAt(moveAt); });
+    }
+    function onOut() { moveAt = null; clearHover(); }
+    map.on('mousemove', onMove);
+    map.on('mouseout', onOut);
 
     return {
       layer: layer,
-      setNodes: function (list) { nodes = list || []; render(); },
+      setNodes: function (l) { nodes = l || []; extents = null; render(); refreshLinks(); },
+      setLinks: function (edges) { linksSeq++; links = edges || []; extents = null; render(); },
       setVisible: function (v) {
         visible = !!v;
         if (visible) { if (!map.hasLayer(layer)) layer.addTo(map); }
         else { pulser.cancelAll(); if (map.hasLayer(layer)) map.removeLayer(layer); }
         render();
+        if (visible && links === null) refreshLinks();
       },
       setOnly: function (scope) { only = scope || ''; render(); },
+      setHidden: function (names) {
+        hidden = new Set(Array.from(names || []).map(normRegion).filter(Boolean));
+        render();
+      },
+      hidden: function () { return Array.from(hidden); },
+      scopes: function () { return list.slice(); },
+      isVisible: function () { return visible; },
+      onChange: function (fn) {
+        listeners.push(fn);
+        return function () { listeners = listeners.filter(function (f) { return f !== fn; }); };
+      },
       pulse: function (scope) { if (visible && drawn.has(normRegion(scope))) pulser.pulse(scope); },
-      destroy: function () { pulser.cancelAll(); },
+      destroy: function () {
+        pulser.cancelAll(); clearHover(); listeners = [];
+        map.off('mousemove', onMove); map.off('mouseout', onOut);
+      },
       stats: function () { return { computed: computed, cached: cache.size }; },
     };
   }
 
-  // ── Deep link ────────────────────────────────────────────────────────────
+  // ── Deep link and stored choice ──────────────────────────────────────────
+
+  function hashParam(hash, key) {
+    var qs = String(hash || '').split('?')[1] || '';
+    return new URLSearchParams(qs).get(key);
+  }
 
   // hashFlag reads ?contours= from a hash: true for '1', false for '0', null
   // when absent, so the caller falls back to its stored preference.
   function hashFlag(hash) {
-    var qs = String(hash || '').split('?')[1] || '';
-    var v = new URLSearchParams(qs).get('contours');
+    var v = hashParam(hash, 'contours');
     return v === '1' ? true : (v === '0' ? false : null);
   }
 
-  // writeHashFlag puts the toggle in the URL without adding a history entry,
-  // so a shared link opens with the overlay as the sender had it.
-  function writeHashFlag(on) {
+  // hiddenFromHash reads ?contoursHide=a,b; null when absent.
+  function hiddenFromHash(hash) {
+    var v = hashParam(hash, 'contoursHide');
+    if (v == null) return null;
+    return v.split(',').map(normRegion).filter(Boolean);
+  }
+
+  // writeHash merges updates into the URL without adding a history entry, so
+  // a shared link opens with the overlay as the sender had it. '' or null
+  // removes a key.
+  function writeHash(updates) {
     if (!window.URLState) return;
-    var h = window.URLState.updateHashParams({ contours: on ? '1' : null }, location.hash);
+    var h = window.URLState.updateHashParams(updates, location.hash);
     if (h !== location.hash) history.replaceState(null, '', h);
+  }
+
+  function writeHashFlag(on) { writeHash({ contours: on ? '1' : null }); }
+
+  // initialHidden: the URL wins, then the stored choice, shared by the map
+  // and live pages.
+  function initialHidden(store) {
+    var fromHash = hiddenFromHash(location.hash);
+    if (fromHash) return fromHash;
+    try {
+      var v = JSON.parse(store.getItem(HIDDEN_KEY) || '[]');
+      return Array.isArray(v) ? v.map(normRegion).filter(Boolean) : [];
+    } catch (e) { return []; }
+  }
+
+  // ── Scope list ───────────────────────────────────────────────────────────
+
+  function listHtml(items, opts) {
+    var rows = items.map(function (it) {
+      var name = escapeHtml(it.scope);
+      var count = it.observed ? String(it.observed) : it.declared + ' declared';
+      var title = it.observed
+        ? '#' + name + ': carried by ' + plural(it.observed) + (it.declared ? ', declared by ' + it.declared + ' more' : '')
+        : '#' + name + ': declared by ' + plural(it.declared) + ', not yet seen carrying it';
+      return '<label class="mc-scope-row" title="' + title + '">' +
+        '<input type="checkbox" data-scope="' + name + '"' + (it.hidden ? '' : ' checked') + '> ' +
+        '<span class="mc-scope-swatch mc-reach-c' + it.colour + (it.observed ? '' : ' mc-scope-swatch--declared') + '" aria-hidden="true"></span> ' +
+        '#' + name + ' <span class="mc-scope-count">' + count + '</span></label>';
+    }).join('');
+    return (opts.titleHtml || '') +
+      '<div class="filter-group mc-scope-list-actions"><button type="button" class="btn" data-scope-all>All</button> ' +
+      '<button type="button" class="btn" data-scope-none>None</button></div>' +
+      rows +
+      '<div class="mc-scope-hint">Outlines follow each repeater\'s proven links; ' + (DEFAULT_FLOOR_M / 1000) + ' km where it has none.</div>';
+  }
+
+  // mountScopeList renders a show/hide row per scope into el and keeps it in
+  // step with the overlay. The choice is stored and written to the URL.
+  // opts: titleHtml (heading above the rows), storage (defaults to
+  // localStorage). Returns an unsubscribe.
+  function mountScopeList(el, overlay, opts) {
+    opts = opts || {};
+    var store = opts.storage || localStorage;
+    overlay.setHidden(initialHidden(store));
+    function save(names) {
+      overlay.setHidden(names);
+      try { store.setItem(HIDDEN_KEY, JSON.stringify(overlay.hidden())); } catch (e) { /* private mode */ }
+      writeHash({ contoursHide: overlay.hidden().join(',') || null });
+    }
+    function paint(items, visible) {
+      el.hidden = !(visible && items.length);
+      el.innerHTML = el.hidden ? '' : listHtml(items, opts);
+    }
+    el.addEventListener('change', function (e) {
+      var t = e.target, s = t && t.getAttribute && t.getAttribute('data-scope');
+      if (s == null) return;
+      var h = new Set(overlay.hidden());
+      if (t.checked) h.delete(normRegion(s)); else h.add(normRegion(s));
+      save(h);
+    });
+    el.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t || !t.hasAttribute) return;
+      if (t.hasAttribute('data-scope-all')) save([]);
+      else if (t.hasAttribute('data-scope-none')) save(overlay.scopes().map(function (it) { return it.scope; }));
+    });
+    var off = overlay.onChange(paint);
+    paint(overlay.scopes(), overlay.isVisible());
+    return off;
   }
 
   window.ScopeContours = {
     hashFlag: hashFlag,
+    hiddenFromHash: hiddenFromHash,
     writeHashFlag: writeHashFlag,
     normRegion: normRegion,
     nodeRegionEvidence: nodeRegionEvidence,
     groupNodesByScope: groupNodesByScope,
+    linkExtents: linkExtents,
+    shapeFor: shapeFor,
+    contourShapes: contourShapes,
     contourRings: contourRings,
+    inRings: inRings,
     colorIndex: colorIndex,
     createPulser: createPulser,
     createOverlay: createOverlay,
+    mountScopeList: mountScopeList,
   };
 })();

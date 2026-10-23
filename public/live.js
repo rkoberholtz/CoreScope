@@ -1366,6 +1366,7 @@
             <li><span class="live-ring live-ring--repeater" aria-hidden="true"></span> Bright white ring — repeater</li>
             <li><span class="live-ring live-ring--other" aria-hidden="true"></span> Faded ring — companion / sensor / room</li>
           </ul>
+          <div id="liveScopeList" class="mc-scope-list" hidden></div>
           </div>
         </div>
 
@@ -1702,7 +1703,13 @@
     animLayer = L.layerGroup({ pane: 'liveAnimPane' }).addTo(map);
     clickablePathsLayer = L.layerGroup().addTo(map);
     if (window.ScopeContours) {
-      reachOverlay = window.ScopeContours.createOverlay(L, map, {});
+      // Same link-based reach as the map page, through the same cached call.
+      reachOverlay = window.ScopeContours.createOverlay(L, map, {
+        loadLinks: () => api('/analytics/neighbor-graph', { ttl: CLIENT_TTL.analyticsRF }).then(d => (d && d.edges) || []),
+      });
+      window.ScopeContours.mountScopeList(document.getElementById('liveScopeList'), reachOverlay, {
+        titleHtml: '<h3 class="legend-title" style="margin-top:8px">REGION SCOPES</h3>',
+      });
       reachOverlay.setVisible(scopeContoursOn);
     }
 

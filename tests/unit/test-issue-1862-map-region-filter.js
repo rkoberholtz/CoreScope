@@ -316,14 +316,16 @@ async function makePage(opts) {
   L.layerGroup = group;
   L.markerClusterGroup = group;
   L.tileLayer = () => ({ addTo() { return this; }, setUrl() {}, options: {} });
-  // The reach-contour overlay (scope-contours.js) makes its own pane and SVG
-  // renderer at init.
+  // The reach-contour overlay (scope-contours.js) makes its own pane, SVG
+  // renderer and hover tooltip at init.
   L.svg = () => ({});
+  L.tooltip = () => ({ setLatLng() { return this; }, setContent() { return this; } });
   L.map = () => {
     const panes = {};
     return {
-      setView() { return this; }, on() {}, invalidateSize() {}, getCenter() { return { lat: 0, lng: 0 }; }, getZoom() { return 9; },
+      setView() { return this; }, on() {}, off() {}, invalidateSize() {}, getCenter() { return { lat: 0, lng: 0 }; }, getZoom() { return 9; },
       hasLayer() { return false; }, addLayer() {}, removeLayer() {}, fitBounds() {}, remove() {},
+      openTooltip() {}, closeTooltip() {},
       createPane(n) { panes[n] = { style: {} }; return panes[n]; }, getPane(n) { return panes[n]; },
     };
   };

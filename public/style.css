@@ -5897,14 +5897,28 @@ body.embed #app.app-fixed {
 path.mc-scope-area { stroke: var(--mc-reach-colour); fill: var(--mc-reach-colour); stroke-width: 2; stroke-opacity: .85; fill-opacity: .12; transition: fill-opacity .25s ease-out, stroke-width .25s ease-out; }
 path.mc-scope-area-declared { stroke-width: 1.5; stroke-dasharray: 6 5; fill-opacity: .04; }
 path.mc-scope-area.is-pulsing { stroke-width: 3.5; stroke-opacity: 1; fill-opacity: .3; }
-path.mc-reach-c1 { --mc-reach-colour: var(--mc-reach-1); }
-path.mc-reach-c2 { --mc-reach-colour: var(--mc-reach-2); }
-path.mc-reach-c3 { --mc-reach-colour: var(--mc-reach-3); }
-path.mc-reach-c4 { --mc-reach-colour: var(--mc-reach-4); }
-path.mc-reach-c5 { --mc-reach-colour: var(--mc-reach-5); }
-path.mc-reach-c6 { --mc-reach-colour: var(--mc-reach-6); }
-path.mc-reach-c7 { --mc-reach-colour: var(--mc-reach-7); }
-path.mc-reach-c8 { --mc-reach-colour: var(--mc-reach-8); }
+path.mc-scope-area.is-hovered { stroke-width: 3; stroke-opacity: 1; fill-opacity: .2; }
+/* One tooltip for every scope under the cursor (hit-tested in JS, since the
+ * outlines take no pointer events). */
+.leaflet-tooltip.mc-scope-tip { font-size: 12px; line-height: 1.45; }
+/* Show/hide list: under Reach contours on the map, in the legend on live. */
+.mc-scope-list { margin: 4px 0 0 20px; font-size: 12px; }
+.mc-scope-list[hidden] { display: none; }
+.live-legend .mc-scope-list { margin-left: 0; }
+.mc-scope-list-actions { margin: 2px 0 4px; }
+.mc-scope-row { display: flex; align-items: center; gap: 6px; padding: 1px 0; cursor: pointer; }
+.mc-scope-swatch { display: inline-block; flex: none; width: 12px; height: 12px; border-radius: 3px; border: 2px solid var(--mc-reach-colour); background: color-mix(in srgb, var(--mc-reach-colour) 35%, transparent); }
+.mc-scope-swatch--declared { border-style: dashed; background: transparent; }
+.mc-scope-count { margin-left: auto; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.mc-scope-hint { margin-top: 4px; font-size: 11px; color: var(--text-muted); }
+.mc-reach-c1 { --mc-reach-colour: var(--mc-reach-1); }
+.mc-reach-c2 { --mc-reach-colour: var(--mc-reach-2); }
+.mc-reach-c3 { --mc-reach-colour: var(--mc-reach-3); }
+.mc-reach-c4 { --mc-reach-colour: var(--mc-reach-4); }
+.mc-reach-c5 { --mc-reach-colour: var(--mc-reach-5); }
+.mc-reach-c6 { --mc-reach-colour: var(--mc-reach-6); }
+.mc-reach-c7 { --mc-reach-colour: var(--mc-reach-7); }
+.mc-reach-c8 { --mc-reach-colour: var(--mc-reach-8); }
 @media (prefers-reduced-motion: reduce) { path.mc-scope-area { transition: none; } }
 
 /* Self-reported repeaters (reported-nodes.js): no advert, name only. */
