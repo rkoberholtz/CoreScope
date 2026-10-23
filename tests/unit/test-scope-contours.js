@@ -128,21 +128,46 @@ test('nodeRegionEvidence reports declared and observed separately', () => {
   assert.deepStrictEqual(JSON.parse(JSON.stringify(SC.nodeRegionEvidence(OBS, 'li'))), { declared: false, observed: false });
 });
 
-test('groups by scope: observed wins, declared-only kept apart, unplaced dropped', () => {
+test('groups by scope: observed wins, configured-only kept apart, unplaced dropped', () => {
   const g = SC.groupNodesByScope([OBS, BOTH, DECL, UNPLACED, ZERO, NONE, null]);
   // Arrays built in the vm realm: compare plain copies.
   const keys = g2 => JSON.parse(JSON.stringify(g2.map(n => n.public_key)));
   assert.deepStrictEqual(Array.from(g.keys()).sort(), ['li', 'ny', 'nyc']);
   assert.deepStrictEqual(keys(g.get('nyc').observed), ['aa', 'bb']);
-  assert.deepStrictEqual(keys(g.get('nyc').declaredOnly), ['cc']);
+  assert.deepStrictEqual(keys(g.get('nyc').configuredOnly), ['cc']);
   assert.deepStrictEqual(keys(g.get('li').observed), []);
-  assert.deepStrictEqual(keys(g.get('li').declaredOnly), ['cc']);
+  assert.deepStrictEqual(keys(g.get('li').configuredOnly), ['cc']);
 });
 
 test('a node listing a scope twice counts once', () => {
   const g = SC.groupNodesByScope([{ public_key: 'x', lat: 1, lon: 1, transported_scopes: ['#a', 'a'], declared_regions: ['a', 'a'] }]);
   assert.strictEqual(g.get('a').observed.length, 1);
-  assert.strictEqual(g.get('a').declaredOnly.length, 0);
+  assert.strictEqual(g.get('a').configuredOnly.length, 0);
+});
+
+test('configuredScopes reads default_scope, configured_scope and declared_regions, and says which', () => {
+  const m = SC.configuredScopes({ default_scope: '#phl', configured_scope: '#phl, #us-pa,*,,us', declared_regions: ['us', 'nj'] });
+  const plainMap = JSON.parse(JSON.stringify(Array.from(m)));
+  assert.deepStrictEqual(plainMap, [
+    ['phl', { default: true, allowed: true, declared: false }],
+    ['us-pa', { default: false, allowed: true, declared: false }],
+    ['us', { default: false, allowed: true, declared: true }],
+    ['nj', { default: false, allowed: false, declared: true }],
+  ]);
+  assert.strictEqual(SC.configuredScopes({}).size, 0);
+  assert.strictEqual(SC.configuredScopes(null).size, 0);
+});
+
+test('a node configured by default_scope or configured_scope draws dashed unless it carries the scope', () => {
+  const g = SC.groupNodesByScope([
+    { public_key: 'd1', lat: 1, lon: 1, default_scope: '#phl' },
+    { public_key: 'd2', lat: 1, lon: 2, configured_scope: '#phl,#nj' },
+    { public_key: 'd3', lat: 1, lon: 3, default_scope: '#phl', transported_scopes: ['#phl'] },
+  ]);
+  const keys = g2 => JSON.parse(JSON.stringify(g2.map(n => n.public_key)));
+  assert.deepStrictEqual(keys(g.get('phl').configuredOnly), ['d1', 'd2']);
+  assert.deepStrictEqual(keys(g.get('phl').observed), ['d3']);
+  assert.deepStrictEqual(keys(g.get('nj').configuredOnly), ['d2']);
 });
 
 test('colorIndex is stable and in 1..8', () => {
@@ -248,7 +273,7 @@ const FAR = Object.assign({ public_key: 'f1' }, offset(40.0, -75.3, -30000, 0));
 const plain = (m) => JSON.parse(JSON.stringify(Array.from(m)));
 
 test('a link sets the reach of both ends, in the sector it points to', () => {
-  const ex = SC.linkExtents([HOME, EAST], [{ source: 'h0', target: 'e1', weight: 9 }]);
+  const ex = SC.linkExtents([HOME, EAST], [{ source: 'h0', target: 'e1', bidirectional: true }]);
   const h = plain(ex.get('h0')), e = plain(ex.get('e1'));
   assert.ok(Math.abs(h[4] - 22000) < 200, 'home east sector ' + h[4]);   // 90° = sector 4, ×1.1 margin
   assert.ok(Math.abs(e[12] - 22000) < 200, 'east node west sector ' + e[12]);
@@ -257,18 +282,23 @@ test('a link sets the reach of both ends, in the sector it points to', () => {
 
 test('ambiguous links, self links and links to unplaced nodes are ignored', () => {
   const ex = SC.linkExtents([HOME, EAST, { public_key: 'u1' }], [
-    { source: 'h0', target: 'e1', ambiguous: true },
-    { source: 'h0', target: 'h0' },
-    { source: 'h0', target: 'u1' },
-    { source: 'h0', target: 'missing' },
+    { source: 'h0', target: 'e1', bidirectional: true, ambiguous: true },
+    { source: 'h0', target: 'h0', bidirectional: true },
+    { source: 'h0', target: 'u1', bidirectional: true },
+    { source: 'h0', target: 'missing', bidirectional: true },
     null,
   ]);
   assert.strictEqual(ex.size, 0, 'extents for ' + Array.from(ex.keys()));
 });
 
+test('a one-way link proves nothing: only bidirectional links count', () => {
+  const ex = SC.linkExtents([HOME, EAST], [{ source: 'h0', target: 'e1', bidirectional: false }, { source: 'e1', target: 'h0' }]);
+  assert.strictEqual(ex.size, 0, 'extents for ' + Array.from(ex.keys()));
+});
+
 test('the farthest link in a sector wins', () => {
   const near = Object.assign({ public_key: 'e2' }, offset(40.0, -75.3, 5000, 0));
-  const ex = SC.linkExtents([HOME, EAST, near], [{ source: 'h0', target: 'e2' }, { source: 'e1', target: 'h0' }]);
+  const ex = SC.linkExtents([HOME, EAST, near], [{ source: 'h0', target: 'e2', bidirectional: true }, { source: 'e1', target: 'h0', bidirectional: true }]);
   assert.ok(Math.abs(plain(ex.get('h0'))[4] - 22000) < 200);
 });
 
@@ -282,7 +312,7 @@ test('a node with no links is a floor circle', () => {
 });
 
 test('the outline follows the links: a long lobe toward them, the floor elsewhere', () => {
-  const ex = SC.linkExtents([HOME, EAST, NORTH], [{ source: 'h0', target: 'e1' }, { source: 'h0', target: 'n1' }]);
+  const ex = SC.linkExtents([HOME, EAST, NORTH], [{ source: 'h0', target: 'e1', bidirectional: true }, { source: 'h0', target: 'n1', bidirectional: true }]);
   const rings = SC.contourShapes([SC.shapeFor(HOME, ex, 1500)]);
   assert.strictEqual(rings.length, 1);
   const east = reachToward(rings, HOME, 90), north = reachToward(rings, HOME, 0), west = reachToward(rings, HOME, 270), south = reachToward(rings, HOME, 180);
@@ -293,7 +323,7 @@ test('the outline follows the links: a long lobe toward them, the floor elsewher
 });
 
 test('linked nodes sit inside the outline they extend', () => {
-  const ex = SC.linkExtents([HOME, EAST, FAR], [{ source: 'h0', target: 'e1' }, { source: 'h0', target: 'f1' }]);
+  const ex = SC.linkExtents([HOME, EAST, FAR], [{ source: 'h0', target: 'e1', bidirectional: true }, { source: 'h0', target: 'f1', bidirectional: true }]);
   const rings = SC.contourShapes([HOME, EAST, FAR].map(n => SC.shapeFor(n, ex, 1500)));
   for (const n of [HOME, EAST, FAR]) assert.ok(SC.inRings(rings, n.lat, n.lon), n.public_key + ' outside its own outline');
   assert.strictEqual(rings.length, 1, 'linked shapes merge into one outline');
@@ -332,6 +362,11 @@ function fakeLeaflet() {
       rec.polygons.push(p);
       return p;
     },
+    popup(opts) {
+      rec.popup = { options: opts, _onMap: false, content: '', setLatLng(ll) { this.latlng = ll; return this; }, setContent(c) { this.content = c; return this; },
+        openOn() { this._onMap = true; return this; } };
+      return rec.popup;
+    },
     tooltip(opts) {
       rec.tip = { options: opts, _onMap: false, content: '', setLatLng(ll) { this.latlng = ll; return this; }, setContent(c) { this.content = c; return this; } };
       return rec.tip;
@@ -344,6 +379,7 @@ function fakeLeaflet() {
     removeLayer(l) { l._onMap = false; return this; },
     openTooltip(t) { t._onMap = true; rec.tipOpen = true; return this; },
     closeTooltip(t) { t._onMap = false; rec.tipOpen = false; return this; },
+    closePopup(p) { p._onMap = false; return this; },
     on(ev, fn) { (rec.handlers[ev] = rec.handlers[ev] || []).push(fn); },
     off(ev, fn) { rec.handlers[ev] = (rec.handlers[ev] || []).filter(f => f !== fn); },
     fire(ev, e) { (rec.handlers[ev] || []).forEach(f => f(e)); },
@@ -378,9 +414,9 @@ test('visible overlay draws non-interactive solid and dashed outlines in its own
   assert.ok(rec.panes.mcScopeContoursPane, 'pane created');
   assert.ok(Number(rec.panes.mcScopeContoursPane.style.zIndex) < 600, 'pane sits under the marker pane');
   assert.strictEqual(rec.renderers, 1, 'one SVG renderer, so CSS classes apply on canvas maps');
-  // observed: nyc, ny, ct; declared-only: nyc (a3), li (a3)
+  // observed: nyc, ny, ct; configured-only: nyc (a3), li (a3)
   assert.strictEqual(ofKind(rec, 'observed').length, 3);
-  assert.strictEqual(ofKind(rec, 'declared').length, 2);
+  assert.strictEqual(ofKind(rec, 'configured').length, 2);
   for (const p of rec.polygons) {
     assert.strictEqual(p.options.interactive, false, 'outlines must never take pointer events');
     assert.strictEqual(p.options.pane, 'mcScopeContoursPane');
@@ -398,7 +434,7 @@ test('scopes() lists every scope with its counts, sorted, and onChange reports i
   const list = JSON.parse(JSON.stringify(o.scopes()));
   assert.deepStrictEqual(list.map(s => s.scope), ['ct<script>', 'li', 'ny', 'nyc']);
   const nyc = list.find(s => s.scope === 'nyc');
-  assert.strictEqual(nyc.observed, 2); assert.strictEqual(nyc.declared, 1); assert.strictEqual(nyc.hidden, false);
+  assert.strictEqual(nyc.observed, 2); assert.strictEqual(nyc.configured, 1); assert.strictEqual(nyc.hidden, false);
   assert.deepStrictEqual(seen[seen.length - 1], [4, true]);
 });
 
@@ -413,7 +449,7 @@ test('links are loaded once shown, and change the shape', () => {
   assert.strictEqual(loads, 1);
   const before = ofKind(rec, 'observed').pop();
   assert.ok(reachToward(before.rings, HOME, 90) < 2000, 'floor circle before links arrive');
-  resolve([{ source: 'h0', target: 'e1' }]);
+  resolve([{ source: 'h0', target: 'e1', bidirectional: true }]);
   return Promise.resolve().then(() => Promise.resolve()).then(() => {
     const after = ofKind(rec, 'observed').pop();
     assert.ok(reachToward(after.rings, HOME, 90) > 18000, 'lobe after links arrive: ' + reachToward(after.rings, HOME, 90));
@@ -427,7 +463,7 @@ test('setOnly narrows to one scope, regardless of # spelling', () => {
   rec.polygons.length = 0;
   o.setOnly('#li');
   assert.strictEqual(rec.polygons.length, 1);
-  assert.ok(rec.polygons[0].options.className.includes('mc-scope-area-declared'));
+  assert.ok(rec.polygons[0].options.className.includes('mc-scope-area-configured'));
   o.setOnly('');
   assert.strictEqual(rec.polygons.length, 1 + 5);
 });
@@ -462,7 +498,7 @@ test('a new link recomputes only the scopes whose members it touches', () => {
   const o = SC.createOverlay(L, map, {});
   o.setVisible(true); o.setNodes(NODES); o.setLinks([]);
   const base = o.stats().computed;
-  o.setLinks([{ source: 'a4', target: 'a3' }]); // touches ct (a4 observed) and nyc/li declared (a3)
+  o.setLinks([{ source: 'a4', target: 'a3', bidirectional: true }]); // touches ct (a4 observed) and nyc/li configured (a3)
   assert.strictEqual(o.stats().computed, base + 3);
 });
 
@@ -550,6 +586,81 @@ test('destroy drops the map listeners', () => {
   assert.strictEqual((rec.handlers.mouseout || []).length, 0);
 });
 
+console.log('\n=== scope-contours.js: click popup ===');
+
+const POP_NODES = [
+  { public_key: 'p1', name: 'Treebeard', lat: 40.0, lon: -75.3, default_scope: '#phl', transported_scopes: ['#phl'] },
+  { public_key: 'p2', name: 'Amon <b>Sul</b>', lat: 40.001, lon: -75.301, default_scope: '#phl' },
+  { public_key: 'p3', name: 'Carrier', lat: 40.002, lon: -75.299, transported_scopes: ['#phl', '#philly'] },
+  { public_key: 'p4', name: 'Nowhere', configured_scope: '#phl' },
+  { public_key: 'p5', name: 'Other', lat: 41.0, lon: -74.0, default_scope: '#nj' },
+];
+
+test('clicking inside outlines lists each scope\'s repeaters with why they are there', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, sync);
+  o.setNodes(POP_NODES); o.setVisible(true);
+  map.fire('click', { latlng: { lat: 40.001, lng: -75.300 }, sourceTarget: map });
+  assert.ok(rec.popup && rec.popup._onMap, 'popup not opened');
+  const html = rec.popup.content;
+  assert.ok(/#phl<\/strong> <span class="mc-scope-pop-sum">3 configured · 2 carrying/.test(html), html);
+  assert.ok(/#philly<\/strong>/.test(html), 'overlapping #philly not listed');
+  assert.ok(!/#nj/.test(html), 'a scope not under the click is listed');
+  const phl = html.split('#philly')[0];
+  // Configured first (by name), then carrying-only.
+  const order = ['Amon', 'Nowhere', 'Treebeard', 'Carrier'].map(n => phl.indexOf(n));
+  assert.ok(order.every((v, i) => v > 0 && (i === 0 || v > order[i - 1])), 'order ' + order);
+  assert.ok(/Treebeard<\/a> <span class="mc-scope-tag"[^>]*>default<\/span><span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(html), 'Treebeard tags');
+  assert.ok(/Nowhere<\/a> <span class="mc-scope-tag"[^>]*>allowed<\/span><span class="mc-scope-tag"[^>]*>no position<\/span>/.test(html), 'unplaced node tags');
+  assert.ok(html.includes('href="#/nodes/p1"'), 'node link');
+  assert.ok(html.includes('Amon &lt;b&gt;Sul&lt;/b&gt;') && !html.includes('<b>Sul'), 'name not escaped');
+});
+
+test('a click on another layer, or outside every outline, opens nothing', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, sync);
+  o.setNodes(POP_NODES); o.setVisible(true);
+  map.fire('click', { latlng: { lat: 40.001, lng: -75.300 }, sourceTarget: { _isNodeMarker: true } });
+  assert.ok(!rec.popup._onMap, 'opened for a click that belongs to a node');
+  map.fire('click', { latlng: { lat: 10, lng: 10 }, sourceTarget: map });
+  assert.ok(!rec.popup._onMap, 'opened outside the outlines');
+});
+
+test('the popup pauses hover, and hiding the overlay closes it', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, sync);
+  o.setNodes(POP_NODES); o.setVisible(true);
+  map.fire('click', { latlng: { lat: 40.001, lng: -75.300 } });
+  assert.ok(rec.popup._onMap);
+  map.fire('mousemove', { latlng: { lat: 40.001, lng: -75.300 } });
+  assert.strictEqual(rec.tipOpen, false, 'hover tooltip over an open popup');
+  o.setVisible(false);
+  assert.ok(!rec.popup._onMap, 'popup left open on a hidden overlay');
+});
+
+// Regression: a click is a mousemove and then the click. The move queues a
+// hover for the next frame; when that frame runs the popup is already open,
+// and the tooltip must not be drawn over it.
+test('a hover queued just before a click does not draw over the popup', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const frames = [];
+  const o = SC.createOverlay(L, map, { raf: fn => frames.push(fn) });
+  o.setNodes(POP_NODES); o.setVisible(true);
+  map.fire('mousemove', { latlng: { lat: 40.001, lng: -75.300 } });
+  map.fire('click', { latlng: { lat: 40.001, lng: -75.300 }, sourceTarget: map });
+  assert.ok(rec.popup._onMap);
+  frames.forEach(fn => fn());
+  assert.strictEqual(rec.tipOpen, false, 'tooltip drawn over the popup');
+});
+
+test('the popup lists at most 50 rows per scope, then says how many more', () => {
+  const many = [];
+  for (let i = 0; i < 60; i++) many.push({ public_key: 'm' + i, name: 'R' + String(i).padStart(2, '0'), lat: 40.0, lon: -75.3 + i * 0.00001, default_scope: '#big' });
+  const html = SC.scopePopupHtml(['big'], many);
+  assert.strictEqual((html.match(/<li><a /g) || []).length, 50);
+  assert.ok(html.includes('+10 more'), 'no overflow line');
+});
+
 test('pulse marks the scope\'s drawn polygons and clears them after the duration', () => {
   const clock = fakeClock();
   const { L, map, rec } = fakeLeaflet();
@@ -612,7 +723,7 @@ test('the list shows a row per scope with its colour, escaped, only while visibl
   assert.strictEqual((el.innerHTML.match(/class="mc-scope-row"/g) || []).length, 4);
   assert.ok(el.innerHTML.includes('mc-reach-c' + SC.colorIndex('nyc')));
   assert.ok(el.innerHTML.includes('data-scope="ct&lt;script&gt;"') && !el.innerHTML.includes('<script>'), 'scope name not escaped');
-  assert.ok(/mc-scope-swatch--declared[^>]*><\/span> #li/.test(el.innerHTML), 'declared-only swatch not dashed');
+  assert.ok(/mc-scope-swatch--configured[^>]*><\/span> #li/.test(el.innerHTML), 'configured-only swatch not dashed');
 });
 
 test('unchecking a row hides the scope, stores it, and writes it to the URL', () => {
@@ -707,7 +818,7 @@ test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes compute in under
     const q = offset(a.lat, a.lon, km * 1000 * Math.sin(t), km * 1000 * Math.cos(t));
     const b = { public_key: 'x' + i, lat: q.lat, lon: q.lon };
     nodes.push(b);
-    edges.push({ source: a.public_key, target: b.public_key });
+    edges.push({ source: a.public_key, target: b.public_key, bidirectional: true });
   }
   const { L, map } = fakeLeaflet();
   // Warm-up run on a separate overlay so JIT compilation is not timed.

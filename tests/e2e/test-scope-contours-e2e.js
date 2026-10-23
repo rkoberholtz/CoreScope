@@ -3,9 +3,10 @@
  * pages.
  *
  * Each region scope gets an outline of the area its nodes are proven to reach,
- * following their direct links (the neighbor graph): solid for nodes seen
- * carrying its traffic (transported_scopes), dashed for nodes that only
- * declare it (declared_regions). The "Reach contours" toggle draws them,
+ * following their two-way links (the neighbor graph): solid for nodes seen
+ * carrying its traffic (transported_scopes), dashed for nodes configured for
+ * it (default_scope, configured_scope, declared_regions) but not carrying it.
+ * Clicking inside outlines lists each scope's repeaters. The "Reach contours" toggle draws them,
  * ?contours=1 deep-links them, the Region Scope picker narrows them to one
  * scope, a per-scope list shows and hides them (?contoursHide=), hovering
  * names every scope under the cursor on both pages (the live map draws
@@ -38,6 +39,7 @@ const NODES = [
   { public_key: pk('a2'), name: 'SF Two', role: 'repeater', lat: 37.79, lon: -122.40, last_seen: now, hash_size: 1, transported_scopes: ['#sf', '#bay'] },
   { public_key: pk('a3'), name: 'Oakland', role: 'repeater', lat: 37.80, lon: -122.27, last_seen: now, hash_size: 1, transported_scopes: ['#bay'] },
   { public_key: pk('a4'), name: 'San Jose', role: 'repeater', lat: 37.34, lon: -121.89, last_seen: now, hash_size: 1, declared_regions: ['south-bay'] },
+  { public_key: pk('a5'), name: 'SF Default', role: 'repeater', lat: 37.76, lon: -122.44, last_seen: now, hash_size: 1, default_scope: '#sf', transported_scopes: ['#sf'] },
 ];
 // One proven link: SF Two ↔ Oakland, about 11.6 km. #bay's outline follows
 // it into one lobed shape instead of two separate floor circles.
@@ -71,25 +73,29 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
 
   const areas = () => page.$$eval('path.mc-scope-area', (els) => els.map((el) => el.getAttribute('class')));
   const colourOf = (scope) => page.evaluate((s) => 'mc-reach-c' + window.ScopeContours.colorIndex(s), scope);
-  // A screen point inside every outline with one of these colour classes
-  // (and outside the others' holes), found with the SVG path's own fill
-  // test. The outlines take no pointer events, so elementsFromPoint cannot.
-  const pointInside = (classes) => page.evaluate((cls) => {
-    const paths = cls.map((c) => document.querySelector('path.mc-scope-area.' + c));
+  const outline = (scope) => 'path.mc-scope-area[data-scope="' + scope + '"]';
+  // A screen point well inside every listed scope's outline (and outside
+  // their holes): it and the points 4 px around it pass the SVG path's own
+  // fill test, since Leaflet simplifies the drawn path by about a pixel and
+  // the edge is where drawing and hit test may differ. The outlines take no
+  // pointer events, so elementsFromPoint cannot do this. Never on a node
+  // marker, whose clicks are the node's.
+  const pointInside = (scopes) => page.evaluate((list) => {
+    const paths = list.map((s) => document.querySelector('path.mc-scope-area[data-scope="' + s + '"]'));
     if (paths.some((p) => !p)) return null;
-    const inFill = (p, x, y) => {
-      const m = p.getScreenCTM().inverse();
-      const q = new DOMPoint(x, y).matrixTransform(m);
-      return p.isPointInFill(q);
-    };
+    const inFill = (p, x, y) => p.isPointInFill(new DOMPoint(x, y).matrixTransform(p.getScreenCTM().inverse()));
     const r = paths[0].getBoundingClientRect();
     for (let y = r.top + 1; y < r.bottom; y += 3) {
       for (let x = r.left + 1; x < r.right; x += 3) {
-        if (paths.every((p) => inFill(p, x, y))) return { x, y };
+        const around = [[0, 0], [4, 0], [-4, 0], [0, 4], [0, -4]];
+        if (!paths.every((p) => around.every(([dx, dy]) => inFill(p, x + dx, y + dy)))) continue;
+        const top = document.elementFromPoint(x, y);
+        if (top && top.closest('.leaflet-marker-icon')) continue;
+        return { x, y };
       }
     }
     return null;
-  }, classes);
+  }, scopes);
 
   await page.goto(BASE + '/#/map', { waitUntil: 'load', timeout: 60000 });
   await page.evaluate(() => {
@@ -108,14 +114,14 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     assert(graphCalls === 0, 'neighbor graph fetched while off: ' + graphCalls);
   });
 
-  await step('the toggle draws solid outlines for carried scopes and a dashed one for declared-only', async () => {
+  await step('the toggle draws solid outlines for carried scopes and a dashed one for configured-only', async () => {
     await page.click('#mcScopeContours');
     await page.waitForSelector('path.mc-scope-area');
     const cls = await areas();
     assert(cls.filter((c) => c.includes('mc-scope-area-observed')).length === 2, 'observed outlines: ' + cls.join(' | '));
-    assert(cls.filter((c) => c.includes('mc-scope-area-declared')).length === 1, 'declared outlines: ' + cls.join(' | '));
-    const dash = await page.$eval('path.mc-scope-area-declared', (el) => getComputedStyle(el).strokeDasharray);
-    assert(dash && dash !== 'none', 'declared-only outline is not dashed: ' + dash);
+    assert(cls.filter((c) => c.includes('mc-scope-area-configured')).length === 1, 'configured outlines: ' + cls.join(' | '));
+    const dash = await page.$eval('path.mc-scope-area-configured', (el) => getComputedStyle(el).strokeDasharray);
+    assert(dash && dash !== 'none', 'configured-only outline is not dashed: ' + dash);
     const stroke = await page.$eval('path.mc-scope-area-observed', (el) => getComputedStyle(el).stroke);
     assert(stroke && stroke !== 'none' && stroke !== 'rgb(51, 136, 255)', 'outline not coloured by its CSS variable: ' + stroke);
   });
@@ -124,14 +130,13 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     assert(graphCalls === 1, 'neighbor graph calls: ' + graphCalls);
     // SF Two and Oakland are linked: a point midway between them is inside
     // #bay's outline, which two 1.5 km floor circles would never reach.
-    const bay = await colourOf('bay');
-    const mid = await page.evaluate((c) => {
-      const p = document.querySelector('path.mc-scope-area.' + c);
+    const mid = await page.evaluate((sel) => {
+      const p = document.querySelector(sel);
       const m = window.__mc_map, pt = m.latLngToContainerPoint([37.795, -122.335]);
       const box = m.getContainer().getBoundingClientRect();
       const q = new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse());
       return p.isPointInFill(q);
-    }, bay);
+    }, outline('bay'));
     assert(mid, 'the #bay outline does not follow the SF Two - Oakland link');
   });
 
@@ -151,16 +156,39 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
   });
 
   await step('hovering names every scope under the cursor', async () => {
-    const sf = await colourOf('sf'), bay = await colourOf('bay');
-    const pt = await pointInside(sf === bay ? [sf] : [sf, bay]);
+    const pt = await pointInside(['sf', 'bay']);
     assert(pt, 'no point inside both #sf and #bay');
     await page.mouse.move(pt.x, pt.y);
     await page.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
     const text = await page.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent);
-    assert(/#sf · carried by 2 nodes/.test(text) && /#bay · carried by 2 nodes/.test(text), 'tooltip: ' + text);
+    assert(/#sf · carried by 3 nodes/.test(text) && /#bay · carried by 2 nodes/.test(text), 'tooltip: ' + text);
     assert((await page.$$('path.mc-scope-area.is-hovered')).length === 2, 'hovered outlines not highlighted');
     await page.mouse.move(5, 450);
     await page.waitForFunction(() => !document.querySelector('.leaflet-tooltip.mc-scope-tip'), null, { timeout: 3000 });
+  });
+
+  await step('clicking inside an outline lists that scope\'s repeaters, configured first', async () => {
+    const pt = await pointInside(['sf', 'bay']);
+    assert(pt, 'no point inside #sf and #bay');
+    await page.mouse.click(pt.x, pt.y);
+    await page.waitForSelector('.leaflet-popup.mc-scope-popup', { timeout: 3000 });
+    const text = await page.$eval('.mc-scope-popup', (el) => el.textContent.replace(/\s+/g, ' '));
+    assert(/#sf 1 configured · 3 carrying/.test(text) && /#bay 0 configured · 2 carrying/.test(text), 'popup: ' + text);
+    const sfPart = text.split('#bay')[0].split('#sf')[1] || text;
+    assert(sfPart.indexOf('SF Default') < sfPart.indexOf('SF One'), 'configured repeater not listed first: ' + sfPart);
+    assert(/SF Default\s*default\s*carrying/.test(text), 'tags: ' + text);
+    const href = await page.$eval('.mc-scope-popup a', (a) => a.getAttribute('href'));
+    assert(href === '#/nodes/' + encodeURIComponent('a5' + '0'.repeat(62)), 'link: ' + href);
+    assert(!(await page.$('.leaflet-tooltip.mc-scope-tip')), 'hover tooltip over the popup');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('.mc-scope-popup'), null, { timeout: 3000 });
+  });
+
+  await step('clicking a node marker inside an outline does not open the scope box', async () => {
+    await page.click('.leaflet-marker-icon');
+    await page.waitForTimeout(500);
+    assert(!(await page.$('.mc-scope-popup')), 'scope box opened for a marker click');
+    await page.keyboard.press('Escape');
   });
 
   await step('the scope list shows a row per scope with All / None', async () => {
@@ -192,7 +220,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.waitForSelector('#mcRegionFilter option[value="south-bay"]', { state: 'attached' });
     await page.selectOption('#mcRegionFilter', 'south-bay');
     await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 1);
-    assert((await areas())[0].includes('mc-scope-area-declared'), (await areas()).join(' | '));
+    assert((await areas())[0].includes('mc-scope-area-configured'), (await areas()).join(' | '));
     await page.selectOption('#mcRegionFilter', '');
     await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 3);
   });
@@ -227,8 +255,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
   });
 
   await step('live: hovering works through the canvases above the outlines', async () => {
-    const sf = await colourOf('sf');
-    const pt = await pointInside([sf]);
+    const pt = await pointInside(['sf']);
     assert(pt, 'no point inside #sf');
     // Something other than the outline is on top there: the canvas renderer
     // or the heat map. The hover must not depend on the outline's events.
@@ -236,7 +263,16 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.mouse.move(pt.x, pt.y);
     await page.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
     const text = await page.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent);
-    assert(/#sf · carried by 2 nodes/.test(text), 'tooltip: ' + text + ' (top element ' + top + ')');
+    assert(/#sf · carried by 3 nodes/.test(text), 'tooltip: ' + text + ' (top element ' + top + ')');
+  });
+
+  await step('live: clicking inside an outline lists its repeaters', async () => {
+    const pt = await pointInside(['sf']);
+    await page.mouse.click(pt.x, pt.y);
+    await page.waitForSelector('.leaflet-popup.mc-scope-popup', { timeout: 3000 });
+    const text = await page.$eval('.mc-scope-popup', (el) => el.textContent);
+    assert(/#sf/.test(text) && /SF Default/.test(text), 'popup: ' + text);
+    await page.keyboard.press('Escape');
   });
 
   await step('live: a scoped packet flashes only its scope, and the flash ends', async () => {

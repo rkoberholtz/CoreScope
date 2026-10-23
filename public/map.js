@@ -531,7 +531,7 @@
             <label for="mcRegionFilter" class="sr-only">Show nodes with evidence for a region scope</label>
             <select id="mcRegionFilter" title="Show nodes that declare a region scope or were seen carrying its traffic">${regionFilterOptionsHtml([], filters.regionScope)}</select>
             <div id="mcRegionHint" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
-            <label for="mcScopeContours" title="Outline the area the nodes that handle each region scope are proven to reach, following their direct links. Solid: seen carrying its traffic. Dashed: only declare it. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Reach contours</label>
+            <label for="mcScopeContours" title="Outline the area the nodes that handle each region scope are proven to reach, following their two-way links. Solid: seen carrying its traffic. Dashed: configured for it but not seen carrying it. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Reach contours</label>
             <div id="mcScopeList" class="mc-scope-list" hidden></div>
           </fieldset>
           <fieldset class="mc-section">

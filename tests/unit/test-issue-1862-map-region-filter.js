@@ -320,12 +320,13 @@ async function makePage(opts) {
   // renderer and hover tooltip at init.
   L.svg = () => ({});
   L.tooltip = () => ({ setLatLng() { return this; }, setContent() { return this; } });
+  L.popup = () => ({ setLatLng() { return this; }, setContent() { return this; }, openOn() { return this; } });
   L.map = () => {
     const panes = {};
     return {
       setView() { return this; }, on() {}, off() {}, invalidateSize() {}, getCenter() { return { lat: 0, lng: 0 }; }, getZoom() { return 9; },
       hasLayer() { return false; }, addLayer() {}, removeLayer() {}, fitBounds() {}, remove() {},
-      openTooltip() {}, closeTooltip() {},
+      openTooltip() {}, closeTooltip() {}, closePopup() {},
       createPane(n) { panes[n] = { style: {} }; return panes[n]; }, getPane(n) { return panes[n]; },
     };
   };

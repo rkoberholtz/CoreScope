@@ -5,14 +5,15 @@
 
    - observed: nodes whose full pubkey appears in the path of traffic for the
      scope (transported_scopes, #1751/#1902). Drawn solid.
-   - declared only: nodes that list the region (declared_regions) but have not
-     been seen carrying it. Drawn dashed, because a declaration is
-     configuration, not evidence of reach.
+   - configured only: nodes configured for the region (configuredScopes: its
+     default scope, the regions an observer reported it allows, or its own
+     declared list) but not seen carrying it. Drawn dashed, because
+     configuration is not evidence of reach.
 
    A node's reach follows its links, not a circle. Around the compass in 16
-   sectors, it reaches as far as the farthest node it has a proven direct
-   link with in that sector (the neighbor graph, /api/analytics/neighbor-graph,
-   ambiguous links left out), and a small floor where it has none. Terrain is
+   sectors, it reaches as far as the farthest node it has a proven two-way
+   link with in that sector (the neighbor graph, /api/analytics/neighbor-graph:
+   bidirectional, never ambiguous), and a small floor where it has none. Terrain is
    in the data: a repeater that only ever links east draws a lobe to the east.
    Interpolating between sector centres keeps the shape smooth.
 
@@ -21,9 +22,11 @@
    direction, and the contour is drawn at 1. Results are cached per scope and
    recomputed only when its members, their positions or their reach change.
 
-   Hover is hit-tested from the map's own mousemove, not from the outlines:
-   the live map draws canvases above them, and overlapping scopes should all
-   be named. The outlines take no pointer events, so they never block a click.
+   Hover and click are hit-tested from the map's own events, not from the
+   outlines: the live map draws canvases above them, and overlapping scopes
+   should all be named. Hover names the scopes under the cursor; a click
+   lists the repeaters configured for or carrying each of them. The outlines
+   take no pointer events, so they never block a click on anything else.
 
    The floor (1.5 km), sector count and pulse duration are fixed for now;
    exposing them in the customizer is a follow-up. */
@@ -78,28 +81,54 @@
     return [lat, lon];
   }
 
-  // groupNodesByScope returns Map scope → { observed: [], declaredOnly: [] }.
-  // A node seen carrying a scope is observed even if it also declares it.
-  // Unplaced nodes are left out: they cannot contribute to an outline.
+  // configuredScopes returns Map scope → { default, allowed, declared }: the
+  // region scopes a node is configured for, from the three sources the API
+  // carries, and which of them say so.
+  //   default_scope     the scope its own adverts go out under (its
+  //                     firmware default, "region default")
+  //   configured_scope  the comma-separated regions an observer reported it
+  //                     allows (#1865); '*' is the flood wildcard, not a region
+  //   declared_regions  its own answer to a companion's regions query (#1862)
+  function configuredScopes(n) {
+    var out = new Map();
+    function add(r, key) {
+      r = normRegion(String(r).trim());
+      if (!r || r === '*') return;
+      var e = out.get(r);
+      if (!e) { e = { default: false, allowed: false, declared: false }; out.set(r, e); }
+      e[key] = true;
+    }
+    if (!n) return out;
+    if (n.default_scope) add(n.default_scope, 'default');
+    if (n.configured_scope) String(n.configured_scope).split(',').forEach(function (r) { add(r, 'allowed'); });
+    (Array.isArray(n.declared_regions) ? n.declared_regions : []).forEach(function (r) { add(r, 'declared'); });
+    return out;
+  }
+
+  function carriedScopes(n) {
+    var out = new Set();
+    (n && Array.isArray(n.transported_scopes) ? n.transported_scopes : []).forEach(function (r) {
+      r = normRegion(r);
+      if (r) out.add(r);
+    });
+    return out;
+  }
+
+  // groupNodesByScope returns Map scope → { observed: [], configuredOnly: [] }.
+  // A node seen carrying a scope is observed even if it is also configured
+  // for it. Unplaced nodes are left out: they cannot contribute to an outline.
   function groupNodesByScope(nodes) {
     var groups = new Map();
     function group(s) {
       var g = groups.get(s);
-      if (!g) { g = { observed: [], declaredOnly: [] }; groups.set(s, g); }
+      if (!g) { g = { observed: [], configuredOnly: [] }; groups.set(s, g); }
       return g;
     }
     (nodes || []).forEach(function (n) {
       if (!position(n)) return;
-      var observed = new Set();
-      (Array.isArray(n.transported_scopes) ? n.transported_scopes : []).forEach(function (r) {
-        r = normRegion(r);
-        if (r && !observed.has(r)) { observed.add(r); group(r).observed.push(n); }
-      });
-      var declared = new Set();
-      (Array.isArray(n.declared_regions) ? n.declared_regions : []).forEach(function (r) {
-        r = normRegion(r);
-        if (r && !observed.has(r) && !declared.has(r)) { declared.add(r); group(r).declaredOnly.push(n); }
-      });
+      var observed = carriedScopes(n);
+      observed.forEach(function (r) { group(r).observed.push(n); });
+      configuredScopes(n).forEach(function (_, r) { if (!observed.has(r)) group(r).configuredOnly.push(n); });
     });
     return groups;
   }
@@ -123,10 +152,10 @@
 
   // linkExtents returns Map pubkey → Float64Array(SECTORS): for each sector,
   // the distance in metres to the farthest node it has a proven link with in
-  // that direction, times LINK_MARGIN. 0 means no link that way. Only links
-  // between two placed nodes count, and never an ambiguous one (a hop prefix
-  // that could be several nodes). A link counts for both of its ends.
-  // O(links).
+  // that direction, times LINK_MARGIN. 0 means no link that way. Only two-way
+  // links between two placed nodes count: each end has heard the other, so
+  // the link proves reach in both directions. Never an ambiguous one (a hop
+  // prefix that could be several nodes). O(links).
   function linkExtents(nodes, edges) {
     var pos = new Map();
     (nodes || []).forEach(function (n) { var p = position(n); if (p && n.public_key) pos.set(n.public_key, p); });
@@ -137,7 +166,7 @@
       return e;
     }
     (edges || []).forEach(function (e) {
-      if (!e || e.ambiguous || e.source === e.target) return;
+      if (!e || e.bidirectional !== true || e.ambiguous || e.source === e.target) return;
       var a = pos.get(e.source), b = pos.get(e.target);
       if (!a || !b) return;
       var cos = Math.cos(((a[0] + b[0]) / 2) * Math.PI / 180);
@@ -504,6 +533,59 @@
     });
   }
 
+  // ── Click popup ──────────────────────────────────────────────────────────
+
+  var POPUP_ROWS = 50;
+
+  // scopeMembers lists every node configured for or carrying a scope, placed
+  // or not (an unplaced repeater is still configured for it), configured ones
+  // first, then by name. Runs on a click, over the page's node list: O(n).
+  function scopeMembers(scope, nodes) {
+    var out = [];
+    (nodes || []).forEach(function (n) {
+      var conf = configuredScopes(n).get(scope);
+      var carrying = carriedScopes(n).has(scope);
+      if (!conf && !carrying) return;
+      out.push({ node: n, conf: conf || null, carrying: carrying, placed: !!position(n) });
+    });
+    var label = function (m) { return String(m.node.name || m.node.public_key || '').toLowerCase(); };
+    out.sort(function (a, b) {
+      if (!!a.conf !== !!b.conf) return a.conf ? -1 : 1;
+      var la = label(a), lb = label(b);
+      return la < lb ? -1 : (la > lb ? 1 : 0);
+    });
+    return out;
+  }
+
+  function tagHtml(text, title) {
+    return '<span class="mc-scope-tag" title="' + title + '">' + text + '</span>';
+  }
+
+  // scopePopupHtml: one section per scope under the click, each listing its
+  // repeaters with why they are listed. Every name is escaped.
+  function scopePopupHtml(scopes, nodes) {
+    return '<div class="mc-scope-pop">' + scopes.map(function (scope) {
+      var members = scopeMembers(scope, nodes);
+      var nConf = members.filter(function (m) { return m.conf; }).length;
+      var nCarry = members.filter(function (m) { return m.carrying; }).length;
+      var rows = members.slice(0, POPUP_ROWS).map(function (m) {
+        var n = m.node, pk = String(n.public_key || '');
+        var tags = '';
+        if (m.conf && m.conf.default) tags += tagHtml('default', 'Its own adverts go out scoped to this region');
+        if (m.conf && m.conf.allowed) tags += tagHtml('allowed', 'An observer reported it allows this region');
+        if (m.conf && m.conf.declared) tags += tagHtml('declared', 'It lists this region when asked');
+        if (m.carrying) tags += tagHtml('carrying', 'Seen relaying this region\'s traffic');
+        if (!m.placed) tags += tagHtml('no position', 'Has no position, so it is not part of the outline');
+        return '<li><a href="#/nodes/' + encodeURIComponent(pk) + '">' + escapeHtml(n.name || pk.slice(0, 8)) + '</a> ' + tags + '</li>';
+      }).join('');
+      var more = members.length > POPUP_ROWS ? '<li class="mc-scope-pop-more">+' + (members.length - POPUP_ROWS) + ' more</li>' : '';
+      return '<section class="mc-scope-pop-scope">' +
+        '<div class="mc-scope-pop-head"><span class="mc-scope-swatch mc-reach-c' + colorIndex(scope) + '" aria-hidden="true"></span> ' +
+        '<strong>#' + escapeHtml(scope) + '</strong> <span class="mc-scope-pop-sum">' + nConf + ' configured · ' + nCarry + ' carrying</span></div>' +
+        '<ul class="mc-scope-pop-list">' + rows + more + '</ul></section>';
+    }).join('') + '</div>';
+  }
+
   // createOverlay owns the layer, the cache, hover and the pulses for one
   // Leaflet map. opts: floorM, pulseMs, loadLinks (() => Promise of neighbor
   // graph edges), and setTimeout/clearTimeout/raf for tests.
@@ -512,7 +594,7 @@
   //   setVisible(bool)  adds or removes the layer; computes lazily
   //   setOnly(scope)    draw one scope ('' = all)
   //   setHidden(names)  scopes not to draw
-  //   scopes()          [{ scope, colour, observed, declared, hidden }]
+  //   scopes()          [{ scope, colour, observed, configured, hidden }]
   //   onChange(fn)      called after each render; returns an unsubscribe
   //   pulse(scope)      briefly highlight one scope (live page)
   //   destroy()         drop listeners and pending work
@@ -526,6 +608,7 @@
     var renderer = L.svg({ pane: PANE });
     var layer = L.layerGroup();
     var tip = L.tooltip({ direction: 'top', offset: [0, -10], className: 'mc-scope-tip', opacity: 1 });
+    var popup = L.popup({ className: 'mc-scope-popup', maxWidth: 340, autoPanPadding: [24, 24] });
     var nodes = [];
     var links = null;
     var extents = null; // linkExtents(nodes, links), rebuilt when either changes
@@ -577,6 +660,8 @@
       var poly = L.polygon(r, { pane: PANE, renderer: renderer, interactive: false,
         className: 'mc-scope-area mc-scope-area-' + kind + ' mc-reach-c' + colorIndex(scope) });
       layer.addLayer(poly);
+      var el = poly.getElement && poly.getElement();
+      if (el && el.setAttribute) el.setAttribute('data-scope', scope);
       hits.push({ scope: scope, polys: [poly], rings: r, bounds: ringsBounds(r), text: text });
       return poly;
     }
@@ -592,9 +677,9 @@
       var want = normRegion(only);
       list = [];
       groups.forEach(function (g, scope) {
-        list.push({ scope: scope, colour: colorIndex(scope), observed: g.observed.length, declared: g.declaredOnly.length, hidden: hidden.has(scope) });
+        list.push({ scope: scope, colour: colorIndex(scope), observed: g.observed.length, configured: g.configuredOnly.length, hidden: hidden.has(scope) });
         if (g.observed.length) live.add(scope + '|observed');
-        if (g.declaredOnly.length) live.add(scope + '|declared');
+        if (g.configuredOnly.length) live.add(scope + '|configured');
         if ((want && scope !== want) || hidden.has(scope)) return;
         var name = '#' + escapeHtml(scope);
         var polys = [];
@@ -602,9 +687,9 @@
           var po = draw(scope, 'observed', g.observed, name + ' · carried by ' + plural(g.observed.length));
           if (po) polys.push(po);
         }
-        if (g.declaredOnly.length) {
-          var pd = draw(scope, 'declared', g.declaredOnly, name + ' · declared by ' + plural(g.declaredOnly.length) + ', not yet seen carrying it');
-          if (pd) polys.push(pd);
+        if (g.configuredOnly.length) {
+          var pc = draw(scope, 'configured', g.configuredOnly, name + ' · configured on ' + plural(g.configuredOnly.length) + ', not yet seen carrying it');
+          if (pc) polys.push(pc);
         }
         if (polys.length) drawn.set(scope, polys);
       });
@@ -626,13 +711,8 @@
       }, function () { /* keep the floor shapes; the next reload retries */ });
     }
 
-    // ── hover ──
-    function clearHover() {
-      setClass(hovered, 'is-hovered', false);
-      hovered = [];
-      if (map.hasLayer && map.hasLayer(tip)) map.closeTooltip(tip);
-    }
-    function hoverAt(ll) {
+    // ── hover and click ──
+    function hitsAt(ll) {
       var lat = ll.lat, lon = ll.lng;
       var found = [];
       for (var i = 0; i < hits.length; i++) {
@@ -640,6 +720,16 @@
         if (lat < b[0] || lat > b[2] || lon < b[1] || lon > b[3]) continue;
         if (inRings(h.rings, lat, lon)) found.push(h);
       }
+      return found;
+    }
+    function popupOpen() { return !!(map.hasLayer && map.hasLayer(popup)); }
+    function clearHover() {
+      setClass(hovered, 'is-hovered', false);
+      hovered = [];
+      if (map.hasLayer && map.hasLayer(tip)) map.closeTooltip(tip);
+    }
+    function hoverAt(ll) {
+      var found = hitsAt(ll);
       clearHover();
       if (!found.length) return;
       found.forEach(function (h) { hovered = hovered.concat(h.polys); });
@@ -649,15 +739,32 @@
       map.openTooltip(tip);
     }
     function onMove(e) {
-      if (!visible || !hits.length) return;
+      if (!visible || !hits.length || popupOpen()) return;
       moveAt = e.latlng;
       if (moveQueued) return;
       moveQueued = true;
-      raf(function () { moveQueued = false; if (moveAt && visible) hoverAt(moveAt); });
+      // Rechecked when the frame runs: a click is a move then a click, and
+      // the popup it opens must not get a tooltip drawn over it.
+      raf(function () { moveQueued = false; if (moveAt && visible && !popupOpen()) hoverAt(moveAt); });
     }
     function onOut() { moveAt = null; clearHover(); }
+    // A click inside outlines lists each scope's repeaters. A click that
+    // started on another layer (a live node, a packet path) bubbles here with
+    // that layer as sourceTarget: it belongs to that layer, not to us.
+    function onClick(e) {
+      if (!visible || !hits.length) return;
+      if (e.sourceTarget && e.sourceTarget !== map) return;
+      var scopes = [];
+      hitsAt(e.latlng).forEach(function (h) { if (scopes.indexOf(h.scope) < 0) scopes.push(h.scope); });
+      if (!scopes.length) return;
+      clearHover();
+      popup.setLatLng(e.latlng);
+      popup.setContent(scopePopupHtml(scopes, nodes));
+      popup.openOn(map);
+    }
     map.on('mousemove', onMove);
     map.on('mouseout', onOut);
+    map.on('click', onClick);
 
     return {
       layer: layer,
@@ -666,7 +773,7 @@
       setVisible: function (v) {
         visible = !!v;
         if (visible) { if (!map.hasLayer(layer)) layer.addTo(map); }
-        else { pulser.cancelAll(); if (map.hasLayer(layer)) map.removeLayer(layer); }
+        else { pulser.cancelAll(); if (popupOpen()) map.closePopup(popup); if (map.hasLayer(layer)) map.removeLayer(layer); }
         render();
         if (visible && links === null) refreshLinks();
       },
@@ -685,7 +792,8 @@
       pulse: function (scope) { if (visible && drawn.has(normRegion(scope))) pulser.pulse(scope); },
       destroy: function () {
         pulser.cancelAll(); clearHover(); listeners = [];
-        map.off('mousemove', onMove); map.off('mouseout', onOut);
+        if (popupOpen()) map.closePopup(popup);
+        map.off('mousemove', onMove); map.off('mouseout', onOut); map.off('click', onClick);
       },
       stats: function () { return { computed: computed, cached: cache.size }; },
     };
@@ -739,20 +847,20 @@
   function listHtml(items, opts) {
     var rows = items.map(function (it) {
       var name = escapeHtml(it.scope);
-      var count = it.observed ? String(it.observed) : it.declared + ' declared';
+      var count = it.observed ? String(it.observed) : it.configured + ' configured';
       var title = it.observed
-        ? '#' + name + ': carried by ' + plural(it.observed) + (it.declared ? ', declared by ' + it.declared + ' more' : '')
-        : '#' + name + ': declared by ' + plural(it.declared) + ', not yet seen carrying it';
+        ? '#' + name + ': carried by ' + plural(it.observed) + (it.configured ? ', configured on ' + it.configured + ' more' : '')
+        : '#' + name + ': configured on ' + plural(it.configured) + ', not yet seen carrying it';
       return '<label class="mc-scope-row" title="' + title + '">' +
         '<input type="checkbox" data-scope="' + name + '"' + (it.hidden ? '' : ' checked') + '> ' +
-        '<span class="mc-scope-swatch mc-reach-c' + it.colour + (it.observed ? '' : ' mc-scope-swatch--declared') + '" aria-hidden="true"></span> ' +
+        '<span class="mc-scope-swatch mc-reach-c' + it.colour + (it.observed ? '' : ' mc-scope-swatch--configured') + '" aria-hidden="true"></span> ' +
         '#' + name + ' <span class="mc-scope-count">' + count + '</span></label>';
     }).join('');
     return (opts.titleHtml || '') +
       '<div class="filter-group mc-scope-list-actions"><button type="button" class="btn" data-scope-all>All</button> ' +
       '<button type="button" class="btn" data-scope-none>None</button></div>' +
       rows +
-      '<div class="mc-scope-hint">Outlines follow each repeater\'s proven links; ' + (DEFAULT_FLOOR_M / 1000) + ' km where it has none.</div>';
+      '<div class="mc-scope-hint">Outlines follow each repeater\'s proven two-way links; ' + (DEFAULT_FLOOR_M / 1000) + ' km where it has none. Click an outline to list its repeaters.</div>';
   }
 
   // mountScopeList renders a show/hide row per scope into el and keeps it in
@@ -797,6 +905,8 @@
     normRegion: normRegion,
     nodeRegionEvidence: nodeRegionEvidence,
     groupNodesByScope: groupNodesByScope,
+    configuredScopes: configuredScopes,
+    scopePopupHtml: scopePopupHtml,
     linkExtents: linkExtents,
     shapeFor: shapeFor,
     contourShapes: contourShapes,
