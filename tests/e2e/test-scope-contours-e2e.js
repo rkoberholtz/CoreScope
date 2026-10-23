@@ -38,7 +38,8 @@ const NODES = [
   { public_key: pk('a1'), name: 'SF One', role: 'repeater', lat: 37.77, lon: -122.42, last_seen: now, hash_size: 1, transported_scopes: ['#sf'] },
   { public_key: pk('a2'), name: 'SF Two', role: 'repeater', lat: 37.79, lon: -122.40, last_seen: now, hash_size: 1, transported_scopes: ['#sf', '#bay'] },
   { public_key: pk('a3'), name: 'Oakland', role: 'repeater', lat: 37.80, lon: -122.27, last_seen: now, hash_size: 1, transported_scopes: ['#bay'] },
-  { public_key: pk('a4'), name: 'San Jose', role: 'repeater', lat: 37.34, lon: -121.89, last_seen: now, hash_size: 1, declared_regions: ['south-bay'] },
+  // In view at the test zoom: Leaflet leaves an off-screen outline's path empty.
+  { public_key: pk('a4'), name: 'Daly South', role: 'repeater', lat: 37.74, lon: -122.30, last_seen: now, hash_size: 1, declared_regions: ['south-bay'] },
   { public_key: pk('a5'), name: 'SF Default', role: 'repeater', lat: 37.76, lon: -122.44, last_seen: now, hash_size: 1, default_scope: '#sf', transported_scopes: ['#sf'] },
 ];
 // One proven link: SF Two ↔ Oakland, about 11.6 km. #bay's outline follows
@@ -67,7 +68,9 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     if (path === '/api/analytics/neighbor-graph') { graphCalls++; return json({ nodes: [], edges: EDGES, stats: {} }); }
     if (path === '/api/observers') return json({ observers: [] });
     if (path === '/api/packets') return json({ packets: [], total: 0 });
-    if (path === '/api/config/map') return json({ center: [37.6, -122.2], zoom: 9 });
+    // Close enough that a 1.5 km floor circle is ~50 px across, so hover and
+    // click points can sit well inside the narrow 32-sector lobes.
+    if (path === '/api/config/map') return json({ center: [37.785, -122.35], zoom: 11 });
     return json({});
   });
 
@@ -245,7 +248,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
   });
 
   await step('live: ?contours=1 draws the outlines on the canvas map, with the list in the legend', async () => {
-    await page.goto(BASE + '/#/live?contours=1', { waitUntil: 'load' });
+    await page.goto(BASE + '/#/live?contours=1&lat=37.785&lon=-122.35&zoom=11', { waitUntil: 'load' });
     await page.waitForSelector('#liveMap');
     await page.waitForSelector('path.mc-scope-area');
     assert(await page.$eval('#liveScopeContoursToggle', (el) => el.checked), 'live toggle unchecked');

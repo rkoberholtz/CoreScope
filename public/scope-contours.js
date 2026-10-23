@@ -10,7 +10,7 @@
      declared list) but not seen carrying it. Drawn dashed, because
      configuration is not evidence of reach.
 
-   A node's reach follows its links, not a circle. Around the compass in 16
+   A node's reach follows its links, not a circle. Around the compass in 32
    sectors, it reaches as far as the farthest node it has a proven two-way
    link with in that sector (the neighbor graph, /api/analytics/neighbor-graph:
    bidirectional, never ambiguous), and a small floor where it has none. Terrain is
@@ -35,7 +35,9 @@
 
   var DEFAULT_FLOOR_M = 1500;
   var DEFAULT_PULSE_MS = 1500;
-  var SECTORS = 16;
+  // 11.25° each: narrow enough that a link's lobe spreads half as far
+  // sideways as it did at 16, still smooth to the eye.
+  var SECTORS = 32;
   var SECTOR_RAD = 2 * Math.PI / SECTORS;
   // A link proves the far node hears this one; the outline is drawn a little
   // past it so the linked node sits inside rather than on the edge.
@@ -197,15 +199,25 @@
       if (e[i] < min) min = e[i];
     }
     var shape = { lat: p[0], lon: p[1], ext: e, maxExt: max, minExt: min, uniform: max === min };
-    shape.box = max === min ? [-max, max, -max, max] : shapeBox(shape);
+    if (shape.uniform) { shape.box = [-max, max, -max, max]; return shape; }
+    shape.box = shapeBox(shape);
+    // near[i]: the most any bearing within a sector of interval i (between
+    // centres i and i+1) can reach. A vertex at least that far out is outside
+    // even after the field fill's half-cell widening, which never spans more
+    // than a sector, so the fill rates it d / near without a lookup.
+    var near = new Float64Array(SECTORS);
+    for (var k = 0; k < SECTORS; k++) {
+      near[k] = Math.max(e[(k + SECTORS - 1) % SECTORS], e[k], e[(k + 1) % SECTORS], e[(k + 2) % SECTORS]);
+    }
+    shape.near = near;
     return shape;
   }
 
-  // shapeBox samples the boundary at 4 points per sector. Between samples the
-  // boundary can bulge by under 0.2% of the reach, which the 2-cell margin
+  // shapeBox samples the boundary at 2 points per sector. Between samples the
+  // boundary can bulge by about 0.1% of the reach, which the 2-cell margin
   // the field fill adds covers.
   function shapeBox(shape) {
-    var b = [0, 0, 0, 0], n = SECTORS * 4;
+    var b = [0, 0, 0, 0], n = SECTORS * 2;
     for (var k = 0; k < n; k++) {
       var t = (k / n) * 2 * Math.PI, r = reachAt(shape, t);
       var x = r * Math.sin(t), y = r * Math.cos(t);
@@ -217,7 +229,7 @@
 
   // bearingOf is atan2(dx, dy), the compass bearing of an offset, as a
   // polynomial: error under 2.1e-4 rad (0.012°, measured), far below what a
-  // 22.5° sector blend can show, at a fraction of Math.atan2's cost in the
+  // 11.25° sector blend can show, at a fraction of Math.atan2's cost in the
   // per-vertex fill.
   function bearingOf(dx, dy) {
     var ax = Math.abs(dy), ay = Math.abs(dx);
@@ -357,7 +369,7 @@
       var s = shapes[k], b = s.box;
       var i0 = Math.max(0, Math.floor((p[0] + b[0] - pad - ox) / cell)), i1 = Math.min(nx - 1, Math.ceil((p[0] + b[1] + pad - ox) / cell));
       var j0 = Math.max(0, Math.floor((p[1] + b[2] - pad - oy) / cell)), j1 = Math.min(ny - 1, Math.ceil((p[1] + b[3] + pad - oy) / cell));
-      var inv = 1 / s.minExt, core = s.minExt / 2, lim = s.maxExt + pad;
+      var inv = 1 / s.minExt, lim = s.maxExt + pad, half = cell / 2;
       for (var j = j0; j <= j1; j++) {
         if (i0 < rowLo[j]) rowLo[j] = i0;
         if (i1 > rowHi[j]) rowHi[j] = i1;
@@ -366,7 +378,30 @@
           var dx = ox + i * cell - p[0];
           var d = Math.sqrt(dx * dx + dy * dy);
           if (d > lim) continue;
-          var r = (s.uniform || d < core) ? d * inv : d / reachAt(s, bearingOf(dx, dy));
+          var r;
+          // Every bearing reaches at least minExt, so inside it no bearing is
+          // needed; the value is exact where the contour is the floor itself,
+          // the only place a vertex this close can be next to it.
+          if (s.uniform || d < s.minExt) r = d * inv;
+          else {
+            var bb = bearingOf(dx, dy);
+            var fi = bb / SECTOR_RAD;
+            if (fi < 0) fi += SECTORS;
+            var nr = s.near[Math.floor(fi) % SECTORS];
+            // Outside for certain. d / nr is a lower bound on its value, still
+            // above 1, and exact where the edge is the floor circle; anywhere
+            // else such a vertex is a cell or more from the edge.
+            if (d >= nr) r = d / nr;
+            else {
+            // The reach is the most within half a cell either side of the
+            // bearing. Near the node a lobe is only a sector wide, which at
+            // 32 sectors is about a cell: without this widening the grid
+            // misses its base and the lobe comes loose from the node.
+            var del = half / d;
+            var e0 = reachAt(s, bb), e1 = reachAt(s, bb + del), e2 = reachAt(s, bb - del);
+            r = d / (e0 > e1 ? (e0 > e2 ? e0 : e2) : (e1 > e2 ? e1 : e2));
+            }
+          }
           var idx = j * nx + i;
           if (r < field[idx]) field[idx] = r;
         }
@@ -521,7 +556,8 @@
   // ── Overlay ──────────────────────────────────────────────────────────────
 
   function shapeKey(n, s) {
-    return n.public_key + '@' + s.lat + ',' + s.lon + ':' + Array.prototype.map.call(s.ext, Math.round).join(',');
+    var head = n.public_key + '@' + s.lat + ',' + s.lon + ':';
+    return s.uniform ? head + 'u' + Math.round(s.ext[0]) : head + Array.prototype.map.call(s.ext, Math.round).join(',');
   }
 
   function plural(n) { return n + (n === 1 ? ' node' : ' nodes'); }
@@ -915,6 +951,7 @@
     colorIndex: colorIndex,
     createPulser: createPulser,
     createOverlay: createOverlay,
+    sectors: SECTORS,
     mountScopeList: mountScopeList,
   };
 })();
