@@ -167,7 +167,11 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
       return v && v !== 'none' ? v : false;
     }, null, { timeout: 5000 }).then((h) => h.jsonValue()).catch(() => '');
     assert(dash && dash !== 'none', 'configured-only outline is not dashed: ' + dash);
-    const stroke = await page.$eval('path.mc-scope-area-observed', (el) => getComputedStyle(el).stroke);
+    const stroke = await page.waitForFunction(() => {
+      const el = document.querySelector('path.mc-scope-area-observed');
+      const v = el && el.isConnected ? getComputedStyle(el).stroke : '';
+      return v && v !== 'none' ? v : false;
+    }, null, { timeout: 5000 }).then((h) => h.jsonValue()).catch(() => '');
     assert(stroke && stroke !== 'none' && stroke !== 'rgb(51, 136, 255)', 'outline not coloured by its CSS variable: ' + stroke);
   });
 

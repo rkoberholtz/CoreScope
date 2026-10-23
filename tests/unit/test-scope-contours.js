@@ -40,68 +40,59 @@ function offset(lat, lon, eastM, northM) {
   return { lat: lat + northM / 111320, lon: lon + eastM / (111320 * Math.cos(lat * Math.PI / 180)) };
 }
 
-console.log('\n=== scope-contours.js: contour geometry ===');
+console.log('\n=== scope-contours.js: hull geometry ===');
 
 test('exposes its API', () => {
   assert.ok(SC, 'window.ScopeContours not defined');
-  for (const fn of ['normRegion', 'nodeRegionEvidence', 'groupNodesByScope', 'contourRings', 'colorIndex', 'createPulser', 'createOverlay']) {
+  for (const fn of ['normRegion', 'nodeRegionEvidence', 'groupNodesByScope', 'convexHull', 'scopeHull', 'shapeFor', 'reachFor', 'linkReach', 'inRings', 'colorIndex', 'createPulser', 'createOverlay']) {
     assert.strictEqual(typeof SC[fn], 'function', fn + ' not exported');
   }
 });
 
-test('no points, or no usable radius, gives no rings', () => {
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(SC.contourRings([], 8000))), []);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(SC.contourRings([{ lat: 40.7, lon: -74 }], 0))), []);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(SC.contourRings([{ lat: NaN, lon: -74 }, { lat: 'x', lon: 3 }, null], 8000))), []);
+const ringPlain = (r) => JSON.parse(JSON.stringify(r));
+
+test('convexHull keeps the corners, drops inside and collinear points', () => {
+  const pts = [[0, 0], [0, 1], [1, 1], [1, 0], [0.5, 0.5], [0.2, 0.7], [0, 0.5], [1, 0.25]];
+  const ring = ringPlain(SC.convexHull(pts));
+  assert.strictEqual(ring.length, 4, JSON.stringify(ring));
+  for (const c of [[0, 0], [0, 1], [1, 1], [1, 0]]) assert.ok(ring.some(p => p[0] === c[0] && p[1] === c[1]), 'missing corner ' + c);
 });
 
-test('one point gives one ring at the radius, within 5%', () => {
+test('convexHull of fewer than three distinct points, or of a line, is empty', () => {
+  assert.deepStrictEqual(ringPlain(SC.convexHull([])), []);
+  assert.deepStrictEqual(ringPlain(SC.convexHull([[0, 0], [1, 1]])), []);
+  assert.deepStrictEqual(ringPlain(SC.convexHull([[0, 0], [1, 1], [2, 2]])), []);
+});
+
+test('the hull of one plain circle is that circle (within 0.2%)', () => {
   const c = [40.7, -74.0];
-  const rings = SC.contourRings([{ lat: c[0], lon: c[1] }], 8000);
+  const rings = SC.scopeHull([SC.shapeFor({ lat: c[0], lon: c[1] }, null, 8000)]);
   assert.strictEqual(rings.length, 1);
-  assert.ok(rings[0].length >= 16, 'ring too coarse: ' + rings[0].length + ' points');
-  for (const p of rings[0]) {
-    const d = metres(c, p);
-    assert.ok(Math.abs(d - 8000) <= 400, 'ring point ' + Math.round(d) + ' m from the node');
-  }
+  assert.ok(rings[0].length >= 60, 'too coarse: ' + rings[0].length);
+  for (const p of rings[0]) { const d = metres(c, p); assert.ok(d > 7975 && d < 8010, 'ring point ' + Math.round(d) + ' m'); }
 });
 
-test('two far-apart points give two rings', () => {
+test('distant members are joined into one area, the gap between them filled', () => {
   const a = offset(40.7, -74.0, 0, 0), b = offset(40.7, -74.0, 100000, 0);
-  assert.strictEqual(SC.contourRings([a, b], 8000).length, 2);
-});
-
-test('two close points merge into one ring', () => {
-  const a = offset(40.7, -74.0, 0, 0), b = offset(40.7, -74.0, 5000, 0);
-  const rings = SC.contourRings([a, b], 8000);
+  const rings = SC.scopeHull([SC.shapeFor(a, null, 1000), SC.shapeFor(b, null, 1000)]);
   assert.strictEqual(rings.length, 1);
-  // The merged outline reaches past both nodes.
-  const lons = rings[0].map(p => p[1]);
-  assert.ok(Math.min(...lons) < a.lon && Math.max(...lons) > b.lon);
+  const mid = offset(40.7, -74.0, 50000, 0);
+  assert.ok(SC.inRings(rings, mid.lat, mid.lon), 'midpoint not inside');
+  const off = offset(40.7, -74.0, 50000, 2000);
+  assert.ok(!SC.inRings(rings, off.lat, off.lon), 'a band 2 km wide should not be inside');
 });
 
-// A ring of nodes around an empty middle: the reach is an annulus, so the
-// outline has an outer ring and a hole. Leaflet fills with evenodd, so both
-// rings in one polygon draw the hole.
-test('nodes around an empty middle give an outer ring and a hole', () => {
-  const pts = [];
-  for (let k = 0; k < 24; k++) {
-    const t = (k / 24) * 2 * Math.PI;
-    pts.push(offset(40.7, -74.0, 40000 * Math.cos(t), 40000 * Math.sin(t)));
-  }
-  assert.strictEqual(SC.contourRings(pts, 8000).length, 2);
+test('a ring of members has no hole: the empty middle is part of the area', () => {
+  const shapes = [];
+  for (let k = 0; k < 24; k++) { const t = (k / 24) * 2 * Math.PI; shapes.push(SC.shapeFor(offset(40.7, -74.0, 40000 * Math.cos(t), 40000 * Math.sin(t)), null, 1000)); }
+  const rings = SC.scopeHull(shapes);
+  assert.strictEqual(rings.length, 1);
+  assert.ok(SC.inRings(rings, 40.7, -74.0), 'the middle is outside');
 });
 
-// Nodes on two continents must not make one grid spanning the ocean: each
-// cluster is gridded on its own, so both still come out round.
-test('distant clusters keep full resolution', () => {
-  const nyc = { lat: 40.7, lon: -74.0 }, ams = { lat: 52.37, lon: 4.9 };
-  const rings = SC.contourRings([nyc, ams], 8000);
-  assert.strictEqual(rings.length, 2);
-  for (const r of rings) {
-    const c = metres([nyc.lat, nyc.lon], r[0]) < 100000 ? nyc : ams;
-    for (const p of r) assert.ok(Math.abs(metres([c.lat, c.lon], p) - 8000) <= 400);
-  }
+test('unusable shapes are skipped; none at all gives no area', () => {
+  assert.deepStrictEqual(ringPlain(SC.scopeHull([])), []);
+  assert.deepStrictEqual(ringPlain(SC.scopeHull([null])), []);
 });
 
 console.log('\n=== scope-contours.js: membership ===');
@@ -325,43 +316,51 @@ test('reachFor: min(radius, terrain), stretched by lobes, never under the floor'
   assert.ok(plain(SC.reachFor(5000, null, null, 250)).every(v => v === 5000), 'no terrain: the radius all round');
 });
 
-test('the outline follows the combined reach: cut by terrain west, radius north, a lobe east', () => {
+test('the hull spans a terrain notch from the directions either side of it', () => {
+  // One member, radius 8 km, terrain cut to 2 km from 225° to 315°: the
+  // area's west edge is the chord between 220° and 320°, 8 km x sin 40°
+  // west, not the 2 km cut. A general area, as chosen.
   const cut = new Float64Array(SC.sectors).fill(30000);
   for (let d = 225; d <= 315; d += 5) cut[RAY(d)] = 2000;
+  const rings = SC.scopeHull([SC.shapeFor(HOME, SC.reachFor(8000, cut, null, 1000), 1000)]);
+  const west = reachToward(rings, HOME, 270), north = reachToward(rings, HOME, 0);
+  assert.ok(Math.abs(west - 8000 * Math.sin(40 * Math.PI / 180)) < 300, 'west ' + west);
+  assert.ok(Math.abs(north - 8000) < 100, 'north ' + north);
+});
+
+test('a far link\'s tip is a corner of the area', () => {
   const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
-  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(8000, cut, lobe, 250), 250)]);
-  assert.strictEqual(rings.length, 1);
-  const west = reachToward(rings, HOME, 270), north = reachToward(rings, HOME, 0), east = reachToward(rings, HOME, 90);
-  assert.ok(Math.abs(west - 2000) < 250, 'west ' + west);
-  assert.ok(Math.abs(north - 8000) < 400, 'north ' + north);
-  assert.ok(Math.abs(east - 22000) < 1000, 'east ' + east);
+  const rings = SC.scopeHull([SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)]);
+  const tip = offset(HOME.lat, HOME.lon, 22000, 0);
+  assert.ok(rings[0].some(p => metres([tip.lat, tip.lon], p) < 60), 'no vertex at the lobe tip');
+  assert.ok(SC.inRings(rings, EAST.lat, EAST.lon), 'the linked node is outside');
 });
 
-test('a lone link\'s lobe is narrow and stays attached to a 1 km circle', () => {
-  const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
-  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 250), 250)]);
-  assert.strictEqual(rings.length, 1, 'the lobe came loose from the circle');
-  const on = reachToward(rings, HOME, 90), off = reachToward(rings, HOME, 80), far = reachToward(rings, HOME, 70);
-  assert.ok(on > 20000, 'on the link ' + on);
-  // Same width as the 32-sector lobes that were accepted on the live map
-  // (5.8 km at 10° off a 22 km link).
-  assert.ok(off < 7000, '10° off the link ' + off);
-  // Near the 1 km circle the lobe's base is widened by half a cell (a
-  // 22 km lobe sets a 550 m cell), which reaches a few degrees round it.
-  assert.ok(far < 2500, '20° off the link ' + far);
+// The guarantee the floor exists for: every member has at least 1 km of
+// area all round it, edge members included.
+function assertKmAround(rings, n, label) {
+  for (let d = 0; d < 360; d += 5) {
+    const t = d * Math.PI / 180, q = offset(n.lat, n.lon, 990 * Math.sin(t), 990 * Math.cos(t));
+    assert.ok(SC.inRings(rings, q.lat, q.lon), label + ': less than 1 km of area at ' + d + '°');
+  }
+}
+
+test('every member has at least 1 km of area all round, even boxed in by a ridge 300 m away', () => {
+  const boxed = new Float64Array(SC.sectors).fill(300);   // terrain cuts every direction to 300 m
+  const members = [
+    SC.shapeFor(HOME, SC.reachFor(8000, boxed, null, 1000), 1000),
+    SC.shapeFor(EAST, SC.reachFor(1000, null, null, 1000), 1000),
+    SC.shapeFor(FAR, SC.reachFor(20000, null, null, 1000), 1000),
+  ];
+  const rings = SC.scopeHull(members);
+  for (const n of [HOME, EAST, FAR]) assertKmAround(rings, n, n.public_key);
 });
 
-test('a node with no links and no terrain is a 1 km circle', () => {
-  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(1000, null, null, 250), 250)]);
-  assert.strictEqual(rings.length, 1);
-  for (const p of rings[0]) assert.ok(Math.abs(metres([HOME.lat, HOME.lon], p) - 1000) <= 60, 'ring point at ' + metres([HOME.lat, HOME.lon], p));
-});
-
-test('linked nodes sit inside the outline they extend', () => {
+test('linked nodes sit inside the area they extend', () => {
   const r = SC.linkReach([HOME, EAST, FAR], [two('h0', 'e1'), two('h0', 'f1')]);
-  const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, r.lobes.get(n.public_key), 250), 250));
-  const rings = SC.contourShapes(shapes);
-  for (const n of [HOME, EAST, FAR]) assert.ok(SC.inRings(rings, n.lat, n.lon), n.public_key + ' outside its own outline');
+  const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, r.lobes.get(n.public_key), 1000), 1000));
+  const rings = SC.scopeHull(shapes);
+  for (const n of [HOME, EAST, FAR]) assert.ok(SC.inRings(rings, n.lat, n.lon), n.public_key + ' outside its own area');
 });
 
 test('inRings: even-odd, so a hole is outside', () => {
@@ -603,26 +602,33 @@ test('terrain is asked for the members of drawn scopes only, with each one\'s ra
   });
 });
 
-test('a terrain answer reshapes that repeater: the west is cut to 2 km', () => {
+test('the floor is 1 km by default: the overlay keeps every member 1 km inside its border', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const t = fakeTerrain();
+  t.extentsFor = (items, onP) => Promise.resolve().then(() => items.forEach(it => onP(it.pk, new Float64Array(SC.sectors).fill(100))));
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
+  o.setVisible(true);
+  const ns = [Object.assign({ transported_scopes: ['#x'] }, HOME), Object.assign({ transported_scopes: ['#x'] }, EAST)];
+  o.setNodes(ns);
+  return tick().then(() => {
+    const rings = rec.polygons[rec.polygons.length - 1].rings;
+    for (const n of ns) assertKmAround(rings, n, n.public_key);
+  });
+});
+
+test('a terrain answer reshapes that repeater\'s area', () => {
   const { L, map, rec } = fakeLeaflet();
   const t = fakeTerrain();
   const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
   o.setVisible(true);
   o.setNodes([T_NODES[0], EAST]);   // EAST: no scope, but placed, so a link to it counts
-  const before = rec.polygons[rec.polygons.length - 1];
-  assert.ok(Math.abs(reachToward(before.rings, HOME, 270) - 1000) < 100, 'before: a 1 km circle, west ' + reachToward(before.rings, HOME, 270));
+  o.setLinks([two('h0', 'e1')]);    // R = 20 km
+  const westBefore = () => reachToward(rec.polygons[rec.polygons.length - 1].rings, HOME, 270);
   return tick().then(() => {
-    const after = rec.polygons[rec.polygons.length - 1];
-    // No links: R = 1 km, and the 2 km terrain cut is beyond it, so the
-    // west stays at 1 km; give it links to see the cut.
-    assert.ok(Math.abs(reachToward(after.rings, HOME, 270) - 1000) < 100);
-    o.setLinks([two('h0', 'e1')]);
-    return tick();
-  }).then(() => {
-    const now = rec.polygons[rec.polygons.length - 1];
-    const west = reachToward(now.rings, HOME, 270), north = reachToward(now.rings, HOME, 0);
-    assert.ok(Math.abs(west - 2000) < 300, 'west ' + west);
-    assert.ok(north > 18000, 'north ' + north);
+    // Cut to 2 km from 225° to 315°: the area's west edge becomes the chord
+    // between 220° and 320°, 20 km x sin 40° ~ 12.9 km, from 20 km.
+    const west = westBefore();
+    assert.ok(Math.abs(west - 20000 * Math.sin(40 * Math.PI / 180)) < 400, 'west ' + west);
   });
 });
 
@@ -1039,10 +1045,10 @@ test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes: median rebuild 
   const t1 = process.hrtime.bigint();
   o.setNodes(nodes.slice());
   const cachedMs = Number(process.hrtime.bigint() - t1) / 1e6;
-  console.log('     (median ' + median.toFixed(1) + ' ms over 5 runs (target 100 ms) for ' + o.stats().computed + ' contours over ' + edges.length + ' links; cached rebuild ' + cachedMs.toFixed(1) + ' ms)');
+  console.log('     (median ' + median.toFixed(1) + ' ms over 5 runs (target 30 ms) for ' + o.stats().computed + ' contours over ' + edges.length + ' links; cached rebuild ' + cachedMs.toFixed(1) + ' ms)');
   assert.ok(o.stats().computed >= 32);
   // Headroom over the target for slower CI runners.
-  assert.ok(median < 200, 'median ' + median.toFixed(1) + ' ms');
+  assert.ok(median < 60, 'median ' + median.toFixed(1) + ' ms');
 });
 
 test('a hover hit test over 64 outlines takes under 1 ms', () => {

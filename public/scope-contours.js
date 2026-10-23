@@ -1,7 +1,7 @@
 /* Region scope reach contours for the map and live pages.
 
-   For each MeshCore region scope, outline the area the nodes that handle it
-   are proven to reach, merged into one shape per cluster. Two kinds:
+   For each MeshCore region scope, outline the general area its nodes reach:
+   one area per scope and kind. Two kinds:
 
    - observed: nodes whose full pubkey appears in the path of traffic for the
      scope (transported_scopes, #1751/#1902). Drawn solid.
@@ -11,7 +11,7 @@
      configuration is not evidence of reach.
 
    A node's reach, in 72 directions (reachFor):
-     max( min(R, terrain cut), link lobe, 250 m floor )
+     max( min(R, terrain cut), link lobe, 1 km floor )
    - R, how far it regularly reaches, comes from its proven two-way links in
      the neighbor graph (linkReach): the 75th percentile of their distances
      × 1.1, 1-20 km; 1 km for a node with no links.
@@ -22,9 +22,10 @@
      ±11.25°, so evidence always beats the model.
    Interpolating between the 72 directions keeps the shape smooth.
 
-   The outline is a marching-squares contour of a field: within each cluster
-   of nodes, every grid vertex holds min over nodes of distance / reach in that
-   direction, and the contour is drawn at 1. Results are cached per scope and
+   A scope's outline is its general area: the convex hull of its members'
+   reach shapes (scopeHull), everything between their farthest edges
+   included. The hull contains every member's whole shape, so no member is
+   closer to the border than the 1 km floor. Hulls are cached per scope and
    recomputed only when its members, their positions or their reach change.
 
    Hover and click are hit-tested from the map's own events, not from the
@@ -38,8 +39,11 @@
 (function () {
   'use strict';
 
-  // No reach is ever drawn closer than this, whatever the terrain says.
-  var DEFAULT_FLOOR_M = 250;
+  // No reach is ever drawn closer than this, whatever the terrain says: a
+  // repeater that carries a scope always has at least this much of the
+  // region round it, edge repeaters included. Within ~1 km a LoRa signal
+  // from a mast mostly gets round nearby terrain anyway.
+  var DEFAULT_FLOOR_M = 1000;
   // Radius rule (linkReach): 75th percentile of two-way link distances,
   // × LINK_MARGIN, clamped; a node with no links gets NO_LINK_RADIUS_M.
   var RADIUS_PCT = 0.75;
@@ -55,17 +59,14 @@
   // A link proves the far node hears this one; the outline is drawn a little
   // past it so the linked node sits inside rather than on the edge.
   var LINK_MARGIN = 1.1;
-  // The grid never gets finer than this, however small the floor.
-  var MIN_CELL_M = 150;
   var PANE = 'mcScopeContoursPane';
   // Under overlayPane (400) and markerPane (600): outlines never cover a
   // route line or a node marker.
   var PANE_Z = 350;
   var PALETTE_SIZE = 8;
   var M_PER_DEG = 111320;
-  // A cluster's grid is capped at this many vertices. Past it the cell grows,
-  // so a scope spread over a large area costs the same as a compact one.
-  var MAX_VERTICES = 100000;
+  // Points sampled per sector along each member's reach edge for the hull.
+  var BOUNDARY_PER_SECTOR = 2;
   var HIDDEN_KEY = 'meshcore-scope-contours-hidden';
 
   // normRegion mirrors the server's normScope (scope_audit.go): strip one
@@ -160,13 +161,6 @@
 
   // ── Reach ────────────────────────────────────────────────────────────────
 
-  // sectorOf maps a bearing (radians, 0 = north, clockwise) to the sector
-  // whose centre is nearest: sector i is centred on i * 360/SECTORS degrees.
-  function sectorOf(bearing) {
-    var s = Math.round(bearing / SECTOR_RAD) % SECTORS;
-    return s < 0 ? s + SECTORS : s;
-  }
-
   function angleDiff(a, b) {
     var d = (a - b) % (2 * Math.PI);
     if (d > Math.PI) d -= 2 * Math.PI;
@@ -247,9 +241,7 @@
   }
 
   // shapeFor builds the reach shape of one node: its position plus
-  // per-sector reach (ext; null for a plain circle of floorM). box is the
-  // shape's extent in metres west/east/south/north of the node, so a lobe
-  // to the east costs a strip, not a square around the node.
+  // per-sector reach (ext; null for a plain circle of floorM).
   function shapeFor(n, ext, floorM) {
     var p = position(n);
     var e = new Float64Array(SECTORS);
@@ -259,49 +251,7 @@
       if (e[i] > max) max = e[i];
       if (e[i] < min) min = e[i];
     }
-    var shape = { lat: p[0], lon: p[1], ext: e, maxExt: max, minExt: min, uniform: max === min };
-    if (shape.uniform) { shape.box = [-max, max, -max, max]; return shape; }
-    shape.box = shapeBox(shape);
-    // near[i]: the most any bearing within a sector of interval i (between
-    // centres i and i+1) can reach. A vertex at least that far out is outside
-    // even after the field fill's half-cell widening, while that widening
-    // spans no more than a sector, so the fill rates it d / near without a
-    // lookup.
-    var near = new Float64Array(SECTORS);
-    for (var k = 0; k < SECTORS; k++) {
-      near[k] = Math.max(e[(k + SECTORS - 1) % SECTORS], e[k], e[(k + 1) % SECTORS], e[(k + 2) % SECTORS]);
-    }
-    shape.near = near;
-    return shape;
-  }
-
-  // shapeBox samples the boundary at 2 points per sector. Between samples the
-  // boundary can bulge by about 0.1% of the reach, which the 2-cell margin
-  // the field fill adds covers.
-  function shapeBox(shape) {
-    var b = [0, 0, 0, 0], n = SECTORS * 2;
-    for (var k = 0; k < n; k++) {
-      var t = (k / n) * 2 * Math.PI, r = reachAt(shape, t);
-      var x = r * Math.sin(t), y = r * Math.cos(t);
-      if (x < b[0]) b[0] = x; if (x > b[1]) b[1] = x;
-      if (y < b[2]) b[2] = y; if (y > b[3]) b[3] = y;
-    }
-    return b;
-  }
-
-  // bearingOf is atan2(dx, dy), the compass bearing of an offset, as a
-  // polynomial: error under 2.1e-4 rad (0.012°, measured), far below what a
-  // 5° sector blend can show, at a fraction of Math.atan2's cost in the
-  // per-vertex fill.
-  function bearingOf(dx, dy) {
-    var ax = Math.abs(dy), ay = Math.abs(dx);
-    var hi = ax > ay ? ax : ay;
-    if (hi === 0) return 0;
-    var a = (ax < ay ? ax : ay) / hi, q = a * a;
-    var r = ((-0.0464964749 * q + 0.15931422) * q - 0.327622764) * q * a + a;
-    if (ay > ax) r = 1.5707963267948966 - r;
-    if (dy < 0) r = Math.PI - r;
-    return dx < 0 ? -r : r;
+    return { lat: p[0], lon: p[1], ext: e, maxExt: max, minExt: min, uniform: max === min };
   }
 
   // reachAt interpolates a shape's reach at a bearing between the two nearest
@@ -317,252 +267,117 @@
 
   // ── Geometry ─────────────────────────────────────────────────────────────
 
-  // clusters splits shapes into groups that can touch (centres within the sum
-  // of their longest reaches), so each group gets its own compact grid and
-  // projection. Spatial hash with cells at least twice the longest reach:
-  // only the 3x3 neighbourhood is checked, so this is linear in the count.
-  function clusters(shapes) {
-    var maxAbsLat = 0, maxExt = 0;
-    shapes.forEach(function (s) { maxAbsLat = Math.max(maxAbsLat, Math.abs(s.lat)); maxExt = Math.max(maxExt, s.maxExt); });
-    var reach = 2 * maxExt;
-    var latCell = reach / M_PER_DEG;
-    // The smallest cos in the set makes every cell at least that wide
-    // wherever a shape is, so no pair within reach lands two cells apart.
-    var lonCell = Math.min(360, reach / (M_PER_DEG * Math.max(0.01, Math.cos(maxAbsLat * Math.PI / 180))));
-    var parent = shapes.map(function (_, i) { return i; });
-    function find(i) { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; }
-    var cells = new Map();
-    var keyOf = function (cy, cx) { return cy + ',' + cx; };
-    shapes.forEach(function (p, i) {
-      var cy = Math.floor(p.lat / latCell), cx = Math.floor(p.lon / lonCell);
-      for (var dy = -1; dy <= 1; dy++) {
-        for (var dx = -1; dx <= 1; dx++) {
-          var bucket = cells.get(keyOf(cy + dy, cx + dx));
-          if (!bucket) continue;
-          for (var k = 0; k < bucket.length; k++) {
-            var j = bucket[k], q = shapes[j];
-            var cos = Math.cos(((p.lat + q.lat) / 2) * Math.PI / 180);
-            var ey = (p.lat - q.lat) * M_PER_DEG, ex = (p.lon - q.lon) * M_PER_DEG * cos;
-            var touch = p.maxExt + q.maxExt;
-            if (ey * ey + ex * ex <= touch * touch) parent[find(i)] = find(j);
-          }
-        }
-      }
-      var own = keyOf(cy, cx);
-      if (!cells.has(own)) cells.set(own, []);
-      cells.get(own).push(i);
-    });
-    var byRoot = new Map();
-    shapes.forEach(function (p, i) {
-      var r = find(i);
-      if (!byRoot.has(r)) byRoot.set(r, []);
-      byRoot.get(r).push(p);
-    });
-    return Array.from(byRoot.values());
+  // shapeEdge samples a shape's edge into a flat Float64Array [lat, lon,
+  // lat, lon, ...] (no per-point arrays: a rebuild samples thousands of
+  // members), with its bounding box: BOUNDARY_PER_SECTOR points per sector,
+  // or one per sector for a plain circle (a 5° chord sits 0.1% inside the
+  // arc). Between samples the edge bulges out by about 0.1% of the reach,
+  // too little to see. Sampled once per member and shared between the
+  // scopes it is in. null for an unusable shape.
+  function shapeEdge(shape) {
+    if (!shape || !isFinite(shape.lat) || !isFinite(shape.lon) || !(shape.minExt > 0)) return null;
+    var n = SECTORS * (shape.uniform ? 1 : BOUNDARY_PER_SECTOR);
+    var cos = Math.cos(shape.lat * Math.PI / 180);
+    var pts = new Float64Array(2 * n), box = [Infinity, -Infinity, Infinity, -Infinity];
+    for (var k = 0; k < n; k++) {
+      var t = (k / n) * 2 * Math.PI, r = reachAt(shape, t);
+      var la = shape.lat + r * Math.cos(t) / M_PER_DEG, lo = shape.lon + r * Math.sin(t) / (M_PER_DEG * cos);
+      pts[2 * k] = la; pts[2 * k + 1] = lo;
+      if (la < box[0]) box[0] = la; if (la > box[1]) box[1] = la;
+      if (lo < box[2]) box[2] = lo; if (lo > box[3]) box[3] = lo;
+    }
+    return { pts: pts, box: box };
   }
 
-  // Marching-squares segments per cell case, as pairs of cell edges
-  // (0 bottom, 1 right, 2 top, 3 left). Corner bits: 1 bottom-left,
-  // 2 bottom-right, 4 top-right, 8 top-left. Cases 5 and 10 are saddles,
-  // resolved by the cell centre below.
-  var CASES = [
-    [], [[3, 0]], [[0, 1]], [[3, 1]], [[1, 2]], null, [[0, 2]], [[3, 2]],
-    [[2, 3]], [[0, 2]], null, [[1, 2]], [[3, 1]], [[0, 1]], [[3, 0]], [],
-  ];
-
-  // Scratch buffers shared by every clusterRings call, grown to the largest
-  // grid seen and never past MAX_VERTICES (the cell grows instead), so a
-  // rebuild allocates nothing per cluster. The edge index is not cleared
-  // between clusters: an entry counts only if its stamp is this call's.
-  var scratch = { field: null, first: null, second: null, stamp: null, rowLo: null, rowHi: null, gen: 0 };
-  function scratchBuf(name, Ctor, n) {
-    if (!scratch[name] || scratch[name].length < n) scratch[name] = new Ctor(n);
-    return scratch[name];
+  // hullOfEdges is the convex hull of all the edges' points as one ring of
+  // [lat, lon] (Andrew's monotone chain, O(n log n)), in a local projection
+  // so a degree of longitude is not taken for a degree of latitude.
+  // Collinear points are dropped. Before the sort, an Akl-Toussaint filter:
+  // the 8 extremes (by x, y, x+y, x-y) span a convex octagon, and nothing
+  // strictly inside it can be on the hull; a member whose whole box is
+  // inside is dropped without looking at its points. [] for fewer than
+  // three distinct points.
+  function hullOfEdges(edges) {
+    edges = edges.filter(Boolean);
+    var n = 0, lat0 = 0, e, i, k;
+    for (e = 0; e < edges.length; e++) { n += edges[e].pts.length / 2; lat0 += (edges[e].box[0] + edges[e].box[1]) / 2; }
+    if (n < 3) return [];
+    var kx = Math.cos((lat0 / edges.length) * Math.PI / 180);
+    var xs = new Float64Array(n), ys = new Float64Array(n), start = new Int32Array(edges.length + 1);
+    for (e = 0, i = 0; e < edges.length; e++) {
+      var p = edges[e].pts;
+      start[e] = i;
+      for (k = 0; k < p.length; k += 2, i++) { ys[i] = p[k]; xs[i] = p[k + 1] * kx; }
+    }
+    start[edges.length] = n;
+    function cross(o, a, b) { return (xs[a] - xs[o]) * (ys[b] - ys[o]) - (ys[a] - ys[o]) * (xs[b] - xs[o]); }
+    // CCW: min y, max x-y, max x, max x+y, max y, min x-y, min x, min x+y
+    var ext = [0, 0, 0, 0, 0, 0, 0, 0];
+    for (i = 1; i < n; i++) {
+      var x = xs[i], y = ys[i];
+      if (y < ys[ext[0]]) ext[0] = i;
+      if (x - y > xs[ext[1]] - ys[ext[1]]) ext[1] = i;
+      if (x > xs[ext[2]]) ext[2] = i;
+      if (x + y > xs[ext[3]] + ys[ext[3]]) ext[3] = i;
+      if (y > ys[ext[4]]) ext[4] = i;
+      if (x - y < xs[ext[5]] - ys[ext[5]]) ext[5] = i;
+      if (x < xs[ext[6]]) ext[6] = i;
+      if (x + y < xs[ext[7]] + ys[ext[7]]) ext[7] = i;
+    }
+    var poly = [];
+    ext.forEach(function (v) { if (poly[poly.length - 1] !== v && poly[0] !== v) poly.push(v); });
+    var m = poly.length;
+    function strictlyInside(px, py) {
+      if (m < 3) return false;
+      for (var j = 0; j < m; j++) {
+        var a = poly[j], b = poly[(j + 1) % m];
+        if ((xs[b] - xs[a]) * (py - ys[a]) - (ys[b] - ys[a]) * (px - xs[a]) <= 0) return false;
+      }
+      return true;
+    }
+    var ord = [];
+    for (e = 0; e < edges.length; e++) {
+      var bx = edges[e].box;
+      if (strictlyInside(bx[2] * kx, bx[0]) && strictlyInside(bx[3] * kx, bx[0]) &&
+          strictlyInside(bx[2] * kx, bx[1]) && strictlyInside(bx[3] * kx, bx[1])) continue;
+      for (i = start[e]; i < start[e + 1]; i++) if (!strictlyInside(xs[i], ys[i])) ord.push(i);
+    }
+    ord.sort(function (a, b) { return xs[a] - xs[b] || ys[a] - ys[b]; });
+    var hull = [], len = ord.length;
+    for (k = 0; k < len; k++) {
+      while (hull.length >= 2 && cross(hull[hull.length - 2], hull[hull.length - 1], ord[k]) <= 0) hull.pop();
+      hull.push(ord[k]);
+    }
+    var lowerLen = hull.length + 1;
+    for (k = len - 2; k >= 0; k--) {
+      while (hull.length >= lowerLen && cross(hull[hull.length - 2], hull[hull.length - 1], ord[k]) <= 0) hull.pop();
+      hull.push(ord[k]);
+    }
+    hull.pop();
+    return hull.length >= 3 ? hull.map(function (j) { return [ys[j], xs[j] / kx]; }) : [];
   }
 
-  // Saddle resolutions: A cuts off bottom-right and top-left, B bottom-left
-  // and top-right.
-  var SADDLE_A = [[0, 1], [2, 3]], SADDLE_B = [[3, 0], [1, 2]];
-
-  // clusterRings traces the reach contour around one cluster of shapes.
-  function clusterRings(shapes) {
-    var lat0 = 0, lon0 = 0, minExt = Infinity, maxExt = 0;
-    shapes.forEach(function (s) { lat0 += s.lat; lon0 += s.lon; if (s.minExt < minExt) minExt = s.minExt; if (s.maxExt > maxExt) maxExt = s.maxExt; });
-    lat0 /= shapes.length; lon0 /= shapes.length;
-    var kx = M_PER_DEG * Math.cos(lat0 * Math.PI / 180), ky = M_PER_DEG;
-    var xy = shapes.map(function (s) { return [(s.lon - lon0) * kx, (s.lat - lat0) * ky]; });
-
-    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    xy.forEach(function (p, k) {
-      var b = shapes[k].box;
-      if (p[0] + b[0] < minX) minX = p[0] + b[0]; if (p[0] + b[1] > maxX) maxX = p[0] + b[1];
-      if (p[1] + b[2] < minY) minY = p[1] + b[2]; if (p[1] + b[3] > maxY) maxY = p[1] + b[3];
+  // convexHull of [lat, lon] points as one ring: the same hull, for callers
+  // with plain points.
+  function convexHull(points) {
+    if (!points || points.length < 3) return [];
+    var pts = new Float64Array(points.length * 2), box = [Infinity, -Infinity, Infinity, -Infinity];
+    points.forEach(function (p, i) {
+      pts[2 * i] = p[0]; pts[2 * i + 1] = p[1];
+      if (p[0] < box[0]) box[0] = p[0]; if (p[0] > box[1]) box[1] = p[0];
+      if (p[1] < box[2]) box[2] = p[1]; if (p[1] > box[3]) box[3] = p[1];
     });
-    // The smallest reach over 2.5 still traces a floor circle within 5% (the
-    // contour is interpolated, not stepped); finer cells cost the square. A
-    // cluster holding a big shape needs no finer than 1/40 of it: a 20 km
-    // reach is still ~80 cells across, at zooms where a pixel is 60-150 m.
-    // The vertex cap coarsens it for a sprawling cluster.
-    var cell = Math.max(minExt / 2.5, maxExt / 40, MIN_CELL_M);
-    var span = function (c) { return { nx: Math.ceil((maxX - minX + 4 * c) / c) + 1, ny: Math.ceil((maxY - minY + 4 * c) / c) + 1 }; };
-    var dims = span(cell);
-    if (dims.nx * dims.ny > MAX_VERTICES) {
-      cell *= Math.sqrt((dims.nx * dims.ny) / MAX_VERTICES);
-      dims = span(cell);
-    }
-    var nx = dims.nx, ny = dims.ny;
-    var ox = minX - 2 * cell, oy = minY - 2 * cell;
-
-    // Field: distance / reach in that direction, inside where < 1. Each shape
-    // fills only its own box plus 2 cells: every vertex next to the contour
-    // lies within that of the shape that puts it there, so the rest stay
-    // "far". A uniform shape needs no bearing, and neither does a vertex well
-    // inside the floor: its value only has to read as inside, since no
-    // vertex a cell from it can be outside.
-    var far = 3;
-    var field = scratchBuf('field', Float64Array, nx * ny);
-    field.fill(far, 0, nx * ny);
-    var pad = 2 * cell;
-    // rowLo/rowHi: the columns each row's fill touched. A cluster's grid is
-    // its bounding box, mostly empty when the shapes chain across it, and
-    // outside these spans every vertex is far, so the marching pass below
-    // only walks the spans.
-    var rowLo = scratchBuf('rowLo', Int32Array, ny), rowHi = scratchBuf('rowHi', Int32Array, ny);
-    rowLo.fill(nx, 0, ny); rowHi.fill(-1, 0, ny);
-    xy.forEach(function (p, k) {
-      var s = shapes[k], b = s.box;
-      var i0 = Math.max(0, Math.floor((p[0] + b[0] - pad - ox) / cell)), i1 = Math.min(nx - 1, Math.ceil((p[0] + b[1] + pad - ox) / cell));
-      var j0 = Math.max(0, Math.floor((p[1] + b[2] - pad - oy) / cell)), j1 = Math.min(ny - 1, Math.ceil((p[1] + b[3] + pad - oy) / cell));
-      var inv = 1 / s.minExt, lim = s.maxExt + pad, half = cell / 2;
-      for (var j = j0; j <= j1; j++) {
-        if (i0 < rowLo[j]) rowLo[j] = i0;
-        if (i1 > rowHi[j]) rowHi[j] = i1;
-        var dy = oy + j * cell - p[1];
-        for (var i = i0; i <= i1; i++) {
-          var dx = ox + i * cell - p[0];
-          var d = Math.sqrt(dx * dx + dy * dy);
-          if (d > lim) continue;
-          var r;
-          // Every bearing reaches at least minExt, so inside it no bearing is
-          // needed; the value is exact where the contour is the floor itself,
-          // the only place a vertex this close can be next to it.
-          if (s.uniform || d < s.minExt) r = d * inv;
-          else {
-            var bb = bearingOf(dx, dy);
-            var fi = bb / SECTOR_RAD;
-            if (fi < 0) fi += SECTORS;
-            var nr = s.near[Math.floor(fi) % SECTORS];
-            // Outside for certain, once the half-cell widening below spans
-            // no more than a sector. d / nr is a lower bound on its value,
-            // still above 1, and exact where the edge is the floor circle;
-            // anywhere else such a vertex is a cell or more from the edge.
-            if (d >= nr && d * SECTOR_RAD >= half) r = d / nr;
-            else {
-            // The reach is the most within half a cell either side of the
-            // bearing. Near the node a lobe is only a few sectors wide, about
-            // a cell: without this widening the grid misses its base and the
-            // lobe comes loose from the node.
-            var del = half / d;
-            var e0 = reachAt(s, bb), e1 = reachAt(s, bb + del), e2 = reachAt(s, bb - del);
-            r = d / (e0 > e1 ? (e0 > e2 ? e0 : e2) : (e1 > e2 ? e1 : e2));
-            }
-          }
-          var idx = j * nx + i;
-          if (r < field[idx]) field[idx] = r;
-        }
-      }
-    });
-
-    // Edge ids: horizontal edge from vertex (i,j) to (i+1,j) is 2*(j*nx+i),
-    // vertical edge from (i,j) to (i,j+1) is 2*(j*nx+i)+1. Neighbouring cells
-    // share an edge id, which is what joins their segments into rings.
-    function edgePoint(e) {
-      var v = e >> 1, i = v % nx, j = (v - i) / nx;
-      var a = field[v], b, bx = i, by = j;
-      if (e & 1) { b = field[v + nx]; by = j + 1; } else { b = field[v + 1]; bx = i + 1; }
-      var t = (1 - a) / (b - a);
-      return [ox + (i + (bx - i) * t) * cell, oy + (j + (by - j) * t) * cell];
-    }
-    // segA/segB: the two endpoint edges of each segment. Every contour edge
-    // belongs to exactly two segments, so first/second, indexed by edge id,
-    // find a segment's neighbours without a Map or an array per edge.
-    var segA = [], segB = [];
-    var first = scratchBuf('first', Int32Array, 2 * nx * ny), second = scratchBuf('second', Int32Array, 2 * nx * ny);
-    var stamp = scratchBuf('stamp', Int32Array, 2 * nx * ny);
-    if (++scratch.gen > 0x7ffffff0) { stamp.fill(0); scratch.gen = 1; }
-    var gen = scratch.gen;
-    function link(e, s) {
-      if (stamp[e] !== gen) { stamp[e] = gen; first[e] = s; second[e] = -1; } else second[e] = s;
-    }
-    // The id of side 0 bottom, 1 right, 2 top or 3 left of the cell whose
-    // bottom-left vertex is v.
-    function edgeId(v, side) {
-      return side === 0 ? 2 * v : side === 1 ? 2 * (v + 1) + 1 : side === 2 ? 2 * (v + nx) : 2 * v + 1;
-    }
-    function addSeg(e1, e2) {
-      var s = segA.length;
-      segA.push(e1); segB.push(e2);
-      link(e1, s); link(e2, s);
-    }
-    for (var j = 0; j < ny - 1; j++) {
-      var lo = Math.max(0, Math.min(rowLo[j], rowLo[j + 1]) - 1), hi = Math.min(nx - 2, Math.max(rowHi[j], rowHi[j + 1]));
-      for (var i = lo; i <= hi; i++) {
-        var v = j * nx + i;
-        var bl = field[v], br = field[v + 1], tr = field[v + nx + 1], tl = field[v + nx];
-        var c = (bl < 1 ? 1 : 0) | (br < 1 ? 2 : 0) | (tr < 1 ? 4 : 0) | (tl < 1 ? 8 : 0);
-        if (c === 0 || c === 15) continue;
-        var pairs = CASES[c];
-        if (!pairs) {
-          var centreIn = (bl + br + tr + tl) / 4 < 1;
-          pairs = c === 5 ? (centreIn ? SADDLE_A : SADDLE_B) : (centreIn ? SADDLE_B : SADDLE_A);
-        }
-        for (var k = 0; k < pairs.length; k++) addSeg(edgeId(v, pairs[k][0]), edgeId(v, pairs[k][1]));
-      }
-    }
-
-    // Join segments into closed rings. The grid border is outside every
-    // shape, so each contour edge is shared by exactly two segments.
-    var used = new Uint8Array(segA.length);
-    var rings = [];
-    for (var s0 = 0; s0 < segA.length; s0++) {
-      if (used[s0]) continue;
-      used[s0] = 1;
-      var start = segA[s0], cur = segB[s0];
-      var ring = [edgePoint(start)];
-      var guard = segA.length;
-      while (cur !== start && guard-- > 0) {
-        ring.push(edgePoint(cur));
-        if (stamp[cur] !== gen) break;
-        var next = first[cur];
-        if (next < 0 || used[next]) next = second[cur];
-        if (next < 0 || used[next]) break;
-        used[next] = 1;
-        cur = segA[next] === cur ? segB[next] : segA[next];
-      }
-      if (ring.length >= 3) {
-        rings.push(ring.map(function (p) { return [lat0 + p[1] / ky, lon0 + p[0] / kx]; }));
-      }
-    }
-    return rings;
+    return hullOfEdges([{ pts: pts, box: box }]);
   }
 
-  // contourShapes returns the merged outline of reach shapes (see shapeFor):
-  // an array of rings, each [[lat, lon], ...]. Holes come out as rings of
-  // their own; Leaflet's evenodd fill draws them as holes.
-  function contourShapes(shapes) {
-    var ok = (shapes || []).filter(function (s) { return s && isFinite(s.lat) && isFinite(s.lon) && s.minExt > 0; });
-    if (!ok.length) return [];
-    var out = [];
-    clusters(ok).forEach(function (c) { Array.prototype.push.apply(out, clusterRings(c)); });
-    return out;
-  }
-
-  // contourRings is the circle case: every point reaches radiusM all round.
-  function contourRings(points, radiusM) {
-    if (!(radiusM > 0)) return [];
-    var shapes = [];
-    (points || []).forEach(function (p) { if (position(p)) shapes.push(shapeFor(p, null, radiusM)); });
-    return contourShapes(shapes);
+  // scopeHull is a scope's general area: the convex hull of its members'
+  // reach shapes, everything between their farthest edges included, as
+  // rings ([] or one ring), the shape the polygon and hit tests take. It
+  // contains every member's whole shape, so no member is ever closer to the
+  // border than its floor.
+  function scopeHull(shapes) {
+    var ring = hullOfEdges((shapes || []).map(shapeEdge));
+    return ring.length ? [ring] : [];
   }
 
   // ── Hit testing ──────────────────────────────────────────────────────────
@@ -620,9 +435,16 @@
 
   // ── Overlay ──────────────────────────────────────────────────────────────
 
+  // shapeKey identifies a member's shape: its pubkey and a 32-bit FNV-1a
+  // hash of its position and its reach rounded to the metre. A string of 72
+  // numbers per member was a measured 8% of a rebuild.
   function shapeKey(n, s) {
-    var head = n.public_key + '@' + s.lat + ',' + s.lon + ':';
-    return s.uniform ? head + 'u' + Math.round(s.ext[0]) : head + Array.prototype.map.call(s.ext, Math.round).join(',');
+    var h = 2166136261;
+    function mix(v) { h = Math.imul(h ^ (v | 0), 16777619); }
+    mix(Math.round(s.lat * 1e6)); mix(Math.round(s.lon * 1e6));
+    if (s.uniform) mix(Math.round(s.ext[0]));
+    else for (var i = 0; i < SECTORS; i++) mix(Math.round(s.ext[i]));
+    return n.public_key + ':' + (h >>> 0).toString(36) + (s.uniform ? 'u' : '');
   }
 
   function plural(n) { return n + (n === 1 ? ' node' : ' nodes'); }
@@ -728,7 +550,8 @@
     var nodes = [];
     var links = null;
     var reach = null;       // linkReach(nodes, links), rebuilt when either changes
-    var shapes = new Map(); // pubkey → { shape, key }, rebuilt with reach
+    var shapes = new Map(); // pubkey → { shape, key, edge }, rebuilt with reach
+    var edgeCache = new Map(); // shape key → sampled edge, kept across rebuilds while used
     var terrain = new Map(); // pubkey → { key, ext, meta } from the terrain provider
     var heights = null;      // operator antenna heights, { key: metres }; null until loaded
     var terrainAsked = new Set(); // pk|key requested and not yet answered
@@ -780,7 +603,9 @@
         var t = terrain.get(n.public_key);
         var cut = t && t.key === terrainKey(n) ? t.ext : null;
         var s = shapeFor(n, reachFor(radiusOf(n), cut, reach && reach.lobes.get(n.public_key), floorM), floorM);
-        e = { shape: s, key: shapeKey(n, s) };
+        var key = shapeKey(n, s), edge = edgeCache.get(key);
+        if (!edge) { edge = shapeEdge(s); edgeCache.set(key, edge); }
+        e = { shape: s, key: key, edge: edge };
         shapes.set(n.public_key, e);
       }
       return e;
@@ -836,11 +661,20 @@
     function rings(scope, kind, members) {
       var entries = members.map(shaped);
       var key = scope + '|' + kind;
-      var sig = entries.map(function (e) { return e.key; }).sort().join('|');
+      // Order-free and cheap: how many members, and the sum and xor of a hash
+      // of each member's key.
+      var sum = 0, xor = 0;
+      entries.forEach(function (e) {
+        var h = 2166136261, k = e.key;
+        for (var i = 0; i < k.length; i++) h = Math.imul(h ^ k.charCodeAt(i), 16777619);
+        sum = (sum + (h >>> 0)) % 4294967296; xor ^= h;
+      });
+      var sig = entries.length + '|' + sum + '|' + (xor >>> 0);
       var hit = cache.get(key);
       if (hit && hit.sig === sig) return hit.rings;
       computed++;
-      var r = contourShapes(entries.map(function (e) { return e.shape; }));
+      var ring = hullOfEdges(entries.map(function (e) { return e.edge; }));
+      var r = ring.length ? [ring] : [];
       cache.set(key, { sig: sig, rings: r });
       return r;
     }
@@ -891,6 +725,12 @@
       // Bounded by the scopes in the current node list: a scope that left it
       // leaves the cache too.
       if (visible) Array.from(cache.keys()).forEach(function (k) { if (!live.has(k)) cache.delete(k); });
+      // Bounded the same way: only the edges this render used survive.
+      if (visible) {
+        var used = new Set();
+        shapes.forEach(function (e) { used.add(e.key); });
+        Array.from(edgeCache.keys()).forEach(function (k) { if (!used.has(k)) edgeCache.delete(k); });
+      }
       if (visible) requestTerrain(members);
       var info = { terrain: opts.terrain ? opts.terrain.status() : 'off' };
       listeners.forEach(function (fn) { fn(list, visible, info); });
@@ -1040,10 +880,10 @@
 
   // ── Scope list ───────────────────────────────────────────────────────────
 
-  var TERRAIN_NOTE = 'Each repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links. ' +
+  var TERRAIN_NOTE = 'Each area spans the farthest reach of its repeaters, at least 1 km round each. A repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links. ' +
     'Antenna heights are the operator\'s where set; otherwise 10 m, raised where a repeater\'s links need more (click an outline to see them). ' +
     'Terrain: AWS Terrain Tiles (Mapzen; SRTM, USGS 3DEP and others), bare earth: buildings and trees are not in it.';
-  var NO_TERRAIN_NOTE = 'Terrain unavailable: outlines show each repeater\'s range from its two-way links, stretched to proven links, with no terrain trimming.';
+  var NO_TERRAIN_NOTE = 'Terrain unavailable: each area spans its repeaters\' range from their two-way links, stretched to proven links, with no terrain trimming.';
 
   function listHtml(items, opts, info) {
     var rows = items.map(function (it) {
@@ -1112,8 +952,8 @@
     reachFor: reachFor,
     noLinkRadius: NO_LINK_RADIUS_M,
     shapeFor: shapeFor,
-    contourShapes: contourShapes,
-    contourRings: contourRings,
+    convexHull: convexHull,
+    scopeHull: scopeHull,
     inRings: inRings,
     colorIndex: colorIndex,
     createPulser: createPulser,
