@@ -531,7 +531,7 @@
             <label for="mcRegionFilter" class="sr-only">Show nodes with evidence for a region scope</label>
             <select id="mcRegionFilter" title="Show nodes that declare a region scope or were seen carrying its traffic">${regionFilterOptionsHtml([], filters.regionScope)}</select>
             <div id="mcRegionHint" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
-            <label for="mcScopeContours" title="Outline the area the nodes that handle each region scope are proven to reach, following their two-way links. Solid: seen carrying its traffic. Dashed: configured for it but not seen carrying it. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Reach contours</label>
+            <label for="mcScopeContours" title="Outline where each region scope's repeaters reach: each one's range from its two-way links, trimmed by line of sight over terrain and stretched to proven links. Solid: seen carrying its traffic. Dashed: configured for it but not seen carrying it. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Reach contours</label>
             <div id="mcScopeList" class="mc-scope-list" hidden></div>
           </fieldset>
           <fieldset class="mc-section">
@@ -736,6 +736,8 @@
       // api()'s cache, fetched only while the contours are on.
       reachOverlay = window.ScopeContours.createOverlay(L, map, {
         loadLinks: () => api('/analytics/neighbor-graph', { ttl: CLIENT_TTL.analyticsRF }).then(d => (d && d.edges) || []),
+        // Line of sight over elevation tiles trims each repeater's reach.
+        terrain: window.TerrainReach ? window.TerrainReach.shared() : null,
       });
       reachOverlay.setOnly(filters.regionScope);
       window.ScopeContours.mountScopeList(document.getElementById('mcScopeList'), reachOverlay);

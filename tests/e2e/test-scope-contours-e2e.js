@@ -20,6 +20,7 @@
  */
 'use strict';
 const { chromium } = require('playwright');
+const zlib = require('zlib');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 
@@ -42,6 +43,40 @@ const NODES = [
   { public_key: pk('a4'), name: 'Daly South', role: 'repeater', lat: 37.74, lon: -122.30, last_seen: now, hash_size: 1, declared_regions: ['south-bay'] },
   { public_key: pk('a5'), name: 'SF Default', role: 'repeater', lat: 37.76, lon: -122.44, last_seen: now, hash_size: 1, default_scope: '#sf', transported_scopes: ['#sf'] },
 ];
+// Terrain: flat 50 m with a 150 m ridge, 300 m wide, running north-south
+// about 1 km west of SF Default. Served as Terrarium PNGs in place of AWS
+// Terrain Tiles, so the test needs no network and knows the answer.
+const RIDGE_LON = -122.4514, RIDGE_HALF = 0.0017;
+function terrariumPng(z, x, y) {
+  const n = Math.pow(2, z), W = 256;
+  const raw = Buffer.alloc((W * 3 + 1) * W);
+  for (let py = 0; py < W; py++) {
+    raw[py * (W * 3 + 1)] = 0;
+    for (let px = 0; px < W; px++) {
+      const lon = (x + (px + 0.5) / W) / n * 360 - 180;
+      const elev = Math.abs(lon - RIDGE_LON) < RIDGE_HALF ? 150 : 50;
+      const v = elev + 32768, o = py * (W * 3 + 1) + 1 + px * 3;
+      raw[o] = Math.floor(v / 256); raw[o + 1] = Math.floor(v) % 256; raw[o + 2] = Math.round((v % 1) * 256);
+    }
+  }
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(td) >>> 0);
+    return Buffer.concat([len, td, crc]);
+  };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(W, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+const TILE_GLOB = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/**';
+function serveTiles(page, mode) {
+  return page.route(TILE_GLOB, (route) => {
+    if (mode === 'fail') return route.fulfill({ status: 503, body: 'down' });
+    const m = route.request().url().match(/terrarium\/(\d+)\/(\d+)\/(\d+)\.png/);
+    route.fulfill({ status: 200, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' }, body: terrariumPng(+m[1], +m[2], +m[3]) });
+  });
+}
+
 // One proven link: SF Two ↔ Oakland, about 11.6 km. #bay's outline follows
 // it into one lobed shape instead of two separate floor circles.
 const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bidirectional: true, avg_snr: 4, ambiguous: false }];
@@ -61,6 +96,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
 
   console.log(`\n=== Region scope reach contours E2E against ${BASE} ===`);
 
+  await serveTiles(page, 'ok');
   await page.route('**/api/**', (route) => {
     const path = new URL(route.request().url()).pathname;
     const json = (body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
@@ -123,7 +159,13 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     const cls = await areas();
     assert(cls.filter((c) => c.includes('mc-scope-area-observed')).length === 2, 'observed outlines: ' + cls.join(' | '));
     assert(cls.filter((c) => c.includes('mc-scope-area-configured')).length === 1, 'configured outlines: ' + cls.join(' | '));
-    const dash = await page.$eval('path.mc-scope-area-configured', (el) => getComputedStyle(el).strokeDasharray);
+    // Terrain answers re-draw the outlines as they arrive; read a path that
+    // is still in the page.
+    const dash = await page.waitForFunction(() => {
+      const el = document.querySelector('path.mc-scope-area-configured');
+      const v = el && el.isConnected ? getComputedStyle(el).strokeDasharray : '';
+      return v && v !== 'none' ? v : false;
+    }, null, { timeout: 5000 }).then((h) => h.jsonValue()).catch(() => '');
     assert(dash && dash !== 'none', 'configured-only outline is not dashed: ' + dash);
     const stroke = await page.$eval('path.mc-scope-area-observed', (el) => getComputedStyle(el).stroke);
     assert(stroke && stroke !== 'none' && stroke !== 'rgb(51, 136, 255)', 'outline not coloured by its CSS variable: ' + stroke);
@@ -141,6 +183,32 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
       return p.isPointInFill(q);
     }, outline('bay'));
     assert(mid, 'the #bay outline does not follow the SF Two - Oakland link');
+  });
+
+  // Whether a point is inside a scope's drawn outline, by the SVG path's own
+  // fill test at the point's screen position.
+  const insideAt = (scope, lat, lon) => page.evaluate(({ sel, lat, lon }) => {
+    const p = document.querySelector(sel); if (!p) return null;
+    const m = window.__mc_map, pt = m.latLngToContainerPoint([lat, lon]);
+    const box = m.getContainer().getBoundingClientRect();
+    return p.isPointInFill(new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse()));
+  }, { sel: outline(scope), lat, lon });
+  // 1 km east/west at this latitude, in degrees of longitude.
+  const KM_LON = 1 / (111.32 * Math.cos(37.79 * Math.PI / 180));
+
+  await step('terrain trims the outline behind the ridge and leaves the open side alone', async () => {
+    // SF Two (37.79, -122.40): radius ~12.8 km from its 11.6 km link. The
+    // ridge is ~4.5 km west of it: 6 km west is in its shadow, 8 km east is
+    // open ground. Terrain arrives after the first draw, so wait for it.
+    await page.waitForFunction(({ sel, lon }) => {
+      const p = document.querySelector(sel); if (!p) return false;
+      const m = window.__mc_map, pt = m.latLngToContainerPoint([37.79, lon]), box = m.getContainer().getBoundingClientRect();
+      return !p.isPointInFill(new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse()));
+    }, { sel: outline('sf'), lon: -122.40 - 6 * KM_LON }, { timeout: 10000 });
+    assert(await insideAt('sf', 37.79, -122.40 + 8 * KM_LON), '8 km east of SF Two is outside #sf');
+    assert(!(await insideAt('sf', 37.79, -122.40 - 6 * KM_LON)), '6 km west, behind the ridge, is inside #sf');
+    const hint = await page.$eval('#mcScopeList', (el) => el.textContent);
+    assert(/AWS Terrain Tiles/.test(hint) && !/Terrain unavailable/.test(hint), 'hint: ' + hint);
   });
 
   await step('the choice is stored and written to the URL', async () => {
@@ -293,6 +361,31 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     const pulsing = await page.$$eval('path.mc-scope-area.is-pulsing', (els) => els.map((el) => el.getAttribute('class')));
     assert(pulsing.length === 1 && pulsing[0].includes(sfClass) && pulsing[0].includes('observed'), 'pulsing: ' + pulsing.join(' | '));
     await page.waitForFunction(() => !document.querySelector('path.is-pulsing'), null, { timeout: 4000 });
+  });
+
+  await step('when elevation tiles fail, outlines fall back to radius + links and say so', async () => {
+    const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const p2 = await ctx2.newPage();
+    p2.on('pageerror', (e) => errors.push(e.message));
+    await serveTiles(p2, 'fail');
+    await p2.route('**/api/**', (route) => {
+      const path = new URL(route.request().url()).pathname;
+      const json = (body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+      if (path === '/api/nodes') return json({ nodes: NODES, total: NODES.length, has_more: false, counts: {} });
+      if (path === '/api/analytics/neighbor-graph') return json({ nodes: [], edges: EDGES, stats: {} });
+      if (path === '/api/config/map') return json({ center: [37.785, -122.35], zoom: 11 });
+      return json({});
+    });
+    await p2.goto(BASE + '/#/map?contours=1', { waitUntil: 'load' });
+    await p2.waitForSelector('path.mc-scope-area[data-scope="sf"]');
+    await p2.waitForFunction(() => /Terrain unavailable/.test((document.getElementById('mcScopeList') || {}).textContent || ''), null, { timeout: 10000 });
+    const westInside = await p2.evaluate(({ lon }) => {
+      const p = document.querySelector('path.mc-scope-area[data-scope="sf"]');
+      const m = window.__mc_map, pt = m.latLngToContainerPoint([37.79, lon]), box = m.getContainer().getBoundingClientRect();
+      return p.isPointInFill(new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse()));
+    }, { lon: -122.40 - 6 * KM_LON });
+    assert(westInside, 'without terrain, 6 km west of SF Two should be inside its 12.8 km radius');
+    await ctx2.close();
   });
 
   await step('no page errors', async () => {

@@ -251,7 +251,7 @@ test('scopes pulse independently; empty names are ignored; cancelAll ends all', 
   assert.strictEqual(clock.pending(), 0);
 });
 
-console.log('\n=== scope-contours.js: link-based reach ===');
+console.log('\n=== scope-contours.js: reach (radius, terrain, links) ===');
 
 // How far the outline reaches from a node toward a bearing, in metres: walk
 // out along the ray until it leaves the outline.
@@ -271,75 +271,97 @@ const EAST = Object.assign({ public_key: 'e1' }, offset(40.0, -75.3, 20000, 0));
 const NORTH = Object.assign({ public_key: 'n1' }, offset(40.0, -75.3, 0, 6000));
 const FAR = Object.assign({ public_key: 'f1' }, offset(40.0, -75.3, -30000, 0));
 const plain = (m) => JSON.parse(JSON.stringify(Array.from(m)));
+const two = (a, b) => ({ source: a, target: b, bidirectional: true });
+const RAY = (deg) => Math.round(deg / 5) % 72;   // 72 rays of 5°
 
-test('a link sets the reach of both ends, in the sector it points to', () => {
-  const ex = SC.linkExtents([HOME, EAST], [{ source: 'h0', target: 'e1', bidirectional: true }]);
-  const h = plain(ex.get('h0')), e = plain(ex.get('e1'));
-  const east = SC.sectors / 4, west = SC.sectors * 3 / 4;   // 90° and 270°
-  assert.ok(Math.abs(h[east] - 22000) < 200, 'home east sector ' + h[east]);   // ×1.1 margin
-  assert.ok(Math.abs(e[west] - 22000) < 200, 'east node west sector ' + e[west]);
-  assert.strictEqual(h.filter(v => v > 0).length, 1, 'only one sector set: ' + h);
+test('the radius is the 75th percentile of two-way link distances x 1.1 (Treebeard: ~13.9 km)', () => {
+  // Treebeard's 17 real two-way links, distances in km, all bearings east so
+  // only the distances matter here.
+  const km = [0.05, 0.9, 1.7, 1.8, 2.1, 2.1, 2.1, 2.2, 2.3, 7.3, 10.0, 10.0, 12.6, 14.9, 15.1, 15.1, 33.2];
+  const others = km.map((d, i) => Object.assign({ public_key: 'o' + i }, offset(HOME.lat, HOME.lon, d * 1000, 0)));
+  const r = SC.linkReach([HOME].concat(others), others.map(o => two('h0', o.public_key)));
+  const R = r.radius.get('h0');
+  assert.ok(Math.abs(R - 13860) < 60, 'radius ' + R);
 });
 
-test('ambiguous links, self links and links to unplaced nodes are ignored', () => {
-  const ex = SC.linkExtents([HOME, EAST, { public_key: 'u1' }], [
+test('the radius is clamped to 1-20 km; a node with no links gets 1 km', () => {
+  const near = Object.assign({ public_key: 'n1' }, offset(HOME.lat, HOME.lon, 400, 0));
+  const far = Object.assign({ public_key: 'f9' }, offset(HOME.lat, HOME.lon, 0, 40000));
+  const r = SC.linkReach([HOME, near, far, EAST], [two('h0', 'n1'), two('e1', 'f9')]);
+  assert.strictEqual(r.radius.get('h0'), 1000);
+  assert.strictEqual(r.radius.get('e1'), 20000);
+  assert.strictEqual(SC.noLinkRadius, 1000);
+});
+
+test('ambiguous, one-way, self links and links to unplaced nodes prove nothing', () => {
+  const r = SC.linkReach([HOME, EAST, { public_key: 'u1' }], [
     { source: 'h0', target: 'e1', bidirectional: true, ambiguous: true },
-    { source: 'h0', target: 'h0', bidirectional: true },
-    { source: 'h0', target: 'u1', bidirectional: true },
-    { source: 'h0', target: 'missing', bidirectional: true },
-    null,
+    { source: 'h0', target: 'e1', bidirectional: false },
+    { source: 'h0', target: 'e1' },
+    two('h0', 'h0'), two('h0', 'u1'), two('h0', 'missing'), null,
   ]);
-  assert.strictEqual(ex.size, 0, 'extents for ' + Array.from(ex.keys()));
+  assert.strictEqual(r.radius.size, 0);
+  assert.strictEqual(r.lobes.size, 0);
 });
 
-test('a one-way link proves nothing: only bidirectional links count', () => {
-  const ex = SC.linkExtents([HOME, EAST], [{ source: 'h0', target: 'e1', bidirectional: false }, { source: 'e1', target: 'h0' }]);
-  assert.strictEqual(ex.size, 0, 'extents for ' + Array.from(ex.keys()));
+test('a link lobe is its distance x 1.1 on its bearing, tapering to nothing at 11.25°', () => {
+  const r = SC.linkReach([HOME, EAST], [two('h0', 'e1')]);
+  const h = plain(r.lobes.get('h0')), e = plain(r.lobes.get('e1'));
+  assert.ok(Math.abs(h[RAY(90)] - 22000) < 150, 'on bearing ' + h[RAY(90)]);
+  assert.ok(Math.abs(h[RAY(80)] - 22000 * (1 - 10 / 11.25)) < 400, '10° off ' + h[RAY(80)]);
+  assert.strictEqual(h[RAY(75)], 0, '15° off');
+  assert.ok(Math.abs(e[RAY(270)] - 22000) < 150, 'the far end gets the reverse lobe');
 });
 
-test('the farthest link in a sector wins', () => {
-  const near = Object.assign({ public_key: 'e2' }, offset(40.0, -75.3, 5000, 0));
-  const ex = SC.linkExtents([HOME, EAST, near], [{ source: 'h0', target: 'e2', bidirectional: true }, { source: 'e1', target: 'h0', bidirectional: true }]);
-  assert.ok(Math.abs(plain(ex.get('h0'))[SC.sectors / 4] - 22000) < 200);
+test('reachFor: min(radius, terrain), stretched by lobes, never under the floor', () => {
+  const cut = new Float64Array(SC.sectors).fill(8000);
+  cut[RAY(270)] = 300; cut[RAY(180)] = 100;
+  const lobe = new Float64Array(SC.sectors); lobe[RAY(90)] = 22000;
+  const out = plain(SC.reachFor(5000, cut, lobe, 250));
+  assert.strictEqual(out[RAY(0)], 5000, 'radius caps terrain');
+  assert.strictEqual(out[RAY(270)], 300, 'terrain cuts');
+  assert.strictEqual(out[RAY(180)], 250, 'floor holds');
+  assert.strictEqual(out[RAY(90)], 22000, 'a proven link stretches past the radius');
+  assert.ok(plain(SC.reachFor(5000, null, null, 250)).every(v => v === 5000), 'no terrain: the radius all round');
 });
 
-test('a node with no links is a floor circle', () => {
-  const s = SC.shapeFor(HOME, new Map(), 1500);
-  assert.strictEqual(s.uniform, true);
-  assert.strictEqual(s.maxExt, 1500);
-  const rings = SC.contourShapes([s]);
+test('the outline follows the combined reach: cut by terrain west, radius north, a lobe east', () => {
+  const cut = new Float64Array(SC.sectors).fill(30000);
+  for (let d = 225; d <= 315; d += 5) cut[RAY(d)] = 2000;
+  const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
+  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(8000, cut, lobe, 250), 250)]);
   assert.strictEqual(rings.length, 1);
-  for (const p of rings[0]) assert.ok(Math.abs(metres([HOME.lat, HOME.lon], p) - 1500) <= 75, 'floor ring point at ' + metres([HOME.lat, HOME.lon], p));
+  const west = reachToward(rings, HOME, 270), north = reachToward(rings, HOME, 0), east = reachToward(rings, HOME, 90);
+  assert.ok(Math.abs(west - 2000) < 250, 'west ' + west);
+  assert.ok(Math.abs(north - 8000) < 400, 'north ' + north);
+  assert.ok(Math.abs(east - 22000) < 1000, 'east ' + east);
 });
 
-test('the outline follows the links: a long lobe toward them, the floor elsewhere', () => {
-  const ex = SC.linkExtents([HOME, EAST, NORTH], [{ source: 'h0', target: 'e1', bidirectional: true }, { source: 'h0', target: 'n1', bidirectional: true }]);
-  const rings = SC.contourShapes([SC.shapeFor(HOME, ex, 1500)]);
-  assert.strictEqual(rings.length, 1);
-  const east = reachToward(rings, HOME, 90), north = reachToward(rings, HOME, 0), west = reachToward(rings, HOME, 270), south = reachToward(rings, HOME, 180);
-  assert.ok(Math.abs(east - 22000) < 1500, 'east ' + Math.round(east));
-  assert.ok(Math.abs(north - 6600) < 800, 'north ' + Math.round(north));
-  assert.ok(Math.abs(west - 1500) < 300, 'west ' + Math.round(west));
-  assert.ok(Math.abs(south - 1500) < 300, 'south ' + Math.round(south));
-});
-
-// 32 sectors of 11.25°: a lone link's lobe spreads half as far sideways as
-// at 16. 10° off a 22 km link, a 16-sector shape still reached about 13 km.
-test('a lobe is narrow and stays attached to its node', () => {
-  const ex = SC.linkExtents([HOME, EAST], [{ source: 'h0', target: 'e1', bidirectional: true }]);
-  const rings = SC.contourShapes([SC.shapeFor(HOME, ex, 1500)]);
-  assert.strictEqual(rings.length, 1, 'the lobe came loose from the floor circle');
-  const on = reachToward(rings, HOME, 90), off = reachToward(rings, HOME, 100), far = reachToward(rings, HOME, 115);
+test('a lone link\'s lobe is narrow and stays attached to a 1 km circle', () => {
+  const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
+  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 250), 250)]);
+  assert.strictEqual(rings.length, 1, 'the lobe came loose from the circle');
+  const on = reachToward(rings, HOME, 90), off = reachToward(rings, HOME, 80), far = reachToward(rings, HOME, 70);
   assert.ok(on > 20000, 'on the link ' + on);
-  assert.ok(off < 9000, '10° off the link ' + off);
-  assert.ok(far < 2500, '25° off the link ' + far);
+  // Same width as the 32-sector lobes that were accepted on the live map
+  // (5.8 km at 10° off a 22 km link).
+  assert.ok(off < 7000, '10° off the link ' + off);
+  // Near the 1 km circle the lobe's base is widened by half a cell (a
+  // 22 km lobe sets a 550 m cell), which reaches a few degrees round it.
+  assert.ok(far < 2500, '20° off the link ' + far);
+});
+
+test('a node with no links and no terrain is a 1 km circle', () => {
+  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(1000, null, null, 250), 250)]);
+  assert.strictEqual(rings.length, 1);
+  for (const p of rings[0]) assert.ok(Math.abs(metres([HOME.lat, HOME.lon], p) - 1000) <= 60, 'ring point at ' + metres([HOME.lat, HOME.lon], p));
 });
 
 test('linked nodes sit inside the outline they extend', () => {
-  const ex = SC.linkExtents([HOME, EAST, FAR], [{ source: 'h0', target: 'e1', bidirectional: true }, { source: 'h0', target: 'f1', bidirectional: true }]);
-  const rings = SC.contourShapes([HOME, EAST, FAR].map(n => SC.shapeFor(n, ex, 1500)));
+  const r = SC.linkReach([HOME, EAST, FAR], [two('h0', 'e1'), two('h0', 'f1')]);
+  const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, r.lobes.get(n.public_key), 250), 250));
+  const rings = SC.contourShapes(shapes);
   for (const n of [HOME, EAST, FAR]) assert.ok(SC.inRings(rings, n.lat, n.lon), n.public_key + ' outside its own outline');
-  assert.strictEqual(rings.length, 1, 'linked shapes merge into one outline');
 });
 
 test('inRings: even-odd, so a hole is outside', () => {
@@ -535,6 +557,105 @@ test('setVisible(false) takes the layer off the map and empties the list', () =>
   o.setVisible(false);
   assert.strictEqual(map.hasLayer(o.layer), false);
   assert.deepStrictEqual(seen[seen.length - 1], [0, false]);
+});
+
+console.log('\n=== scope-contours.js: terrain ===');
+
+// Fake terrain provider: answers asynchronously, as the real one does, with
+// a cut to 2 km west (225-315°) of every repeater asked about.
+function fakeTerrain(opts) {
+  opts = opts || {};
+  const t = { calls: [], state: opts.state || 'ok', pending: [] };
+  // release() answers the oldest request still waiting.
+  t.release = () => t.pending.shift()();
+  t.status = () => t.state;
+  t.extentsFor = (items, onProgress) => {
+    t.calls.push(items.map(it => ({ pk: it.pk, R: Math.round(it.R) })));
+    const answer = () => items.forEach(it => {
+      const ext = new Float64Array(SC.sectors).fill(it.R);
+      for (let d = 225; d <= 315; d += 5) ext[RAY(d)] = 2000;
+      onProgress(it.pk, ext);
+    });
+    if (opts.defer) return new Promise(r => { t.pending.push(() => { answer(); r(); }); });
+    return Promise.resolve().then(answer);
+  };
+  return t;
+}
+const tick = () => new Promise(r => setTimeout(r, 0));
+
+const T_NODES = [
+  Object.assign({ transported_scopes: ['#home'] }, HOME),
+  Object.assign({ transported_scopes: ['#east'] }, EAST),
+  Object.assign({ default_scope: '#gone' }, FAR),
+];
+
+test('terrain is asked for the members of drawn scopes only, with each one\'s radius', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain();
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
+  o.setVisible(true);
+  o.setHidden(['gone']);
+  o.setLinks([two('h0', 'e1')]);
+  o.setNodes(T_NODES);
+  return tick().then(() => {
+    const asked = t.calls.flat().map(c => c.pk + ':' + c.R).sort();
+    assert.deepStrictEqual(asked, ['e1:20000', 'h0:20000'], 'asked ' + asked.join(' '));
+  });
+});
+
+test('a terrain answer reshapes that repeater: the west is cut to 2 km', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const t = fakeTerrain();
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
+  o.setVisible(true);
+  o.setNodes([T_NODES[0], EAST]);   // EAST: no scope, but placed, so a link to it counts
+  const before = rec.polygons[rec.polygons.length - 1];
+  assert.ok(Math.abs(reachToward(before.rings, HOME, 270) - 1000) < 100, 'before: a 1 km circle, west ' + reachToward(before.rings, HOME, 270));
+  return tick().then(() => {
+    const after = rec.polygons[rec.polygons.length - 1];
+    // No links: R = 1 km, and the 2 km terrain cut is beyond it, so the
+    // west stays at 1 km; give it links to see the cut.
+    assert.ok(Math.abs(reachToward(after.rings, HOME, 270) - 1000) < 100);
+    o.setLinks([two('h0', 'e1')]);
+    return tick();
+  }).then(() => {
+    const now = rec.polygons[rec.polygons.length - 1];
+    const west = reachToward(now.rings, HOME, 270), north = reachToward(now.rings, HOME, 0);
+    assert.ok(Math.abs(west - 2000) < 300, 'west ' + west);
+    assert.ok(north > 18000, 'north ' + north);
+  });
+});
+
+test('an answer for a node that has since moved is ignored', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const t = fakeTerrain({ defer: true });
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
+  o.setVisible(true);
+  o.setLinks([two('h0', 'e1')]);
+  o.setNodes([T_NODES[0], EAST]);
+  const moved = Object.assign({}, T_NODES[0], { lat: HOME.lat + 0.05 });
+  o.setNodes([moved, EAST]);
+  t.release();   // the answer for the old position, the first request
+  return tick().then(() => {
+    const p = rec.polygons[rec.polygons.length - 1];
+    const west = reachToward(p.rings, moved, 270);
+    assert.ok(west > 10000, 'a stale terrain cut was applied: west ' + west);
+  });
+});
+
+test('the list says when terrain is unavailable, and credits the source when it is used', () => {
+  const run = (state) => {
+    const { S } = listSandbox('#/map');
+    const { L, map } = fakeLeaflet();
+    const o = S.createOverlay(L, map, Object.assign({ terrain: fakeTerrain({ state }) }, sync));
+    const el = fakeListEl();
+    S.mountScopeList(el, o);
+    o.setNodes(NODES); o.setVisible(true);
+    return el.innerHTML;
+  };
+  assert.ok(/Terrain unavailable/.test(run('unavailable')));
+  const ok = run('ok');
+  assert.ok(/AWS Terrain Tiles/.test(ok) && !/Terrain unavailable/.test(ok), ok);
 });
 
 console.log('\n=== scope-contours.js: hover ===');

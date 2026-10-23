@@ -1706,6 +1706,7 @@
       // Same link-based reach as the map page, through the same cached call.
       reachOverlay = window.ScopeContours.createOverlay(L, map, {
         loadLinks: () => api('/analytics/neighbor-graph', { ttl: CLIENT_TTL.analyticsRF }).then(d => (d && d.edges) || []),
+        terrain: window.TerrainReach ? window.TerrainReach.shared() : null,
       });
       window.ScopeContours.mountScopeList(document.getElementById('liveScopeList'), reachOverlay, {
         titleHtml: '<h3 class="legend-title" style="margin-top:8px">REGION SCOPES</h3>',

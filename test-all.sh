@@ -215,6 +215,7 @@ node tests/unit/test-rx-coverage-noise.js
 node tests/unit/test-rx-coverage-viewport.js
 node tests/unit/test-scope-audit-styles-linked.js
 node tests/unit/test-scope-contours.js
+node tests/unit/test-terrain-reach.js
 node tests/unit/test-settings-sync.js
 node tests/unit/test-slideover-1056-rowsel-strict.js
 node tests/unit/test-top-routes-overlay.js

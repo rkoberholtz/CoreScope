@@ -10,12 +10,17 @@
      declared list) but not seen carrying it. Drawn dashed, because
      configuration is not evidence of reach.
 
-   A node's reach follows its links, not a circle. Around the compass in 32
-   sectors, it reaches as far as the farthest node it has a proven two-way
-   link with in that sector (the neighbor graph, /api/analytics/neighbor-graph:
-   bidirectional, never ambiguous), and a small floor where it has none. Terrain is
-   in the data: a repeater that only ever links east draws a lobe to the east.
-   Interpolating between sector centres keeps the shape smooth.
+   A node's reach, in 72 directions (reachFor):
+     max( min(R, terrain cut), link lobe, 250 m floor )
+   - R, how far it regularly reaches, comes from its proven two-way links in
+     the neighbor graph (linkReach): the 75th percentile of their distances
+     × 1.1, 1-20 km; 1 km for a node with no links.
+   - The terrain cut is where line of sight over elevation data ends in that
+     direction (terrain-reach.js). Real radios reach roughly a circle, trimmed
+     where a ridge or valley shadows the ground.
+   - Each proven link still stretches its own bearing out to it, tapering over
+     ±11.25°, so evidence always beats the model.
+   Interpolating between the 72 directions keeps the shape smooth.
 
    The outline is a marching-squares contour of a field: within each cluster
    of nodes, every grid vertex holds min over nodes of distance / reach in that
@@ -28,20 +33,30 @@
    lists the repeaters configured for or carrying each of them. The outlines
    take no pointer events, so they never block a click on anything else.
 
-   The floor (1.5 km), sector count and pulse duration are fixed for now;
-   exposing them in the customizer is a follow-up. */
+   The radius rule, floor, terrain model and pulse duration are fixed for
+   now; exposing them in the customizer is a follow-up. */
 (function () {
   'use strict';
 
-  var DEFAULT_FLOOR_M = 1500;
+  // No reach is ever drawn closer than this, whatever the terrain says.
+  var DEFAULT_FLOOR_M = 250;
+  // Radius rule (linkReach): 75th percentile of two-way link distances,
+  // × LINK_MARGIN, clamped; a node with no links gets NO_LINK_RADIUS_M.
+  var RADIUS_PCT = 0.75;
+  var MIN_RADIUS_M = 1000;
+  var MAX_RADIUS_M = 20000;
+  var NO_LINK_RADIUS_M = 1000;
   var DEFAULT_PULSE_MS = 1500;
-  // 11.25° each: narrow enough that a link's lobe spreads half as far
-  // sideways as it did at 16, still smooth to the eye.
-  var SECTORS = 32;
+  // 72 rays of 5°, the same as terrain-reach.js walks.
+  var SECTORS = 72;
   var SECTOR_RAD = 2 * Math.PI / SECTORS;
+  // A proven link's lobe tapers to nothing this far either side of it.
+  var LOBE_HALF_RAD = 11.25 * Math.PI / 180;
   // A link proves the far node hears this one; the outline is drawn a little
   // past it so the linked node sits inside rather than on the edge.
   var LINK_MARGIN = 1.1;
+  // The grid never gets finer than this, however small the floor.
+  var MIN_CELL_M = 150;
   var PANE = 'mcScopeContoursPane';
   // Under overlayPane (400) and markerPane (600): outlines never cover a
   // route line or a node marker.
@@ -50,7 +65,7 @@
   var M_PER_DEG = 111320;
   // A cluster's grid is capped at this many vertices. Past it the cell grows,
   // so a scope spread over a large area costs the same as a compact one.
-  var MAX_VERTICES = 250000;
+  var MAX_VERTICES = 100000;
   var HIDDEN_KEY = 'meshcore-scope-contours-hidden';
 
   // normRegion mirrors the server's normScope (scope_audit.go): strip one
@@ -143,7 +158,7 @@
     return (h % PALETTE_SIZE) + 1;
   }
 
-  // ── Reach from links ─────────────────────────────────────────────────────
+  // ── Reach ────────────────────────────────────────────────────────────────
 
   // sectorOf maps a bearing (radians, 0 = north, clockwise) to the sector
   // whose centre is nearest: sector i is centred on i * 360/SECTORS degrees.
@@ -152,49 +167,91 @@
     return s < 0 ? s + SECTORS : s;
   }
 
-  // linkExtents returns Map pubkey → Float64Array(SECTORS): for each sector,
-  // the distance in metres to the farthest node it has a proven link with in
-  // that direction, times LINK_MARGIN. 0 means no link that way. Only two-way
-  // links between two placed nodes count: each end has heard the other, so
-  // the link proves reach in both directions. Never an ambiguous one (a hop
-  // prefix that could be several nodes). O(links).
-  function linkExtents(nodes, edges) {
+  function angleDiff(a, b) {
+    var d = (a - b) % (2 * Math.PI);
+    if (d > Math.PI) d -= 2 * Math.PI;
+    if (d < -Math.PI) d += 2 * Math.PI;
+    return Math.abs(d);
+  }
+
+  // percentile of an ascending array, interpolating between ranks.
+  function percentile(sorted, p) {
+    var f = p * (sorted.length - 1), i = Math.floor(f), t = f - i;
+    return i + 1 < sorted.length ? sorted[i] + (sorted[i + 1] - sorted[i]) * t : sorted[i];
+  }
+
+  // linkReach reads what the neighbor graph proves about each node's reach.
+  // Only two-way links between two placed nodes count (each end has heard
+  // the other), never an ambiguous one (a hop prefix that could be several
+  // nodes). O(links × SECTORS).
+  //   radius: Map pk → R, how far the node regularly reaches: the 75th
+  //           percentile of its link distances × 1.1, clamped to 1-20 km.
+  //           It ignores one exceptional long link and a crowd of close
+  //           neighbours alike.
+  //   lobes:  Map pk → Float64Array(SECTORS), each link stretching its own
+  //           bearing out to its distance × 1.1, tapering to nothing over
+  //           ±11.25°, so a proven link always sits inside the outline.
+  function linkReach(nodes, edges) {
     var pos = new Map();
     (nodes || []).forEach(function (n) { var p = position(n); if (p && n.public_key) pos.set(n.public_key, p); });
-    var out = new Map();
-    function ext(pk) {
-      var e = out.get(pk);
-      if (!e) { e = new Float64Array(SECTORS); out.set(pk, e); }
-      return e;
+    var dists = new Map(), lobes = new Map();
+    function lobe(pk, bearing, len) {
+      var e = lobes.get(pk);
+      if (!e) { e = new Float64Array(SECTORS); lobes.set(pk, e); }
+      for (var i = 0; i < SECTORS; i++) {
+        var off = angleDiff(i * SECTOR_RAD, bearing);
+        if (off >= LOBE_HALF_RAD) continue;
+        var v = len * (1 - off / LOBE_HALF_RAD);
+        if (v > e[i]) e[i] = v;
+      }
     }
+    function dist(pk, d) { var l = dists.get(pk); if (l) l.push(d); else dists.set(pk, [d]); }
     (edges || []).forEach(function (e) {
       if (!e || e.bidirectional !== true || e.ambiguous || e.source === e.target) return;
       var a = pos.get(e.source), b = pos.get(e.target);
       if (!a || !b) return;
       var cos = Math.cos(((a[0] + b[0]) / 2) * Math.PI / 180);
       var dx = (b[1] - a[1]) * M_PER_DEG * cos, dy = (b[0] - a[0]) * M_PER_DEG;
-      var d = Math.sqrt(dx * dx + dy * dy) * LINK_MARGIN;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      dist(e.source, d); dist(e.target, d);
       if (!(d > 0)) return;
       var fwd = Math.atan2(dx, dy);
-      var ea = ext(e.source), eb = ext(e.target);
-      var sa = sectorOf(fwd), sb = sectorOf(fwd + Math.PI);
-      if (d > ea[sa]) ea[sa] = d;
-      if (d > eb[sb]) eb[sb] = d;
+      lobe(e.source, fwd, d * LINK_MARGIN);
+      lobe(e.target, fwd + Math.PI, d * LINK_MARGIN);
     });
+    var radius = new Map();
+    dists.forEach(function (l, pk) {
+      l.sort(function (x, y) { return x - y; });
+      var r = percentile(l, RADIUS_PCT) * LINK_MARGIN;
+      radius.set(pk, Math.min(MAX_RADIUS_M, Math.max(MIN_RADIUS_M, r)));
+    });
+    return { radius: radius, lobes: lobes };
+  }
+
+  // reachFor combines the three into per-sector reach:
+  //   max( min(R, terrain cut), link lobe, floor )
+  // terrain is null when there is none (yet, or the tiles failed): the
+  // radius then stands unclipped.
+  function reachFor(R, terrain, lobe, floorM) {
+    var out = new Float64Array(SECTORS);
+    for (var i = 0; i < SECTORS; i++) {
+      var v = terrain ? Math.min(R, terrain[i]) : R;
+      if (lobe && lobe[i] > v) v = lobe[i];
+      out[i] = v > floorM ? v : floorM;
+    }
     return out;
   }
 
-  // shapeFor builds the reach shape of one node: its position plus per-sector
-  // reach with the floor applied. A node with no links is a floor circle.
-  // box is the shape's extent in metres west/east/south/north of the node,
-  // so a lobe to the east costs a strip, not a square around the node.
-  function shapeFor(n, extents, floorM) {
+  // shapeFor builds the reach shape of one node: its position plus
+  // per-sector reach (ext; null for a plain circle of floorM). box is the
+  // shape's extent in metres west/east/south/north of the node, so a lobe
+  // to the east costs a strip, not a square around the node.
+  function shapeFor(n, ext, floorM) {
     var p = position(n);
     var e = new Float64Array(SECTORS);
-    var src = extents && extents.get(n.public_key);
     var max = floorM, min = Infinity;
     for (var i = 0; i < SECTORS; i++) {
-      e[i] = src && src[i] > floorM ? src[i] : floorM;
+      e[i] = ext && ext[i] > floorM ? ext[i] : floorM;
       if (e[i] > max) max = e[i];
       if (e[i] < min) min = e[i];
     }
@@ -203,8 +260,9 @@
     shape.box = shapeBox(shape);
     // near[i]: the most any bearing within a sector of interval i (between
     // centres i and i+1) can reach. A vertex at least that far out is outside
-    // even after the field fill's half-cell widening, which never spans more
-    // than a sector, so the fill rates it d / near without a lookup.
+    // even after the field fill's half-cell widening, while that widening
+    // spans no more than a sector, so the fill rates it d / near without a
+    // lookup.
     var near = new Float64Array(SECTORS);
     for (var k = 0; k < SECTORS; k++) {
       near[k] = Math.max(e[(k + SECTORS - 1) % SECTORS], e[k], e[(k + 1) % SECTORS], e[(k + 2) % SECTORS]);
@@ -229,7 +287,7 @@
 
   // bearingOf is atan2(dx, dy), the compass bearing of an offset, as a
   // polynomial: error under 2.1e-4 rad (0.012°, measured), far below what a
-  // 11.25° sector blend can show, at a fraction of Math.atan2's cost in the
+  // 5° sector blend can show, at a fraction of Math.atan2's cost in the
   // per-vertex fill.
   function bearingOf(dx, dy) {
     var ax = Math.abs(dy), ay = Math.abs(dx);
@@ -324,8 +382,8 @@
 
   // clusterRings traces the reach contour around one cluster of shapes.
   function clusterRings(shapes) {
-    var lat0 = 0, lon0 = 0, minExt = Infinity;
-    shapes.forEach(function (s) { lat0 += s.lat; lon0 += s.lon; if (s.minExt < minExt) minExt = s.minExt; });
+    var lat0 = 0, lon0 = 0, minExt = Infinity, maxExt = 0;
+    shapes.forEach(function (s) { lat0 += s.lat; lon0 += s.lon; if (s.minExt < minExt) minExt = s.minExt; if (s.maxExt > maxExt) maxExt = s.maxExt; });
     lat0 /= shapes.length; lon0 /= shapes.length;
     var kx = M_PER_DEG * Math.cos(lat0 * Math.PI / 180), ky = M_PER_DEG;
     var xy = shapes.map(function (s) { return [(s.lon - lon0) * kx, (s.lat - lat0) * ky]; });
@@ -337,9 +395,11 @@
       if (p[1] + b[2] < minY) minY = p[1] + b[2]; if (p[1] + b[3] > maxY) maxY = p[1] + b[3];
     });
     // The smallest reach over 2.5 still traces a floor circle within 5% (the
-    // contour is interpolated, not stepped); finer cells cost the square.
+    // contour is interpolated, not stepped); finer cells cost the square. A
+    // cluster holding a big shape needs no finer than 1/40 of it: a 20 km
+    // reach is still ~80 cells across, at zooms where a pixel is 60-150 m.
     // The vertex cap coarsens it for a sprawling cluster.
-    var cell = minExt / 2.5;
+    var cell = Math.max(minExt / 2.5, maxExt / 40, MIN_CELL_M);
     var span = function (c) { return { nx: Math.ceil((maxX - minX + 4 * c) / c) + 1, ny: Math.ceil((maxY - minY + 4 * c) / c) + 1 }; };
     var dims = span(cell);
     if (dims.nx * dims.ny > MAX_VERTICES) {
@@ -388,15 +448,16 @@
             var fi = bb / SECTOR_RAD;
             if (fi < 0) fi += SECTORS;
             var nr = s.near[Math.floor(fi) % SECTORS];
-            // Outside for certain. d / nr is a lower bound on its value, still
-            // above 1, and exact where the edge is the floor circle; anywhere
-            // else such a vertex is a cell or more from the edge.
-            if (d >= nr) r = d / nr;
+            // Outside for certain, once the half-cell widening below spans
+            // no more than a sector. d / nr is a lower bound on its value,
+            // still above 1, and exact where the edge is the floor circle;
+            // anywhere else such a vertex is a cell or more from the edge.
+            if (d >= nr && d * SECTOR_RAD >= half) r = d / nr;
             else {
             // The reach is the most within half a cell either side of the
-            // bearing. Near the node a lobe is only a sector wide, which at
-            // 32 sectors is about a cell: without this widening the grid
-            // misses its base and the lobe comes loose from the node.
+            // bearing. Near the node a lobe is only a few sectors wide, about
+            // a cell: without this widening the grid misses its base and the
+            // lobe comes loose from the node.
             var del = half / d;
             var e0 = reachAt(s, bb), e1 = reachAt(s, bb + del), e2 = reachAt(s, bb - del);
             r = d / (e0 > e1 ? (e0 > e2 ? e0 : e2) : (e1 > e2 ? e1 : e2));
@@ -624,7 +685,8 @@
 
   // createOverlay owns the layer, the cache, hover and the pulses for one
   // Leaflet map. opts: floorM, pulseMs, loadLinks (() => Promise of neighbor
-  // graph edges), and setTimeout/clearTimeout/raf for tests.
+  // graph edges), terrain (a terrain-reach.js provider: extentsFor and
+  // status), and setTimeout/clearTimeout/raf for tests.
   //   setNodes(nodes)   new node list; recomputes changed scopes when visible
   //   setLinks(edges)   neighbor graph edges the reach shapes follow
   //   setVisible(bool)  adds or removes the layer; computes lazily
@@ -647,8 +709,11 @@
     var popup = L.popup({ className: 'mc-scope-popup', maxWidth: 340, autoPanPadding: [24, 24] });
     var nodes = [];
     var links = null;
-    var extents = null; // linkExtents(nodes, links), rebuilt when either changes
-    var shapes = new Map(); // pubkey → { shape, key }, rebuilt with extents
+    var reach = null;       // linkReach(nodes, links), rebuilt when either changes
+    var shapes = new Map(); // pubkey → { shape, key }, rebuilt with reach
+    var terrain = new Map(); // pubkey → { key, ext } from the terrain provider
+    var terrainAsked = new Set(); // pk|key requested and not yet answered
+    var renderQueued = false;
     var visible = false;
     var only = '';
     var hidden = new Set();
@@ -667,15 +732,51 @@
       onEnd: function (s) { setClass(drawn.get(s) || [], 'is-pulsing', false); },
     });
 
+    function radiusOf(n) { return (reach && reach.radius.get(n.public_key)) || NO_LINK_RADIUS_M; }
+    // The terrain request for a node: its position and radius. A result is
+    // only used while it still matches, so one computed for a node list that
+    // has since moved on is ignored.
+    function terrainKey(n) { var p = position(n); return p[0] + ',' + p[1] + '|' + Math.round(radiusOf(n)); }
+
     // A node in several scopes is shaped once.
     function shaped(n) {
       var e = shapes.get(n.public_key);
       if (!e) {
-        var s = shapeFor(n, extents, floorM);
+        var t = terrain.get(n.public_key);
+        var cut = t && t.key === terrainKey(n) ? t.ext : null;
+        var s = shapeFor(n, reachFor(radiusOf(n), cut, reach && reach.lobes.get(n.public_key), floorM), floorM);
         e = { shape: s, key: shapeKey(n, s) };
         shapes.set(n.public_key, e);
       }
       return e;
+    }
+
+    // Ask the terrain provider for the members it has not answered yet. Each
+    // answer reshapes that one node and queues a render, at most one a frame.
+    function requestTerrain(members) {
+      if (!opts.terrain) return;
+      var items = [];
+      members.forEach(function (n) {
+        var k = terrainKey(n), t = terrain.get(n.public_key), ask = n.public_key + '|' + k;
+        if ((t && t.key === k) || terrainAsked.has(ask)) return;
+        terrainAsked.add(ask);
+        var p = position(n);
+        items.push({ pk: n.public_key, lat: p[0], lon: p[1], R: radiusOf(n), key: k });
+      });
+      if (!items.length) return;
+      var keyOf = new Map(items.map(function (it) { return [it.pk, it.key]; }));
+      Promise.resolve(opts.terrain.extentsFor(items, function (pk, ext) {
+        terrain.set(pk, { key: keyOf.get(pk), ext: ext });
+        shapes.delete(pk);
+        queueRender();
+      })).then(done, done);
+      function done() { items.forEach(function (it) { terrainAsked.delete(it.pk + '|' + it.key); }); queueRender(); }
+    }
+
+    function queueRender() {
+      if (renderQueued) return;
+      renderQueued = true;
+      raf(function () { renderQueued = false; if (visible) render(); });
     }
 
     function rings(scope, kind, members) {
@@ -708,7 +809,8 @@
       drawn = new Map();
       hits = [];
       var groups = visible ? groupNodesByScope(nodes) : new Map();
-      if (visible && !extents) { extents = linkExtents(nodes, links); shapes = new Map(); }
+      if (visible && !reach) { reach = linkReach(nodes, links); shapes = new Map(); }
+      var members = new Set();
       var live = new Set();
       var want = normRegion(only);
       list = [];
@@ -717,6 +819,8 @@
         if (g.observed.length) live.add(scope + '|observed');
         if (g.configuredOnly.length) live.add(scope + '|configured');
         if ((want && scope !== want) || hidden.has(scope)) return;
+        g.observed.forEach(function (n) { members.add(n); });
+        g.configuredOnly.forEach(function (n) { members.add(n); });
         var name = '#' + escapeHtml(scope);
         var polys = [];
         if (g.observed.length) {
@@ -733,7 +837,9 @@
       // Bounded by the scopes in the current node list: a scope that left it
       // leaves the cache too.
       if (visible) Array.from(cache.keys()).forEach(function (k) { if (!live.has(k)) cache.delete(k); });
-      listeners.forEach(function (fn) { fn(list, visible); });
+      if (visible) requestTerrain(members);
+      var info = { terrain: opts.terrain ? opts.terrain.status() : 'off' };
+      listeners.forEach(function (fn) { fn(list, visible, info); });
     }
 
     function refreshLinks() {
@@ -742,7 +848,7 @@
       Promise.resolve(opts.loadLinks()).then(function (edges) {
         if (seq !== linksSeq) return;
         links = Array.isArray(edges) ? edges : [];
-        extents = null;
+        reach = null;
         render();
       }, function () { /* keep the floor shapes; the next reload retries */ });
     }
@@ -804,8 +910,8 @@
 
     return {
       layer: layer,
-      setNodes: function (l) { nodes = l || []; extents = null; render(); refreshLinks(); },
-      setLinks: function (edges) { linksSeq++; links = edges || []; extents = null; render(); },
+      setNodes: function (l) { nodes = l || []; reach = null; render(); refreshLinks(); },
+      setLinks: function (edges) { linksSeq++; links = edges || []; reach = null; render(); },
       setVisible: function (v) {
         visible = !!v;
         if (visible) { if (!map.hasLayer(layer)) layer.addTo(map); }
@@ -880,7 +986,11 @@
 
   // ── Scope list ───────────────────────────────────────────────────────────
 
-  function listHtml(items, opts) {
+  var TERRAIN_NOTE = 'Each repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links. ' +
+    'Terrain: AWS Terrain Tiles (Mapzen; SRTM, USGS 3DEP and others), bare earth: buildings and trees are not in it.';
+  var NO_TERRAIN_NOTE = 'Terrain unavailable: outlines show each repeater\'s range from its two-way links, stretched to proven links, with no terrain trimming.';
+
+  function listHtml(items, opts, info) {
     var rows = items.map(function (it) {
       var name = escapeHtml(it.scope);
       var count = it.observed ? String(it.observed) : it.configured + ' configured';
@@ -896,7 +1006,7 @@
       '<div class="filter-group mc-scope-list-actions"><button type="button" class="btn" data-scope-all>All</button> ' +
       '<button type="button" class="btn" data-scope-none>None</button></div>' +
       rows +
-      '<div class="mc-scope-hint">Outlines follow each repeater\'s proven two-way links; ' + (DEFAULT_FLOOR_M / 1000) + ' km where it has none. Click an outline to list its repeaters.</div>';
+      '<div class="mc-scope-hint">' + (info && info.terrain === 'unavailable' ? NO_TERRAIN_NOTE : TERRAIN_NOTE) + ' Click an outline to list its repeaters.</div>';
   }
 
   // mountScopeList renders a show/hide row per scope into el and keeps it in
@@ -912,9 +1022,9 @@
       try { store.setItem(HIDDEN_KEY, JSON.stringify(overlay.hidden())); } catch (e) { /* private mode */ }
       writeHash({ contoursHide: overlay.hidden().join(',') || null });
     }
-    function paint(items, visible) {
+    function paint(items, visible, info) {
       el.hidden = !(visible && items.length);
-      el.innerHTML = el.hidden ? '' : listHtml(items, opts);
+      el.innerHTML = el.hidden ? '' : listHtml(items, opts, info);
     }
     el.addEventListener('change', function (e) {
       var t = e.target, s = t && t.getAttribute && t.getAttribute('data-scope');
@@ -943,7 +1053,9 @@
     groupNodesByScope: groupNodesByScope,
     configuredScopes: configuredScopes,
     scopePopupHtml: scopePopupHtml,
-    linkExtents: linkExtents,
+    linkReach: linkReach,
+    reachFor: reachFor,
+    noLinkRadius: NO_LINK_RADIUS_M,
     shapeFor: shapeFor,
     contourShapes: contourShapes,
     contourRings: contourRings,
