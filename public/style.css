@@ -5878,6 +5878,35 @@ body.embed #app.app-fixed {
 .mc-est-facts dt { color: var(--text-muted); }
 .mc-est-facts dd { margin: 0; }
 
+/* Region scope reach contours (scope-contours.js). Solid: nodes seen carrying
+ * the scope's traffic. Dashed: nodes that only declare it. Each scope takes
+ * one of eight colours, picked from its name so it keeps it everywhere. Paul
+ * Tol's "muted" palette: told apart under the common colour-vision
+ * deficiencies, and none of them is a role colour. The live page pulses a
+ * scope's outline (.is-pulsing) when one of its packets arrives. */
+:root {
+  --mc-reach-1: #88CCEE;
+  --mc-reach-2: #CC6677;
+  --mc-reach-3: #DDCC77;
+  --mc-reach-4: #117733;
+  --mc-reach-5: #AA4499;
+  --mc-reach-6: #44AA99;
+  --mc-reach-7: #999933;
+  --mc-reach-8: #882255;
+}
+path.mc-scope-area { stroke: var(--mc-reach-colour); fill: var(--mc-reach-colour); stroke-width: 2; stroke-opacity: .85; fill-opacity: .12; transition: fill-opacity .25s ease-out, stroke-width .25s ease-out; }
+path.mc-scope-area-declared { stroke-width: 1.5; stroke-dasharray: 6 5; fill-opacity: .04; }
+path.mc-scope-area.is-pulsing { stroke-width: 3.5; stroke-opacity: 1; fill-opacity: .3; }
+path.mc-reach-c1 { --mc-reach-colour: var(--mc-reach-1); }
+path.mc-reach-c2 { --mc-reach-colour: var(--mc-reach-2); }
+path.mc-reach-c3 { --mc-reach-colour: var(--mc-reach-3); }
+path.mc-reach-c4 { --mc-reach-colour: var(--mc-reach-4); }
+path.mc-reach-c5 { --mc-reach-colour: var(--mc-reach-5); }
+path.mc-reach-c6 { --mc-reach-colour: var(--mc-reach-6); }
+path.mc-reach-c7 { --mc-reach-colour: var(--mc-reach-7); }
+path.mc-reach-c8 { --mc-reach-colour: var(--mc-reach-8); }
+@media (prefers-reduced-motion: reduce) { path.mc-scope-area { transition: none; } }
+
 /* Self-reported repeaters (reported-nodes.js): no advert, name only. */
 .reported-section { margin-top: 16px; padding: 12px; border: 1px dashed var(--mc-role-repeater); border-radius: 6px; }
 .reported-section h3 { margin: 0 0 4px; font-size: 14px; }
