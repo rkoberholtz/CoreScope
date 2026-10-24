@@ -374,6 +374,89 @@ test('every member has at least 1 km of area all round, even boxed in by a ridge
   for (const n of [HOME, EAST, FAR]) assertKmAround(rings, n, n.public_key);
 });
 
+// Metres from p to the nearest point of ring's edge, in a local projection.
+function edgeDist(ring, p) {
+  const kx = 111320 * Math.cos(p[0] * Math.PI / 180), ky = 111320;
+  let best = Infinity;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const ax = (ring[j][1] - p[1]) * kx, ay = (ring[j][0] - p[0]) * ky;
+    const bx = (ring[i][1] - p[1]) * kx, by = (ring[i][0] - p[0]) * ky;
+    const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+    const t = l2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / l2)) : 0;
+    best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy));
+  }
+  return best;
+}
+// The largest turn, in degrees, at any vertex of a ring: a sharp corner
+// turns a lot at one vertex, a rounded one a little at each.
+function sharpestTurn(ring) {
+  let worst = 0;
+  const kx = Math.cos(ring[0][0] * Math.PI / 180);
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[(i + ring.length - 1) % ring.length], b = ring[i], c = ring[(i + 1) % ring.length];
+    const t1 = Math.atan2(b[0] - a[0], (b[1] - a[1]) * kx), t2 = Math.atan2(c[0] - b[0], (c[1] - b[1]) * kx);
+    let d = Math.abs(t2 - t1) * 180 / Math.PI;
+    if (d > 180) d = 360 - d;
+    worst = Math.max(worst, d);
+  }
+  return worst;
+}
+function assertAround(rings, n, m, label) {
+  for (let d = 0; d < 360; d += 5) {
+    const t = d * Math.PI / 180, q = offset(n.lat, n.lon, m * Math.sin(t), m * Math.cos(t));
+    assert.ok(SC.inRings(rings, q.lat, q.lon), label + ': less than ' + m + ' m of area at ' + d + '°');
+  }
+}
+
+test('the hull with a 2 km margin: 2 km past the bare hull everywhere, corners rounded', () => {
+  const r = SC.linkReach([HOME, EAST, FAR], [two('h0', 'e1'), two('h0', 'f1')]);
+  const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, r.lobes.get(n.public_key), 1000), 1000));
+  const bare = SC.scopeHull(shapes)[0], rings = SC.scopeHull(shapes, 2000), ring = rings[0];
+  assert.strictEqual(rings.length, 1);
+  for (const p of ring) {
+    const dd = edgeDist(bare, p);
+    assert.ok(dd > 1980 && dd < 2020, 'a vertex ' + Math.round(dd) + ' m from the bare hull');
+  }
+  for (const p of bare) assert.ok(SC.inRings(rings, p[0], p[1]), 'a bare corner is outside');
+  assert.ok(sharpestTurn(ring) <= 5.5, 'a corner turns ' + sharpestTurn(ring).toFixed(1) + '° at once');
+  for (const n of [HOME, EAST, FAR]) assertAround(rings, n, 2990, n.public_key);
+  assert.deepStrictEqual(SC.scopeHull(shapes, 0), SC.scopeHull(shapes), 'no margin, no change');
+});
+
+test('Detailed with a 2 km margin: about 2 km past the bare area, a lobe tip rounded', () => {
+  const lobe = SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0');
+  const shapes = [SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)];
+  const bare = SC.wrapShapes(shapes), rings = SC.wrapShapes(shapes, undefined, 2000);
+  assert.strictEqual(rings.length, 1);
+  assertAround(rings, HOME, 2990, 'home');
+  // 2 km past the lobe's tip (22 km east), and 2 km either side of it.
+  for (const [e, n] of [[23900, 0], [22000, 1900], [22000, -1900]]) {
+    const q = offset(HOME.lat, HOME.lon, e, n);
+    assert.ok(SC.inRings(rings, q.lat, q.lon), 'no margin round the tip at ' + e + ',' + n);
+  }
+  const out = offset(HOME.lat, HOME.lon, 24700, 0);
+  assert.ok(!SC.inRings(rings, out.lat, out.lon), 'more than ~2 km past the tip');
+  for (const p of rings[0]) {
+    const dd = Math.min.apply(null, bare.map(b => edgeDist(b, p)));
+    assert.ok(dd > 1900 && dd < 2700, 'a vertex ' + Math.round(dd) + ' m from the bare area');
+  }
+});
+
+test('the overlay draws both views with the 2 km margin: 3 km round a lone repeater', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, {});
+  const lone = { public_key: 'z1', lat: 40.0, lon: -75.3, transported_scopes: ['#solo'] };
+  o.setNodes([lone]); o.setVisible(true);
+  for (const view of ['hull', 'detailed']) {
+    o.setView(view);   // Convex Hull is already drawn: a no-op
+    const rings = rec.polygons[rec.polygons.length - 1].rings;
+    assertAround(rings, lone, 2950, view);
+    const out = offset(lone.lat, lone.lon, 3400, 0);
+    assert.ok(!SC.inRings(rings, out.lat, out.lon), view + ': more than 3 km round it');
+  }
+  assert.strictEqual(SC.areaMarginM, 2000);
+});
+
 test('linked nodes sit inside the area they extend', () => {
   const r = SC.linkReach([HOME, EAST, FAR], [two('h0', 'e1'), two('h0', 'f1')]);
   const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, r.lobes.get(n.public_key), 1000), 1000));
@@ -731,7 +814,7 @@ test('links are loaded once shown, and change the shape', () => {
   o.setVisible(true);
   assert.strictEqual(loads, 1);
   const before = ofKind(rec, 'observed').pop();
-  assert.ok(reachToward(before.rings, HOME, 90) < 2000, 'floor circle before links arrive');
+  assert.ok(reachToward(before.rings, HOME, 90) < 1100 + SC.areaMarginM, 'floor circle (and margin) before links arrive');
   resolve([{ source: 'h0', target: 'e1', bidirectional: true }]);
   return Promise.resolve().then(() => Promise.resolve()).then(() => {
     const after = ofKind(rec, 'observed').pop();
@@ -875,9 +958,10 @@ test('a terrain answer reshapes that repeater\'s area', () => {
   const westBefore = () => reachToward(rec.polygons[rec.polygons.length - 1].rings, HOME, 270);
   return tick().then(() => {
     // Cut to 2 km from 225° to 315°: the area's west edge becomes the chord
-    // between 220° and 320°, 20 km x sin 40° ~ 12.9 km, from 20 km.
+    // between 220° and 320°, 20 km x sin 40° ~ 12.9 km, from 20 km, plus
+    // the 2 km margin.
     const west = westBefore();
-    assert.ok(Math.abs(west - 20000 * Math.sin(40 * Math.PI / 180)) < 400, 'west ' + west);
+    assert.ok(Math.abs(west - 20000 * Math.sin(40 * Math.PI / 180) - SC.areaMarginM) < 400, 'west ' + west);
   });
 });
 
@@ -1442,7 +1526,7 @@ function timeRebuild(view) {
 }
 
 // Targets per view; the assertion allows twice that for slower CI runners.
-[['hull', 30], ['detailed', 210]].forEach(([view, target]) => {
+[['hull', 30], ['detailed', 260]].forEach(([view, target]) => {
   test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes, ' + view + ' view: median rebuild within budget', () => {
     const r = timeRebuild(view);
     console.log('     (median ' + r.median.toFixed(1) + ' ms over 5 runs (target ' + target + ' ms) for ' + r.computed + ' outlines over ' + r.links + ' links; cached rebuild ' + r.cachedMs.toFixed(1) + ' ms)');

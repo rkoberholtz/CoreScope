@@ -205,15 +205,16 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
 
   await step('terrain trims the outline behind the ridge and leaves the open side alone', async () => {
     // SF Two (37.79, -122.40): radius ~12.8 km from its 11.6 km link. The
-    // ridge is ~4.5 km west of it: 6 km west is in its shadow, 8 km east is
-    // open ground. Terrain arrives after the first draw, so wait for it.
+    // ridge is ~4.5 km west of it: 9 km west is in its shadow even with the
+    // 2 km margin, 8 km east is open ground. Terrain arrives after the first
+    // draw, so wait for it.
     await page.waitForFunction(({ sel, lon }) => {
       const p = document.querySelector(sel); if (!p) return false;
       const m = window.__mc_map, pt = m.latLngToContainerPoint([37.79, lon]), box = m.getContainer().getBoundingClientRect();
       return !p.isPointInFill(new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse()));
-    }, { sel: outline('sf'), lon: -122.40 - 6 * KM_LON }, { timeout: 10000 });
+    }, { sel: outline('sf'), lon: -122.40 - 9 * KM_LON }, { timeout: 10000 });
     assert(await insideAt('sf', 37.79, -122.40 + 8 * KM_LON), '8 km east of SF Two is outside #sf');
-    assert(!(await insideAt('sf', 37.79, -122.40 - 6 * KM_LON)), '6 km west, behind the ridge, is inside #sf');
+    assert(!(await insideAt('sf', 37.79, -122.40 - 9 * KM_LON)), '9 km west, behind the ridge, is inside #sf');
     const hint = await page.$eval('#mcScopeList', (el) => el.textContent);
     assert(/AWS Terrain Tiles/.test(hint) && !/Terrain unavailable/.test(hint), 'hint: ' + hint);
   });
@@ -350,11 +351,12 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     assert((await pathsD()) !== hullD, 'Detailed drew the same outlines as Convex Hull');
     const keys = Object.keys(hull);
     assert(keys.length === 3 && keys.every((k) => k in detailed), 'scopes: ' + JSON.stringify([hull, detailed]));
-    // Along the edge the views may differ by under a pixel: the hull's
-    // chords sit just inside each reach, the grid outline just outside
-    // (drawn out so every member keeps its 1 km). Allow 1%.
+    // Along the edge the views differ a little: the hull's margin is exact,
+    // the grid's errs outward by under a cell so it never falls short of
+    // 2 km, and its outline sits just outside each reach. Allow 2% (measured
+    // 0.6-1%).
     console.log('    (grid points filled, convex hull / detailed: ' + keys.map((k) => k + ' ' + hull[k] + '/' + detailed[k]).join(', ') + ')');
-    for (const k of keys) assert(detailed[k] <= hull[k] * 1.01 + 3, k + ': detailed fills more than the hull ' + JSON.stringify([hull[k], detailed[k]]));
+    for (const k of keys) assert(detailed[k] <= hull[k] * 1.02 + 3, k + ': detailed fills more than the hull ' + JSON.stringify([hull[k], detailed[k]]));
   });
 
   await step('in Detailed, hover and click still name and list the scopes', async () => {

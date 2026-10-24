@@ -26,7 +26,9 @@
 
    A scope's outline is drawn in one of two views (setView), each built from
    its members' reach shapes and each containing every member's whole shape,
-   so no member is closer to the border than the 1 km floor:
+   then grown by a 2 km margin with rounded corners, so no member is closer
+   to the border than 3 km (the 1 km floor and the margin), and a linked
+   repeater at a corner is never on the line:
    - hull: the convex hull (scopeHull), everything between their farthest
      edges included. The default.
    - detailed: shrink-wrapped (wrapShapes): their combined reach with every
@@ -42,8 +44,8 @@
    lists the repeaters configured for or carrying each of them. The outlines
    take no pointer events, so they never block a click on anything else.
 
-   The radius rule, floor, terrain model, wrap gap, default view and pulse
-   duration are fixed for now; exposing them in the customizer is a
+   The radius rule, floor, margin, terrain model, wrap gap, default view and
+   pulse duration are fixed for now; exposing them in the customizer is a
    follow-up. */
 (function () {
   'use strict';
@@ -60,6 +62,11 @@
   var MAX_RADIUS_M = 20000;
   var NO_LINK_RADIUS_M = 1000;
   var DEFAULT_PULSE_MS = 1500;
+  // Every area is drawn this much past its members' reach, round its
+  // corners too: a little generous, so a repeater at a corner or just past
+  // a lobe's tip is not left on the line. With the floor, every member has
+  // at least 3 km of area round it.
+  var AREA_MARGIN_M = 2000;
   // 72 rays of 5°, the same as terrain-reach.js walks.
   var SECTORS = 72;
   var SECTOR_RAD = 2 * Math.PI / SECTORS;
@@ -397,10 +404,43 @@
   // reach shapes, everything between their farthest edges included, as
   // rings ([] or one ring), the shape the polygon and hit tests take. It
   // contains every member's whole shape, so no member is ever closer to the
-  // border than its floor.
-  function scopeHull(shapes) {
-    var ring = hullOfEdges((shapes || []).map(shapeEdge));
+  // border than its floor, plus marginM (rounded) when given.
+  function scopeHull(shapes, marginM) {
+    var ring = roundOut(hullOfEdges((shapes || []).map(shapeEdge)), marginM);
     return ring.length ? [ring] : [];
+  }
+
+  // roundOut grows a convex ring by m metres all round: each edge pushed out
+  // by m, joined round each corner by an arc of radius m (the ring's
+  // Minkowski sum with a disc), in steps of at most a sector. The arcs turn
+  // once round in all, so they add at most SECTORS points. The ring itself
+  // when m is not positive.
+  function roundOut(ring, m) {
+    var n = ring.length;
+    if (!(m > 0) || n < 3) return ring;
+    var lat0 = 0, i;
+    for (i = 0; i < n; i++) lat0 += ring[i][0];
+    var kx = M_PER_DEG * Math.cos((lat0 / n) * Math.PI / 180), ky = M_PER_DEG;
+    var xs = new Float64Array(n), ys = new Float64Array(n), area = 0;
+    for (i = 0; i < n; i++) { xs[i] = ring[i][1] * kx; ys[i] = ring[i][0] * ky; }
+    for (i = 0; i < n; i++) { var j = (i + 1) % n; area += xs[i] * ys[j] - xs[j] * ys[i]; }
+    // Outward is right of travel round a counter-clockwise ring, left round
+    // a clockwise one.
+    var s = area > 0 ? 1 : -1;
+    var normal = new Float64Array(n);
+    for (i = 0; i < n; i++) { var k = (i + 1) % n; normal[i] = Math.atan2(-(xs[k] - xs[i]) * s, (ys[k] - ys[i]) * s); }
+    var out = [];
+    for (i = 0; i < n; i++) {
+      var a1 = normal[(i + n - 1) % n], d = normal[i] - a1;
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d <= -Math.PI) d += 2 * Math.PI;
+      var steps = Math.max(1, Math.ceil(Math.abs(d) / SECTOR_RAD));
+      for (var t = 0; t <= steps; t++) {
+        var a = a1 + d * t / steps;
+        out.push([(ys[i] + m * Math.sin(a)) / ky, (xs[i] + m * Math.cos(a)) / kx]);
+      }
+    }
+    return out;
   }
 
   // ── Distance field (wrap and detailed views) ─────────────────────────────
@@ -964,6 +1004,60 @@
     }
   }
 
+  // growField pushes the inside out by m metres, in place and round: every
+  // inside vertex on the edge (one with a neighbour outside) stamps a disc
+  // round it, each outside vertex in it taking (its distance - lead) / m,
+  // so the edge is drawn m from the nearest of them. lead is how far past
+  // the vertex, toward an outside neighbour, the traced edge crosses (the
+  // same interpolation traceRings uses, the most of its neighbours): the
+  // real edge is that much nearer, so the margin does not fall short, and
+  // overshoots only off that direction, by under a cell. Inside vertices
+  // keep their values. O(edge vertices x disc), not the grid: the inside of
+  // a big cluster is most of it. Each row's traced span widens to the
+  // vertices its stamps lowered.
+  function growField(g, m) {
+    var nx = g.nx, ny = g.ny, field = g.field, i, j;
+    var r = m / g.cell, R = Math.ceil(r) + 1;
+    var edge = [], i0 = nx, i1 = -1, j0 = ny, j1 = -1;
+    function cross(fv, fo) { return fo >= 1 ? (1 - fv) / (fo - fv) : 0; }
+    for (j = 0; j < ny; j++) {
+      var row = j * nx, lo = Math.max(0, g.rowLo[j]), hi = Math.min(nx - 1, g.rowHi[j]);
+      for (i = lo; i <= hi; i++) {
+        var v = row + i, f = field[v];
+        if (f >= 1) continue;
+        if (i < i0) i0 = i; if (i > i1) i1 = i; if (j < j0) j0 = j; j1 = j;
+        var lead = Math.max(i > 0 ? cross(f, field[v - 1]) : 0, i < nx - 1 ? cross(f, field[v + 1]) : 0,
+          j > 0 ? cross(f, field[v - nx]) : 0, j < ny - 1 ? cross(f, field[v + nx]) : 0);
+        if (lead > 0) edge.push(v, lead);
+      }
+    }
+    if (i1 < 0) return;
+    // Stamped values are below 1, so the inside is fixed before any stamp:
+    // outside[v] marks the vertices a stamp may lower.
+    var outside = scratchBuf('growOut', Uint8Array, nx * ny);
+    i0 = Math.max(0, i0 - R - 1); i1 = Math.min(nx - 1, i1 + R + 1);
+    j0 = Math.max(0, j0 - R - 1); j1 = Math.min(ny - 1, j1 + R + 1);
+    for (j = j0; j <= j1; j++) for (i = i0; i <= i1; i++) outside[j * nx + i] = field[j * nx + i] >= 1 ? 1 : 0;
+    var disc = [];
+    for (var dj = -R; dj <= R; dj++) for (var di = -R; di <= R; di++) {
+      var d = Math.sqrt(di * di + dj * dj);
+      if (d > 0 && d <= R) disc.push(di, dj, d);
+    }
+    for (var e = 0; e < edge.length; e += 2) {
+      var ei = edge[e] % nx, ej = (edge[e] - ei) / nx, el = edge[e + 1];
+      for (var k = 0; k < disc.length; k += 3) {
+        var ti = ei + disc[k], tj = ej + disc[k + 1];
+        if (ti < 0 || ti >= nx || tj < 0 || tj >= ny) continue;
+        var t = tj * nx + ti, val = (disc[k + 2] - el) / r;
+        if (outside[t] && val < field[t]) {
+          field[t] = val;
+          if (ti < g.rowLo[tj]) g.rowLo[tj] = ti;
+          if (ti > g.rowHi[tj]) g.rowHi[tj] = ti;
+        }
+      }
+    }
+  }
+
   function usableShapes(shapes) {
     return (shapes || []).filter(function (s) { return s && isFinite(s.lat) && isFinite(s.lon) && s.minExt > 0; });
   }
@@ -988,18 +1082,21 @@
   // much as between repeaters. Groups further apart than gapM are separate
   // areas. Neither step alone does it: a closing cannot join two small
   // blobs (a disc slips between them), and bridges leave a lone repeater's
-  // notches open.
-  function wrapShapes(shapes, gapM) {
+  // notches open. marginM, when given, then grows the result that far all
+  // round, corners rounded (growField).
+  function wrapShapes(shapes, gapM, marginM) {
     gapM = gapM || WRAP_GAP_M;
     var ok = usableShapes(shapes);
     if (!ok.length) return [];
     var out = [];
     clusters(ok, gapM).forEach(function (c) {
-      // Room for the closing to grow into; clusterField adds two cells, so
-      // the grid's border stays outside it.
-      var g = clusterField(c, gapM / 2);
+      // Room for the closing and the margin to grow into (the closing stays
+      // within the shapes' boxes); clusterField adds two cells, so the
+      // grid's border stays outside both.
+      var g = clusterField(c, Math.max(gapM / 2, marginM || 0));
       bridgeField(g, c, gapM);
       closeField(g, gapM);
+      if (marginM > 0) growField(g, marginM);
       Array.prototype.push.apply(out, traceRings(g));
     });
     return out;
@@ -1154,7 +1251,7 @@
   }
 
   // createOverlay owns the layer, the cache, hover and the pulses for one
-  // Leaflet map. opts: floorM, pulseMs, loadLinks (() => Promise of neighbor
+  // Leaflet map. opts: floorM, marginM (AREA_MARGIN_M), pulseMs, loadLinks (() => Promise of neighbor
   // graph edges), terrain (a terrain-reach.js provider: extentsFor and
   // status), loadAntennaHeights (() => Promise of { pubkey or prefix:
   // metres }, operator-set antenna heights), and setTimeout/clearTimeout/raf
@@ -1173,6 +1270,7 @@
   function createOverlay(L, map, opts) {
     opts = opts || {};
     var floorM = opts.floorM || DEFAULT_FLOOR_M;
+    var marginM = opts.marginM != null ? opts.marginM : AREA_MARGIN_M;
     var raf = opts.raf || (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : function (fn) { return setTimeout(fn, 16); });
     if (!map.getPane(PANE)) map.createPane(PANE).style.zIndex = String(PANE_Z);
     // Its own SVG renderer: the live map prefers canvas, which would ignore
@@ -1309,9 +1407,9 @@
       if (hit && hit.sig === sig) return hit.rings;
       computed++;
       var r;
-      if (view === 'detailed') r = wrapShapes(entries.map(function (e) { return e.shape; }), WRAP_GAP_M);
+      if (view === 'detailed') r = wrapShapes(entries.map(function (e) { return e.shape; }), WRAP_GAP_M, marginM);
       else {
-        var ring = hullOfEdges(entries.map(function (e) { return e.edge; }));
+        var ring = roundOut(hullOfEdges(entries.map(function (e) { return e.edge; })), marginM);
         r = ring.length ? [ring] : [];
       }
       cache.set(key, { sig: sig, rings: r });
@@ -1538,8 +1636,8 @@
 
   // What an area is, per view.
   var AREA_NOTE = {
-    hull: 'Each area spans the farthest reach of its repeaters, at least 1 km round each.',
-    detailed: 'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least 1 km round each.',
+    hull: 'Each area spans the farthest reach of its repeaters, at least ' + ((DEFAULT_FLOOR_M + AREA_MARGIN_M) / 1000) + ' km round each.',
+    detailed: 'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least ' + ((DEFAULT_FLOOR_M + AREA_MARGIN_M) / 1000) + ' km round each.',
   };
   var TERRAIN_NOTE = 'A repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links. ' +
     'Antenna heights are the operator\'s where set; otherwise 10 m, raised where a repeater\'s links need more (click an outline to see them). ' +
@@ -1651,6 +1749,7 @@
     viewFromHash: viewFromHash,
     views: VIEWS.slice(),
     wrapGapM: WRAP_GAP_M,
+    areaMarginM: AREA_MARGIN_M,
     contourShapes: contourShapes,
     wrapShapes: wrapShapes,
     mountViewPicker: mountViewPicker,
