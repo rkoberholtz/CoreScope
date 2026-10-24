@@ -376,7 +376,7 @@ test('inRings: even-odd, so a hole is outside', () => {
   }
 });
 
-console.log('\n=== scope-contours.js: detailed view (combined reach) ===');
+console.log('\n=== scope-contours.js: reach field (contourShapes, what the detailed view wraps) ===');
 
 const circles = (pts, R) => pts.map(p => SC.shapeFor(p, null, R));
 
@@ -473,7 +473,7 @@ test('detailed: every member has at least 1 km of area all round, even boxed in 
   for (const n of [HOME, EAST]) assertKmAround(rings, n, n.public_key);
 });
 
-console.log('\n=== scope-contours.js: wrap view (shrink-wrap) ===');
+console.log('\n=== scope-contours.js: detailed view (wrapShapes, shrink-wrap) ===');
 
 // selfCrosses: whether any two non-adjacent edges of a ring cross.
 function selfCrosses(ring) {
@@ -1220,37 +1220,38 @@ test('hiddenFromHash parses the list, null when absent', () => {
 
 console.log('\n=== scope-contours.js: area views ===');
 
-test('views are general (default), wrap and detailed', () => {
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(SC.views)), ['general', 'wrap', 'detailed']);
+test('views are hull (default) and detailed', () => {
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(SC.views)), ['hull', 'detailed']);
   const { L, map } = fakeLeaflet();
-  assert.strictEqual(SC.createOverlay(L, map, {}).view(), 'general');
-  assert.strictEqual(SC.createOverlay(L, map, { view: 'wrap' }).view(), 'wrap');
-  assert.strictEqual(SC.createOverlay(L, map, { view: 'bogus' }).view(), 'general');
+  assert.strictEqual(SC.createOverlay(L, map, {}).view(), 'hull');
+  assert.strictEqual(SC.createOverlay(L, map, { view: 'detailed' }).view(), 'detailed');
+  for (const gone of ['general', 'wrap', 'bogus']) assert.strictEqual(SC.createOverlay(L, map, { view: gone }).view(), 'hull', gone);
 });
 
-// Two members of one scope 12 km apart, 1 km reach each: the views differ
-// on whether the gap between them is part of the area.
+// Two members of one scope 30 km apart, 1 km reach each: a 28 km gap, which
+// the hull spans and the detailed view, filling only gaps under 15 km, does
+// not.
 const GAP_NODES = [
   Object.assign({ public_key: 'g1', transported_scopes: ['#gap'] }, offset(40.7, -74.0, 0, 0)),
-  Object.assign({ public_key: 'g2', transported_scopes: ['#gap'] }, offset(40.7, -74.0, 12000, 0)),
+  Object.assign({ public_key: 'g2', transported_scopes: ['#gap'] }, offset(40.7, -74.0, 30000, 0)),
 ];
-const GAP_MID = offset(40.7, -74.0, 6000, 0);
+const GAP_MID = offset(40.7, -74.0, 15000, 0);
 
-test('setView redraws in that view: general and wrap fill the gap, detailed does not', () => {
+test('setView redraws in that view: the hull spans a 28 km gap, detailed does not', () => {
   const { L, map, rec } = fakeLeaflet();
   const o = SC.createOverlay(L, map, sync);
   o.setNodes(GAP_NODES); o.setVisible(true);
   const last = () => rec.polygons[rec.polygons.length - 1].rings;
-  assert.ok(SC.inRings(last(), GAP_MID.lat, GAP_MID.lon), 'general');
+  assert.strictEqual(last().length, 1);
+  assert.ok(SC.inRings(last(), GAP_MID.lat, GAP_MID.lon), 'hull');
   o.setView('detailed');
   assert.strictEqual(o.view(), 'detailed');
-  assert.strictEqual(last().length, 2, 'detailed: two separate circles');
-  assert.ok(!SC.inRings(last(), GAP_MID.lat, GAP_MID.lon), 'detailed fills the gap');
-  o.setView('wrap');
-  assert.strictEqual(last().length, 1);
-  assert.ok(SC.inRings(last(), GAP_MID.lat, GAP_MID.lon), 'wrap');
+  assert.strictEqual(last().length, 2, 'detailed: two separate areas');
+  assert.ok(!SC.inRings(last(), GAP_MID.lat, GAP_MID.lon), 'detailed bridged a 28 km gap');
   // Hover follows the drawn view.
   map.fire('mousemove', { latlng: { lat: GAP_MID.lat, lng: GAP_MID.lon } });
+  assert.strictEqual(rec.tipOpen, false, 'hovering the gap names the scope');
+  map.fire('mousemove', { latlng: { lat: GAP_NODES[1].lat, lng: GAP_NODES[1].lon } });
   assert.strictEqual(rec.tipOpen, true);
 });
 
@@ -1258,14 +1259,14 @@ test('each view is cached: switching back computes nothing, an unknown view chan
   const { L, map, rec } = fakeLeaflet();
   const o = SC.createOverlay(L, map, {});
   o.setNodes(NODES); o.setVisible(true);
-  const general = o.stats().computed;
-  o.setView('wrap');
-  const afterWrap = o.stats().computed;
-  assert.ok(afterWrap > general);
-  o.setView('general'); o.setView('wrap');
-  assert.strictEqual(o.stats().computed, afterWrap, 'a view seen before was recomputed');
+  const hull = o.stats().computed;
+  o.setView('detailed');
+  const afterDetailed = o.stats().computed;
+  assert.ok(afterDetailed > hull);
+  o.setView('hull'); o.setView('detailed');
+  assert.strictEqual(o.stats().computed, afterDetailed, 'a view seen before was recomputed');
   const drawn = rec.polygons.length;
-  o.setView('nope'); o.setView('wrap');
+  o.setView('wrap'); o.setView('detailed');
   assert.strictEqual(rec.polygons.length, drawn, 'no redraw for an unknown or unchanged view');
 });
 
@@ -1273,12 +1274,12 @@ test('a hidden overlay computes no view; switching view closes the click box', (
   const { L, map, rec } = fakeLeaflet();
   const o = SC.createOverlay(L, map, {});
   o.setNodes(NODES);
-  o.setView('wrap'); o.setView('detailed');
+  o.setView('detailed');
   assert.strictEqual(o.stats().computed, 0);
   o.setVisible(true);
   map.fire('click', { latlng: { lat: 40.70, lng: -74.00 }, sourceTarget: map });
   assert.strictEqual(rec.popup._onMap, true);
-  o.setView('general');
+  o.setView('hull');
   assert.strictEqual(rec.popup._onMap, false);
 });
 
@@ -1290,15 +1291,13 @@ test('the list hint says what an area is in the current view', () => {
   S.mountScopeList(el, o);
   o.setNodes(NODES); o.setVisible(true);
   assert.ok(/farthest reach/.test(el.innerHTML));
-  o.setView('wrap');
-  assert.ok(/narrower than 15 km/.test(el.innerHTML), el.innerHTML);
   o.setView('detailed');
-  assert.ok(/is where its repeaters reach/.test(el.innerHTML));
+  assert.ok(/narrower than 15 km/.test(el.innerHTML), el.innerHTML);
 });
 
 const viewButton = (v) => ({ getAttribute: k => (k === 'data-view' ? v : null) });
 
-test('the view picker shows three buttons while the overlay is shown, the current one pressed', () => {
+test('the view picker shows Convex Hull and Detailed while the overlay is shown, the current one pressed', () => {
   const { S } = listSandbox('#/map');
   const { L, map } = fakeLeaflet();
   const o = S.createOverlay(L, map, {});
@@ -1308,8 +1307,9 @@ test('the view picker shows three buttons while the overlay is shown, the curren
   assert.strictEqual(el.hidden, true, 'hidden while the overlay is off');
   o.setVisible(true);
   assert.strictEqual(el.hidden, false);
-  assert.strictEqual((el.innerHTML.match(/data-view="/g) || []).length, 3);
-  assert.ok(/class="btn active" data-view="general" aria-pressed="true"/.test(el.innerHTML), el.innerHTML);
+  assert.strictEqual((el.innerHTML.match(/data-view="/g) || []).length, 2);
+  assert.ok(/class="btn active" data-view="hull" aria-pressed="true"[^>]*>Convex Hull</.test(el.innerHTML), el.innerHTML);
+  assert.ok(/data-view="detailed" aria-pressed="false"[^>]*>Detailed</.test(el.innerHTML), el.innerHTML);
   assert.ok(/Area shape/.test(el.innerHTML));
   o.setVisible(false);
   assert.strictEqual(el.hidden, true);
@@ -1322,17 +1322,17 @@ test('picking a view switches it, stores it, and writes it to the URL; the defau
   const el = fakeListEl();
   S.mountViewPicker(el, o);
   o.setNodes(NODES); o.setVisible(true);
-  el.fire('click', viewButton('wrap'));
-  assert.strictEqual(o.view(), 'wrap');
-  assert.strictEqual(store['meshcore-scope-contours-view'], 'wrap');
-  assert.ok(/[?&]contoursView=wrap\b/.test(ctx.location.hash) && /contours=1/.test(ctx.location.hash), ctx.location.hash);
-  assert.ok(/class="btn active" data-view="wrap"/.test(el.innerHTML));
-  el.fire('click', viewButton('general'));
-  assert.strictEqual(store['meshcore-scope-contours-view'], 'general');
+  el.fire('click', viewButton('detailed'));
+  assert.strictEqual(o.view(), 'detailed');
+  assert.strictEqual(store['meshcore-scope-contours-view'], 'detailed');
+  assert.ok(/[?&]contoursView=detailed\b/.test(ctx.location.hash) && /contours=1/.test(ctx.location.hash), ctx.location.hash);
+  assert.ok(/class="btn active" data-view="detailed"/.test(el.innerHTML));
+  el.fire('click', viewButton('hull'));
+  assert.strictEqual(store['meshcore-scope-contours-view'], 'hull');
   assert.ok(!/contoursView/.test(ctx.location.hash), ctx.location.hash);
-  el.fire('click', viewButton('bogus'));
+  el.fire('click', viewButton('wrap'));
   el.fire('click', { getAttribute: () => null });
-  assert.strictEqual(o.view(), 'general');
+  assert.strictEqual(o.view(), 'hull');
 });
 
 test('the starting view comes from the URL first, then the stored choice', () => {
@@ -1343,14 +1343,16 @@ test('the starting view comes from the URL first, then the stored choice', () =>
     S.mountViewPicker(fakeListEl(), o);
     return o.view();
   };
-  assert.strictEqual(start('#/map?contoursView=detailed', { 'meshcore-scope-contours-view': 'wrap' }), 'detailed');
-  assert.strictEqual(start('#/map', { 'meshcore-scope-contours-view': 'wrap' }), 'wrap');
-  assert.strictEqual(start('#/map?contoursView=bogus', { 'meshcore-scope-contours-view': 'nope' }), 'general');
-  assert.strictEqual(start('#/map'), 'general');
+  assert.strictEqual(start('#/map?contoursView=detailed', { 'meshcore-scope-contours-view': 'hull' }), 'detailed');
+  assert.strictEqual(start('#/map', { 'meshcore-scope-contours-view': 'detailed' }), 'detailed');
+  // Choices stored by the three-view picker that came before.
+  assert.strictEqual(start('#/map?contoursView=wrap', { 'meshcore-scope-contours-view': 'general' }), 'hull');
+  assert.strictEqual(start('#/map'), 'hull');
 });
 
 test('viewFromHash reads ?contoursView=, null when absent or unknown', () => {
-  assert.strictEqual(SC.viewFromHash('#/map?contoursView=wrap'), 'wrap');
+  assert.strictEqual(SC.viewFromHash('#/map?contoursView=detailed'), 'detailed');
+  assert.strictEqual(SC.viewFromHash('#/map?contoursView=wrap'), null);
   assert.strictEqual(SC.viewFromHash('#/map?contours=1'), null);
   assert.strictEqual(SC.viewFromHash('#/map?contoursView=x'), null);
 });
@@ -1422,7 +1424,7 @@ function timeRebuild(view) {
 }
 
 // Targets per view; the assertion allows twice that for slower CI runners.
-[['general', 30], ['wrap', 210], ['detailed', 90]].forEach(([view, target]) => {
+[['hull', 30], ['detailed', 210]].forEach(([view, target]) => {
   test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes, ' + view + ' view: median rebuild within budget', () => {
     const r = timeRebuild(view);
     console.log('     (median ' + r.median.toFixed(1) + ' ms over 5 runs (target ' + target + ' ms) for ' + r.computed + ' outlines over ' + r.links + ' links; cached rebuild ' + r.cachedMs.toFixed(1) + ' ms)');
@@ -1431,7 +1433,7 @@ function timeRebuild(view) {
   });
 });
 
-['general', 'wrap', 'detailed'].forEach((view) => test('a hover hit test over 64 outlines takes under 1 ms, ' + view + ' view', () => {
+['hull', 'detailed'].forEach((view) => test('a hover hit test over 64 outlines takes under 1 ms, ' + view + ' view', () => {
   const rnd = prng(7);
   const nodes = [];
   for (let i = 0; i < 2000; i++) {

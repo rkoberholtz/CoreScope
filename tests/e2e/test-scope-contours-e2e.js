@@ -9,8 +9,8 @@
  * Clicking inside outlines lists each scope's repeaters. The "Reach contours" toggle draws them,
  * ?contours=1 deep-links them, the Region Scope picker narrows them to one
  * scope, a per-scope list shows and hides them (?contoursHide=), an area
- * shape picker on the map draws them General, Shrink-wrap or Detailed
- * (?contoursView=), hovering
+ * shape picker on the map draws them as a Convex Hull or Detailed
+ * (shrink-wrapped; ?contoursView=detailed), hovering
  * names every scope under the cursor on both pages (the live map draws
  * canvases above the outlines), and the outlines never take pointer events.
  * On the live page a scope's outline flashes when one of its packets arrives.
@@ -334,33 +334,27 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     }, label, { timeout: 5000 });
   };
 
-  await step('the area shape picker shows while contours are on, General first', async () => {
+  await step('the area shape picker shows while contours are on, Convex Hull first', async () => {
     assert(!(await page.$eval('#mcScopeView', (el) => el.hidden)), 'picker hidden while contours are on');
     const btns = await page.$$eval('#mcScopeView button', (els) => els.map((b) => b.textContent + ':' + b.getAttribute('aria-pressed')));
-    assert(btns.join(',') === 'General:true,Shrink-wrap:false,Detailed:false', 'buttons: ' + btns.join(','));
+    assert(btns.join(',') === 'Convex Hull:true,Detailed:false', 'buttons: ' + btns.join(','));
   });
 
-  let general = null;
+  let hull = null;
   const pathsD = () => page.$$eval('path.mc-scope-area', (els) => els.map((el) => el.getAttribute('d')).join('|'));
-  await step('Shrink-wrap and Detailed redraw every scope, each inside the one before', async () => {
-    general = await fillCounts();
-    const generalD = await pathsD();
-    await pickView('wrap', /narrower than 15 km/);
-    const wrap = await fillCounts();
-    await pickView('detailed', /is where its repeaters reach/);
+  await step('Detailed redraws every scope inside its convex hull', async () => {
+    hull = await fillCounts();
+    const hullD = await pathsD();
+    await pickView('detailed', /narrower than 15 km/);
     const detailed = await fillCounts();
-    assert((await pathsD()) !== generalD, 'Detailed drew the same outlines as General');
-    const keys = Object.keys(general);
-    assert(keys.length === 3 && keys.every((k) => k in wrap && k in detailed), 'scopes: ' + JSON.stringify([general, wrap, detailed]));
+    assert((await pathsD()) !== hullD, 'Detailed drew the same outlines as Convex Hull');
+    const keys = Object.keys(hull);
+    assert(keys.length === 3 && keys.every((k) => k in detailed), 'scopes: ' + JSON.stringify([hull, detailed]));
     // Along the edge the views may differ by under a pixel: the hull's
-    // chords sit just inside each reach, the grid outlines just outside
+    // chords sit just inside each reach, the grid outline just outside
     // (drawn out so every member keeps its 1 km). Allow 1%.
-    const within = (a, b) => a <= b * 1.01 + 3;
-    console.log('    (grid points filled, general / wrap / detailed: ' + keys.map((k) => k + ' ' + general[k] + '/' + wrap[k] + '/' + detailed[k]).join(', ') + ')');
-    for (const k of keys) {
-      assert(within(wrap[k], general[k]), k + ': wrap fills more than general ' + JSON.stringify([general[k], wrap[k]]));
-      assert(within(detailed[k], wrap[k]), k + ': detailed fills more than wrap ' + JSON.stringify([wrap[k], detailed[k]]));
-    }
+    console.log('    (grid points filled, convex hull / detailed: ' + keys.map((k) => k + ' ' + hull[k] + '/' + detailed[k]).join(', ') + ')');
+    for (const k of keys) assert(detailed[k] <= hull[k] * 1.01 + 3, k + ': detailed fills more than the hull ' + JSON.stringify([hull[k], detailed[k]]));
   });
 
   await step('in Detailed, hover and click still name and list the scopes', async () => {
@@ -376,24 +370,24 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.mouse.move(5, 450);
   });
 
-  await step('the view is stored and in the URL, survives a reload, and General clears the URL', async () => {
+  await step('the view is stored and in the URL, survives a reload, and Convex Hull clears the URL', async () => {
     assert(await page.evaluate(() => localStorage.getItem('meshcore-scope-contours-view')) === 'detailed', 'not stored');
     assert(/[?&]contoursView=detailed\b/.test(await page.evaluate(() => location.hash)), 'hash: ' + (await page.evaluate(() => location.hash)));
     await page.reload({ waitUntil: 'load' });
     await page.waitForSelector('path.mc-scope-area');
     assert(await page.$eval('#mcScopeView button[data-view="detailed"]', (b) => b.getAttribute('aria-pressed')) === 'true', 'Detailed not pressed after reload');
-    await pickView('general', /farthest reach/);
+    await pickView('hull', /farthest reach/);
     assert(!/contoursView/.test(await page.evaluate(() => location.hash)), 'contoursView left in the URL');
     const again = await fillCounts();
-    assert(Object.keys(general).every((k) => Math.abs(again[k] - general[k]) <= 3), 'General is not the same as before: ' + JSON.stringify([general, again]));
+    assert(Object.keys(hull).every((k) => Math.abs(again[k] - hull[k]) <= 3), 'Convex Hull is not the same as before: ' + JSON.stringify([hull, again]));
   });
 
-  await step('?contoursView=wrap opens Shrink-wrap, over the stored choice', async () => {
-    await page.goto(BASE + '/#/map?contours=1&contoursView=wrap', { waitUntil: 'load' });
+  await step('?contoursView=detailed opens Detailed, over the stored choice', async () => {
+    await page.goto(BASE + '/#/map?contours=1&contoursView=detailed', { waitUntil: 'load' });
     await page.waitForSelector('path.mc-scope-area');
-    assert(await page.$eval('#mcScopeView button[data-view="wrap"]', (b) => b.getAttribute('aria-pressed')) === 'true', 'Shrink-wrap not pressed');
-    assert(/narrower than 15 km/.test(await page.$eval('#mcScopeList', (el) => el.textContent)), 'hint not for wrap');
-    await pickView('general', /farthest reach/);
+    assert(await page.$eval('#mcScopeView button[data-view="detailed"]', (b) => b.getAttribute('aria-pressed')) === 'true', 'Detailed not pressed');
+    assert(/narrower than 15 km/.test(await page.$eval('#mcScopeList', (el) => el.textContent)), 'hint not for Detailed');
+    await pickView('hull', /farthest reach/);
   });
 
   await step('?contours=0 overrides the stored choice; ?contours=1&contoursHide= restores both', async () => {

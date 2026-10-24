@@ -743,7 +743,7 @@
         loadAntennaHeights: () => api('/config/map', { ttl: 3600 }).then(d => (d && d.antennaHeights) || {}),
       });
       reachOverlay.setOnly(filters.regionScope);
-      // General, shrink-wrap or detailed areas; set before the overlay is
+      // Convex hull or detailed (shrink-wrapped) areas; set before the overlay is
       // shown, so only the chosen view is computed.
       window.ScopeContours.mountViewPicker(document.getElementById('mcScopeView'), reachOverlay);
       window.ScopeContours.mountScopeList(document.getElementById('mcScopeList'), reachOverlay);

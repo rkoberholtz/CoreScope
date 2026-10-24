@@ -22,15 +22,15 @@
      ±11.25°, so evidence always beats the model.
    Interpolating between the 72 directions keeps the shape smooth.
 
-   A scope's outline is drawn in one of three views (setView), each built
-   from its members' reach shapes and each containing every member's whole
-   shape, so no member is closer to the border than the 1 km floor:
-   - general: the convex hull (scopeHull), everything between their farthest
+   A scope's outline is drawn in one of two views (setView), each built from
+   its members' reach shapes and each containing every member's whole shape,
+   so no member is closer to the border than the 1 km floor:
+   - hull: the convex hull (scopeHull), everything between their farthest
      edges included. The default.
-   - wrap: shrink-wrapped (wrapShapes): their combined reach with every gap,
-     bay and notch narrower than 15 km filled, between repeaters and between
-     one repeater's spokes alike; groups further apart stay separate areas.
-   - detailed: their combined reach itself (contourShapes).
+   - detailed: shrink-wrapped (wrapShapes): their combined reach with every
+     gap, bay and notch narrower than 15 km filled, between repeaters and
+     between one repeater's spokes alike; groups further apart stay separate
+     areas.
    Outlines are cached per view and scope, and recomputed only when its
    members, their positions or their reach change.
 
@@ -77,7 +77,7 @@
   var HIDDEN_KEY = 'meshcore-scope-contours-hidden';
   var VIEW_KEY = 'meshcore-scope-contours-view';
   // Area views, the default first.
-  var VIEWS = ['general', 'wrap', 'detailed'];
+  var VIEWS = ['hull', 'detailed'];
   // The widest gap the wrap view fills: a bay or a gap between two groups
   // narrower than this is part of the area, a wider one is not.
   var WRAP_GAP_M = 15000;
@@ -963,9 +963,10 @@
   }
 
   // contourShapes returns the combined outline of reach shapes (see
-  // shapeFor), the detailed view: an array of rings, each [[lat, lon], ...].
-  // Holes come out as rings of their own; Leaflet's evenodd fill draws them
-  // as holes.
+  // shapeFor), unwrapped: the reach field wrapShapes starts from, traced as
+  // it is, so tests can check the field itself. An array of rings, each
+  // [[lat, lon], ...]; holes come out as rings of their own, which
+  // Leaflet's evenodd fill draws as holes.
   function contourShapes(shapes) {
     var ok = usableShapes(shapes);
     if (!ok.length) return [];
@@ -1157,7 +1158,7 @@
   //   setVisible(bool)  adds or removes the layer; computes lazily
   //   setOnly(scope)    draw one scope ('' = all)
   //   setHidden(names)  scopes not to draw
-  //   setView(view)     'general', 'wrap' or 'detailed' (opts.view: the first)
+  //   setView(view)     'hull' or 'detailed' (opts.view: the first)
   //   view()            the current view
   //   scopes()          [{ scope, colour, observed, configured, hidden }]
   //   onChange(fn)      called after each render; returns an unsubscribe
@@ -1302,8 +1303,7 @@
       if (hit && hit.sig === sig) return hit.rings;
       computed++;
       var r;
-      if (view === 'wrap') r = wrapShapes(entries.map(function (e) { return e.shape; }), WRAP_GAP_M);
-      else if (view === 'detailed') r = contourShapes(entries.map(function (e) { return e.shape; }));
+      if (view === 'detailed') r = wrapShapes(entries.map(function (e) { return e.shape; }), WRAP_GAP_M);
       else {
         var ring = hullOfEdges(entries.map(function (e) { return e.edge; }));
         r = ring.length ? [ring] : [];
@@ -1532,9 +1532,8 @@
 
   // What an area is, per view.
   var AREA_NOTE = {
-    general: 'Each area spans the farthest reach of its repeaters, at least 1 km round each.',
-    wrap: 'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least 1 km round each.',
-    detailed: 'Each area is where its repeaters reach, at least 1 km round each.',
+    hull: 'Each area spans the farthest reach of its repeaters, at least 1 km round each.',
+    detailed: 'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least 1 km round each.',
   };
   var TERRAIN_NOTE = 'A repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links. ' +
     'Antenna heights are the operator\'s where set; otherwise 10 m, raised where a repeater\'s links need more (click an outline to see them). ' +
@@ -1598,11 +1597,10 @@
 
   // ── View picker ──────────────────────────────────────────────────────────
 
-  var VIEW_LABEL = { general: 'General', wrap: 'Shrink-wrap', detailed: 'Detailed' };
+  var VIEW_LABEL = { hull: 'Convex Hull', detailed: 'Detailed' };
   var VIEW_TITLE = {
-    general: 'One rubber band round each scope\'s outermost reach: roughly where the region is',
-    wrap: 'Hugs each scope\'s reach, filling bays and gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km; separate groups stay separate',
-    detailed: 'Each scope\'s combined reach: where its repeaters are expected to be heard',
+    hull: 'One rubber band round each scope\'s outermost reach: roughly where the region is',
+    detailed: 'Hugs each scope\'s reach, filling bays and gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km; separate groups stay separate',
   };
 
   // mountViewPicker renders the area view buttons into el, shown while the
