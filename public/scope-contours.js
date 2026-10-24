@@ -22,11 +22,17 @@
      ±11.25°, so evidence always beats the model.
    Interpolating between the 72 directions keeps the shape smooth.
 
-   A scope's outline is its general area: the convex hull of its members'
-   reach shapes (scopeHull), everything between their farthest edges
-   included. The hull contains every member's whole shape, so no member is
-   closer to the border than the 1 km floor. Hulls are cached per scope and
-   recomputed only when its members, their positions or their reach change.
+   A scope's outline is drawn in one of three views (setView), each built
+   from its members' reach shapes and each containing every member's whole
+   shape, so no member is closer to the border than the 1 km floor:
+   - general: the convex hull (scopeHull), everything between their farthest
+     edges included. The default.
+   - wrap: shrink-wrapped (wrapShapes): their combined reach with every gap,
+     bay and notch narrower than 15 km filled, between repeaters and between
+     one repeater's spokes alike; groups further apart stay separate areas.
+   - detailed: their combined reach itself (contourShapes).
+   Outlines are cached per view and scope, and recomputed only when its
+   members, their positions or their reach change.
 
    Hover and click are hit-tested from the map's own events, not from the
    outlines: the live map draws canvases above them, and overlapping scopes
@@ -34,8 +40,9 @@
    lists the repeaters configured for or carrying each of them. The outlines
    take no pointer events, so they never block a click on anything else.
 
-   The radius rule, floor, terrain model and pulse duration are fixed for
-   now; exposing them in the customizer is a follow-up. */
+   The radius rule, floor, terrain model, wrap gap, default view and pulse
+   duration are fixed for now; exposing them in the customizer is a
+   follow-up. */
 (function () {
   'use strict';
 
@@ -68,6 +75,16 @@
   // Points sampled per sector along each member's reach edge for the hull.
   var BOUNDARY_PER_SECTOR = 2;
   var HIDDEN_KEY = 'meshcore-scope-contours-hidden';
+  var VIEW_KEY = 'meshcore-scope-contours-view';
+  // Area views, the default first.
+  var VIEWS = ['general', 'wrap', 'detailed'];
+  // The widest gap the wrap view fills: a bay or a gap between two groups
+  // narrower than this is part of the area, a wider one is not.
+  var WRAP_GAP_M = 15000;
+  // Distance-field grid (wrap and detailed views): no finer than this, and no
+  // more vertices per cluster than MAX_VERTICES (the cell grows instead).
+  var MIN_CELL_M = 150;
+  var MAX_VERTICES = 100000;
 
   // normRegion mirrors the server's normScope (scope_audit.go): strip one
   // leading '#', nothing else, so the map, the audit and the live feed spell
@@ -380,6 +397,607 @@
     return ring.length ? [ring] : [];
   }
 
+  // ── Distance field (wrap and detailed views) ─────────────────────────────
+
+  // fieldGeom adds what the distance field needs to a shape, once (members'
+  // shapes are cached, so once per member): box, its extent in metres
+  // west/east/south/north of the node, so a lobe to the east costs a strip,
+  // not a square; and near[i], the most any bearing within a sector of
+  // interval i (between centres i and i+1) can reach. A vertex at least that
+  // far out is outside even after the fill's half-cell widening, while that
+  // widening spans no more than a sector, so the fill rates it d / near
+  // without a lookup.
+  function fieldGeom(shape) {
+    if (shape.box) return shape;
+    var max = shape.maxExt, e = shape.ext;
+    if (shape.uniform) { shape.box = [-max, max, -max, max]; return shape; }
+    // 2 points per sector. Between samples the boundary can bulge by about
+    // 0.1% of the reach, which the 2-cell margin the fill adds covers.
+    var b = [0, 0, 0, 0], n = SECTORS * 2;
+    for (var k = 0; k < n; k++) {
+      var t = (k / n) * 2 * Math.PI, r = reachAt(shape, t);
+      var x = r * Math.sin(t), y = r * Math.cos(t);
+      if (x < b[0]) b[0] = x; if (x > b[1]) b[1] = x;
+      if (y < b[2]) b[2] = y; if (y > b[3]) b[3] = y;
+    }
+    shape.box = b;
+    var near = new Float64Array(SECTORS);
+    for (var i = 0; i < SECTORS; i++) {
+      near[i] = Math.max(e[(i + SECTORS - 1) % SECTORS], e[i], e[(i + 1) % SECTORS], e[(i + 2) % SECTORS]);
+    }
+    shape.near = near;
+    return shape;
+  }
+
+  // bearingOf is atan2(dx, dy), the compass bearing of an offset, as a
+  // polynomial: error under 2.1e-4 rad (0.012°, measured), far below what a
+  // 5° sector blend can show, at a fraction of Math.atan2's cost in the
+  // per-vertex fill.
+  function bearingOf(dx, dy) {
+    var ax = Math.abs(dy), ay = Math.abs(dx);
+    var hi = ax > ay ? ax : ay;
+    if (hi === 0) return 0;
+    var a = (ax < ay ? ax : ay) / hi, q = a * a;
+    var r = ((-0.0464964749 * q + 0.15931422) * q - 0.327622764) * q * a + a;
+    if (ay > ax) r = 1.5707963267948966 - r;
+    if (dy < 0) r = Math.PI - r;
+    return dx < 0 ? -r : r;
+  }
+
+  // clusters splits shapes into groups that can share an outline: shapes
+  // whose reach comes within joinM of each other (centres within the sum of
+  // their longest reaches plus joinM), so each group gets its own compact
+  // grid and projection. Spatial hash with cells at least that wide: only
+  // the 3x3 neighbourhood is checked, so this is linear in the count.
+  function clusters(shapes, joinM) {
+    var maxAbsLat = 0, maxExt = 0;
+    shapes.forEach(function (s) { maxAbsLat = Math.max(maxAbsLat, Math.abs(s.lat)); maxExt = Math.max(maxExt, s.maxExt); });
+    var reach = 2 * maxExt + joinM;
+    var latCell = reach / M_PER_DEG;
+    // The smallest cos in the set makes every cell at least that wide
+    // wherever a shape is, so no pair within reach lands two cells apart.
+    var lonCell = Math.min(360, reach / (M_PER_DEG * Math.max(0.01, Math.cos(maxAbsLat * Math.PI / 180))));
+    var parent = shapes.map(function (_, i) { return i; });
+    function find(i) { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; }
+    var cells = new Map();
+    var keyOf = function (cy, cx) { return cy + ',' + cx; };
+    shapes.forEach(function (p, i) {
+      var cy = Math.floor(p.lat / latCell), cx = Math.floor(p.lon / lonCell);
+      for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+          var bucket = cells.get(keyOf(cy + dy, cx + dx));
+          if (!bucket) continue;
+          for (var k = 0; k < bucket.length; k++) {
+            var j = bucket[k], q = shapes[j];
+            var cos = Math.cos(((p.lat + q.lat) / 2) * Math.PI / 180);
+            var ey = (p.lat - q.lat) * M_PER_DEG, ex = (p.lon - q.lon) * M_PER_DEG * cos;
+            var touch = p.maxExt + q.maxExt + joinM;
+            if (ey * ey + ex * ex <= touch * touch) parent[find(i)] = find(j);
+          }
+        }
+      }
+      var own = keyOf(cy, cx);
+      if (!cells.has(own)) cells.set(own, []);
+      cells.get(own).push(i);
+    });
+    var byRoot = new Map();
+    shapes.forEach(function (p, i) {
+      var r = find(i);
+      if (!byRoot.has(r)) byRoot.set(r, []);
+      byRoot.get(r).push(p);
+    });
+    return Array.from(byRoot.values());
+  }
+
+  // Scratch buffers shared by every grid, grown to the largest seen and
+  // never past what MAX_VERTICES needs (the cell grows instead), so a
+  // rebuild allocates nothing per cluster. The edge index is not cleared
+  // between clusters: an entry counts only if its stamp is this call's.
+  var scratch = { gen: 0 };
+  function scratchBuf(name, Ctor, n) {
+    if (!scratch[name] || scratch[name].length < n) scratch[name] = new Ctor(n);
+    return scratch[name];
+  }
+
+  // clusterField fills the distance field of one cluster: at each grid
+  // vertex, its distance / reach in that direction for the nearest shape,
+  // inside where < 1. marginM: extra room round the shapes (the wrap view's
+  // closing grows into it).
+  function clusterField(shapes, marginM) {
+    marginM = marginM || 0;
+    var lat0 = 0, lon0 = 0, minExt = Infinity, maxExt = 0;
+    shapes.forEach(function (s) { fieldGeom(s); lat0 += s.lat; lon0 += s.lon; if (s.minExt < minExt) minExt = s.minExt; if (s.maxExt > maxExt) maxExt = s.maxExt; });
+    lat0 /= shapes.length; lon0 /= shapes.length;
+    var kx = M_PER_DEG * Math.cos(lat0 * Math.PI / 180), ky = M_PER_DEG;
+    var xy = shapes.map(function (s) { return [(s.lon - lon0) * kx, (s.lat - lat0) * ky]; });
+
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    xy.forEach(function (p, k) {
+      var b = shapes[k].box;
+      if (p[0] + b[0] < minX) minX = p[0] + b[0]; if (p[0] + b[1] > maxX) maxX = p[0] + b[1];
+      if (p[1] + b[2] < minY) minY = p[1] + b[2]; if (p[1] + b[3] > maxY) maxY = p[1] + b[3];
+    });
+    // The contour is interpolated, not stepped, and errs by up to
+    // (cell / reach)² / 8 of the smallest reach: a cell of 2/5 of a 1 km
+    // floor, 2%; a fifth of a reach over 2.5 km, 0.5%, so a cluster of only
+    // big reaches is not drawn as a coarse polygon. Finer cells cost the
+    // square. A cluster holding a big shape needs no finer than 1/40 of it:
+    // a 20 km reach is still ~80 cells across, at zooms where a pixel is
+    // 60-150 m. The vertex cap coarsens it for a sprawling cluster.
+    var cell = Math.max(MIN_CELL_M, maxExt / 40, Math.min(minExt / 2.5, Math.max(minExt / 5, 500)));
+    var span = function (c) {
+      // Whole cells, so a margin keeps the vertices where the detailed
+      // view's grid has them and both trace an edge alike.
+      var m = (2 + Math.ceil(marginM / c)) * c;
+      return { nx: Math.ceil((maxX - minX + 2 * m) / c) + 1, ny: Math.ceil((maxY - minY + 2 * m) / c) + 1, m: m };
+    };
+    var dims = span(cell);
+    // The margin does not shrink with the cell, so one pass can land just
+    // over the cap; a second always lands under it.
+    for (var pass = 0; pass < 2 && dims.nx * dims.ny > MAX_VERTICES; pass++) {
+      cell *= Math.sqrt((dims.nx * dims.ny) / MAX_VERTICES) * 1.01;
+      dims = span(cell);
+    }
+    var nx = dims.nx, ny = dims.ny;
+    var ox = minX - dims.m, oy = minY - dims.m;
+
+    // Each shape fills only its own box plus 2 cells: every vertex next to
+    // the contour lies within that of the shape that puts it there, so the
+    // rest stay "far". A uniform shape needs no bearing, and neither does a
+    // vertex well inside the floor: its value only has to read as inside,
+    // since no vertex a cell from it can be outside.
+    var far = 3;
+    var field = scratchBuf('field', Float64Array, nx * ny);
+    field.fill(far, 0, nx * ny);
+    var pad = 2 * cell;
+    // The contour is interpolated linearly between vertices, which cuts
+    // across a curve's inside: up to cell² / 8 / reach in (see the cell). Each reach is drawn that much further out, so the edge errs
+    // outward by no more than that and every member keeps at least its floor
+    // all round.
+    var q = cell * cell / 8;
+    // rowLo/rowHi: the columns each row's fill touched. A cluster's grid is
+    // its bounding box, mostly empty when the shapes chain across it, and
+    // outside these spans every vertex is far, so tracing only walks them.
+    var rowLo = scratchBuf('rowLo', Int32Array, ny), rowHi = scratchBuf('rowHi', Int32Array, ny);
+    rowLo.fill(nx, 0, ny); rowHi.fill(-1, 0, ny);
+    xy.forEach(function (p, k) {
+      var s = shapes[k], b = s.box;
+      var i0 = Math.max(0, Math.floor((p[0] + b[0] - pad - ox) / cell)), i1 = Math.min(nx - 1, Math.ceil((p[0] + b[1] + pad - ox) / cell));
+      var j0 = Math.max(0, Math.floor((p[1] + b[2] - pad - oy) / cell)), j1 = Math.min(ny - 1, Math.ceil((p[1] + b[3] + pad - oy) / cell));
+      var inv = 1 / (s.minExt + q / s.minExt), lim = s.maxExt + pad, half = cell / 2;
+      for (var j = j0; j <= j1; j++) {
+        if (i0 < rowLo[j]) rowLo[j] = i0;
+        if (i1 > rowHi[j]) rowHi[j] = i1;
+        var dy = oy + j * cell - p[1];
+        for (var i = i0; i <= i1; i++) {
+          var dx = ox + i * cell - p[0];
+          var d = Math.sqrt(dx * dx + dy * dy);
+          if (d > lim) continue;
+          var r;
+          // Every bearing reaches at least minExt, so inside it no bearing is
+          // needed; the value is exact where the contour is the floor itself,
+          // the only place a vertex this close can be next to it.
+          if (s.uniform || d < s.minExt) r = d * inv;
+          else {
+            var bb = bearingOf(dx, dy);
+            var fi = bb / SECTOR_RAD;
+            if (fi < 0) fi += SECTORS;
+            var nr = s.near[Math.floor(fi) % SECTORS];
+            // Outside for certain, and a cell or more past any reach near
+            // its bearing, so neither it nor its neighbours (a cell away,
+            // within these sectors) are next to the edge: its value is
+            // never interpolated, only compared, and d / nr, a lower bound
+            // above 1, will do. Nearer the edge its exact value places the
+            // edge; the bound would pull it outward.
+            if (d >= nr + cell && d * SECTOR_RAD >= cell) r = d / nr;
+            else {
+              var e = reachAt(s, bb);
+              // Near the node, where a lobe (about 4 sectors wide) is no
+              // wider than a cell, the reach is the most within half a cell
+              // either side of the bearing: without this widening the grid
+              // misses the lobe's base and it comes loose from the node.
+              // Further out it would push an edge slanting across the rays
+              // (a ridge line) out by up to half a cell × tan(slant), so it
+              // stops there.
+              if (d * 4 * SECTOR_RAD < cell) {
+                var del = half / d, e1 = reachAt(s, bb + del), e2 = reachAt(s, bb - del);
+                if (e1 > e) e = e1;
+                if (e2 > e) e = e2;
+              }
+              r = d / (e + q / e);
+            }
+          }
+          var idx = j * nx + i;
+          if (r < field[idx]) field[idx] = r;
+        }
+      }
+    });
+    return { field: field, nx: nx, ny: ny, ox: ox, oy: oy, cell: cell, lat0: lat0, lon0: lon0, kx: kx, ky: ky, rowLo: rowLo, rowHi: rowHi };
+  }
+
+  // Marching-squares segments per cell case, as pairs of cell edges
+  // (0 bottom, 1 right, 2 top, 3 left). Corner bits: 1 bottom-left,
+  // 2 bottom-right, 4 top-right, 8 top-left. Cases 5 and 10 are saddles,
+  // resolved by the cell centre below.
+  var CASES = [
+    [], [[3, 0]], [[0, 1]], [[3, 1]], [[1, 2]], null, [[0, 2]], [[3, 2]],
+    [[2, 3]], [[0, 2]], null, [[1, 2]], [[3, 1]], [[0, 1]], [[3, 0]], [],
+  ];
+  // Saddle resolutions: A cuts off bottom-right and top-left, B bottom-left
+  // and top-right.
+  var SADDLE_A = [[0, 1], [2, 3]], SADDLE_B = [[3, 0], [1, 2]];
+
+  // traceRings follows the field's 1-contour into closed rings of [lat, lon].
+  function traceRings(g) {
+    var field = g.field, nx = g.nx, ny = g.ny, ox = g.ox, oy = g.oy, cell = g.cell;
+    // Edge ids: horizontal edge from vertex (i,j) to (i+1,j) is 2*(j*nx+i),
+    // vertical edge from (i,j) to (i,j+1) is 2*(j*nx+i)+1. Neighbouring cells
+    // share an edge id, which is what joins their segments into rings.
+    function edgePoint(e) {
+      var v = e >> 1, i = v % nx, j = (v - i) / nx;
+      var a = field[v], b, bx = i, by = j;
+      if (e & 1) { b = field[v + nx]; by = j + 1; } else { b = field[v + 1]; bx = i + 1; }
+      var t = (1 - a) / (b - a);
+      return [ox + (i + (bx - i) * t) * cell, oy + (j + (by - j) * t) * cell];
+    }
+    // segA/segB: the two endpoint edges of each segment. Every contour edge
+    // belongs to exactly two segments, so first/second, indexed by edge id,
+    // find a segment's neighbours without a Map or an array per edge.
+    var segA = [], segB = [];
+    var first = scratchBuf('first', Int32Array, 2 * nx * ny), second = scratchBuf('second', Int32Array, 2 * nx * ny);
+    var stamp = scratchBuf('stamp', Int32Array, 2 * nx * ny);
+    if (++scratch.gen > 0x7ffffff0) { stamp.fill(0); scratch.gen = 1; }
+    var gen = scratch.gen;
+    function link(e, s) {
+      if (stamp[e] !== gen) { stamp[e] = gen; first[e] = s; second[e] = -1; } else second[e] = s;
+    }
+    // The id of side 0 bottom, 1 right, 2 top or 3 left of the cell whose
+    // bottom-left vertex is v.
+    function edgeId(v, side) {
+      return side === 0 ? 2 * v : side === 1 ? 2 * (v + 1) + 1 : side === 2 ? 2 * (v + nx) : 2 * v + 1;
+    }
+    function addSeg(e1, e2) {
+      var s = segA.length;
+      segA.push(e1); segB.push(e2);
+      link(e1, s); link(e2, s);
+    }
+    var rowLo = g.rowLo, rowHi = g.rowHi;
+    for (var j = 0; j < ny - 1; j++) {
+      var lo = Math.max(0, Math.min(rowLo[j], rowLo[j + 1]) - 1), hi = Math.min(nx - 2, Math.max(rowHi[j], rowHi[j + 1]));
+      for (var i = lo; i <= hi; i++) {
+        var v = j * nx + i;
+        var bl = field[v], br = field[v + 1], tr = field[v + nx + 1], tl = field[v + nx];
+        var c = (bl < 1 ? 1 : 0) | (br < 1 ? 2 : 0) | (tr < 1 ? 4 : 0) | (tl < 1 ? 8 : 0);
+        if (c === 0 || c === 15) continue;
+        var pairs = CASES[c];
+        if (!pairs) {
+          var centreIn = (bl + br + tr + tl) / 4 < 1;
+          pairs = c === 5 ? (centreIn ? SADDLE_A : SADDLE_B) : (centreIn ? SADDLE_B : SADDLE_A);
+        }
+        for (var k = 0; k < pairs.length; k++) addSeg(edgeId(v, pairs[k][0]), edgeId(v, pairs[k][1]));
+      }
+    }
+
+    // Join segments into closed rings. The grid border is outside every
+    // shape, so each contour edge is shared by exactly two segments.
+    var used = new Uint8Array(segA.length);
+    var rings = [];
+    for (var s0 = 0; s0 < segA.length; s0++) {
+      if (used[s0]) continue;
+      used[s0] = 1;
+      var start = segA[s0], cur = segB[s0];
+      var ring = [edgePoint(start)];
+      var guard = segA.length;
+      while (cur !== start && guard-- > 0) {
+        ring.push(edgePoint(cur));
+        if (stamp[cur] !== gen) break;
+        var next = first[cur];
+        if (next < 0 || used[next]) next = second[cur];
+        if (next < 0 || used[next]) break;
+        used[next] = 1;
+        cur = segA[next] === cur ? segB[next] : segA[next];
+      }
+      if (ring.length >= 3) {
+        rings.push(ring.map(function (p) { return [g.lat0 + p[1] / g.ky, g.lon0 + p[0] / g.kx]; }));
+      }
+    }
+    return rings;
+  }
+
+  // delaunay triangulates n distinct points (Bowyer-Watson, O(n²): a scope
+  // has at most a few hundred placed members). Returns [a, b, c] index
+  // triples; an index of n or more is a corner of the enclosing super
+  // triangle, which the caller leaves out.
+  function delaunay(xs, ys, n) {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, i;
+    for (i = 0; i < n; i++) {
+      if (xs[i] < minX) minX = xs[i]; if (xs[i] > maxX) maxX = xs[i];
+      if (ys[i] < minY) minY = ys[i]; if (ys[i] > maxY) maxY = ys[i];
+    }
+    var span = Math.max(maxX - minX, maxY - minY, 1), mx = (minX + maxX) / 2, my = (minY + maxY) / 2;
+    var X = new Float64Array(n + 3), Y = new Float64Array(n + 3);
+    for (i = 0; i < n; i++) { X[i] = xs[i]; Y[i] = ys[i]; }
+    X[n] = mx - 20 * span; Y[n] = my - span;
+    X[n + 1] = mx; Y[n + 1] = my + 20 * span;
+    X[n + 2] = mx + 20 * span; Y[n + 2] = my - span;
+    function tri(a, b, c) {
+      var ax = X[a], ay = Y[a], bx = X[b], by = Y[b], cx = X[c], cy = Y[c];
+      var d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+      if (d === 0) return { a: a, b: b, c: c, x: 0, y: 0, r2: Infinity };
+      var a2 = ax * ax + ay * ay, b2 = bx * bx + by * by, c2 = cx * cx + cy * cy;
+      var x = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d;
+      var y = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d;
+      return { a: a, b: b, c: c, x: x, y: y, r2: (ax - x) * (ax - x) + (ay - y) * (ay - y) };
+    }
+    var tris = [tri(n, n + 1, n + 2)];
+    var N = n + 3;
+    for (var p = 0; p < n; p++) {
+      var px = X[p], py = Y[p], keep = [], open = new Map();
+      for (var t = 0; t < tris.length; t++) {
+        var T = tris[t], dx = px - T.x, dy = py - T.y;
+        if (dx * dx + dy * dy < T.r2) {
+          // An edge of two removed triangles is inside the hole; one of only
+          // one is on its border.
+          [[T.a, T.b], [T.b, T.c], [T.c, T.a]].forEach(function (e) {
+            var k = e[0] < e[1] ? e[0] * N + e[1] : e[1] * N + e[0];
+            if (open.has(k)) open.delete(k); else open.set(k, e);
+          });
+        } else keep.push(T);
+      }
+      open.forEach(function (e) { keep.push(tri(e[0], e[1], p)); });
+      tris = keep;
+    }
+    return tris.map(function (T) { return [T.a, T.b, T.c]; });
+  }
+
+  // coreOf is a shape's typical reach: the median over its sectors, which a
+  // link lobe a few sectors wide does not move.
+  function coreOf(shape) {
+    if (shape.core == null) {
+      var s = Array.prototype.slice.call(shape.ext).sort(function (x, y) { return x - y; });
+      shape.core = (s[(SECTORS >> 1) - 1] + s[SECTORS >> 1]) / 2;
+    }
+    return shape.core;
+  }
+
+  // bridgeField shrink-wraps a cluster's field in place. Its members are
+  // triangulated; two neighbours whose reach comes within gapM of each other
+  // along the line between them are bridged (a band between them as wide as
+  // each one's typical reach there, never wider than it reaches sideways),
+  // and a triangle whose three sides are all bridged is filled. Bays and
+  // gaps between bridged members are filled; members further apart are not
+  // joined. The members' own reach stays in the field, so the wrap only
+  // adds to it.
+  function bridgeField(g, shapes, gapM) {
+    var field = g.field, nx = g.nx, ny = g.ny, ox = g.ox, oy = g.oy, cell = g.cell;
+    var xs = [], ys = [], owner = [], seen = new Set();
+    shapes.forEach(function (s) {
+      var x = (s.lon - g.lon0) * g.kx, y = (s.lat - g.lat0) * g.ky;
+      // Co-located members (a repeater and its twin) would break the
+      // triangulation; one of them stands for both.
+      var k = Math.round(x) + ',' + Math.round(y);
+      if (seen.has(k)) return;
+      seen.add(k); xs.push(x); ys.push(y); owner.push(s);
+    });
+    var n = xs.length;
+    if (n < 2) return;
+    function rows(j0, j1, i0, i1) {
+      for (var j = j0; j <= j1; j++) {
+        if (i0 < g.rowLo[j]) g.rowLo[j] = i0;
+        if (i1 > g.rowHi[j]) g.rowHi[j] = i1;
+      }
+    }
+    function clampI(v) { return Math.max(0, Math.min(nx - 1, v)); }
+    function clampJ(v) { return Math.max(0, Math.min(ny - 1, v)); }
+    var bridged = new Map();
+    function bridge(a, b) {
+      var k = a < b ? a * n + b : b * n + a;
+      if (bridged.has(k)) return bridged.get(k);
+      var dx = xs[b] - xs[a], dy = ys[b] - ys[a], L = Math.sqrt(dx * dx + dy * dy);
+      var th = Math.atan2(dx, dy), sa = owner[a], sb = owner[b];
+      var ok = L - reachAt(sa, th) - reachAt(sb, th + Math.PI) <= gapM;
+      bridged.set(k, ok);
+      if (!ok) return false;
+      var ra = Math.min(coreOf(sa), reachAt(sa, th + Math.PI / 2), reachAt(sa, th - Math.PI / 2));
+      var rb = Math.min(coreOf(sb), reachAt(sb, th + Math.PI / 2), reachAt(sb, th - Math.PI / 2));
+      var ux = dx / L, uy = dy / L, pad = Math.max(ra, rb) + 2 * cell;
+      var i0 = clampI(Math.floor((Math.min(xs[a], xs[b]) - pad - ox) / cell)), i1 = clampI(Math.ceil((Math.max(xs[a], xs[b]) + pad - ox) / cell));
+      var j0 = clampJ(Math.floor((Math.min(ys[a], ys[b]) - pad - oy) / cell)), j1 = clampJ(Math.ceil((Math.max(ys[a], ys[b]) + pad - oy) / cell));
+      for (var j = j0; j <= j1; j++) {
+        var py = oy + j * cell - ys[a];
+        // The columns this row crosses the band in: 0 < t < L along the
+        // bridge and within pad of its line, so a diagonal bridge costs its
+        // band, not its bounding box.
+        var lo = ox + i0 * cell - xs[a], hi = ox + i1 * cell - xs[a];
+        if (ux !== 0) {
+          var t0 = (0 - py * uy) / ux, t1 = (L - py * uy) / ux;
+          lo = Math.max(lo, Math.min(t0, t1)); hi = Math.min(hi, Math.max(t0, t1));
+        } else if (py * uy <= 0 || py * uy >= L) continue;
+        if (uy !== 0) {
+          var h0 = (py * ux - pad) / uy, h1 = (py * ux + pad) / uy;
+          lo = Math.max(lo, Math.min(h0, h1)); hi = Math.min(hi, Math.max(h0, h1));
+        } else if (Math.abs(py * ux) > pad) continue;
+        if (lo > hi) continue;
+        var ri0 = clampI(Math.floor((lo + xs[a] - ox) / cell)), ri1 = clampI(Math.ceil((hi + xs[a] - ox) / cell));
+        rows(j, j, ri0, ri1);
+        for (var i = ri0; i <= ri1; i++) {
+          var px = ox + i * cell - xs[a];
+          // Only the band between them: past either end the member's own
+          // reach is the edge.
+          var t = px * ux + py * uy;
+          if (t <= 0 || t >= L) continue;
+          var r = ra + (rb - ra) * (t / L);
+          var v = Math.abs(px * uy - py * ux) / r;
+          var idx = j * nx + i;
+          if (v < field[idx]) field[idx] = v;
+        }
+      }
+      return true;
+    }
+    // Inside a filled triangle every vertex is well inside (its sides are
+    // bridges at least a floor wide), so it only has to read as inside.
+    function fill(a, b, c) {
+      var ax = xs[a], ay = ys[a], bx = xs[b], by = ys[b], cx = xs[c], cy = ys[c];
+      var area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+      if (area === 0) return;
+      var sg = area > 0 ? 1 : -1;
+      var i0 = clampI(Math.floor((Math.min(ax, bx, cx) - ox) / cell)), i1 = clampI(Math.ceil((Math.max(ax, bx, cx) - ox) / cell));
+      var j0 = clampJ(Math.floor((Math.min(ay, by, cy) - oy) / cell)), j1 = clampJ(Math.ceil((Math.max(ay, by, cy) - oy) / cell));
+      rows(j0, j1, i0, i1);
+      for (var j = j0; j <= j1; j++) {
+        var py = oy + j * cell;
+        for (var i = i0; i <= i1; i++) {
+          var px = ox + i * cell;
+          if (sg * ((bx - ax) * (py - ay) - (by - ay) * (px - ax)) < 0) continue;
+          if (sg * ((cx - bx) * (py - by) - (cy - by) * (px - bx)) < 0) continue;
+          if (sg * ((ax - cx) * (py - cy) - (ay - cy) * (px - cx)) < 0) continue;
+          field[j * nx + i] = 0;
+        }
+      }
+    }
+    delaunay(xs, ys, n).forEach(function (t) {
+      var real = t[0] < n && t[1] < n && t[2] < n;
+      var e1 = t[0] < n && t[1] < n ? bridge(t[0], t[1]) : false;
+      var e2 = t[1] < n && t[2] < n ? bridge(t[1], t[2]) : false;
+      var e3 = t[2] < n && t[0] < n ? bridge(t[2], t[0]) : false;
+      if (real && e1 && e2 && e3) fill(t[0], t[1], t[2]);
+    });
+  }
+
+  // edt1d: the 1-D squared Euclidean distance transform of f (n values, 0
+  // at a feature, EDT_INF elsewhere) into d: Felzenszwalb & Huttenlocher's
+  // lower envelope of parabolas, linear time. v and z are scratch.
+  var EDT_INF = 1e20;
+  function edt1d(f, n, d, v, z) {
+    var k = 0;
+    v[0] = 0; z[0] = -EDT_INF; z[1] = EDT_INF;
+    for (var q = 1; q < n; q++) {
+      var s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+      while (s <= z[k]) { k--; s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]); }
+      k++; v[k] = q; z[k] = s; z[k + 1] = EDT_INF;
+    }
+    k = 0;
+    for (q = 0; q < n; q++) {
+      while (z[k + 1] < q) k++;
+      var dq = q - v[k];
+      d[q] = dq * dq + f[v[k]];
+    }
+  }
+
+  // edt2d replaces a grid of 0 (feature) / EDT_INF by each vertex's squared
+  // distance, in cells, to the nearest feature: columns, then rows. O(nx·ny).
+  function edt2d(a, nx, ny) {
+    var m = Math.max(nx, ny);
+    var f = scratchBuf('edtF', Float64Array, m), d = scratchBuf('edtD', Float64Array, m);
+    var v = scratchBuf('edtV', Int32Array, m), z = scratchBuf('edtZ', Float64Array, m + 1);
+    var i, j;
+    for (i = 0; i < nx; i++) {
+      for (j = 0; j < ny; j++) f[j] = a[j * nx + i];
+      edt1d(f, ny, d, v, z);
+      for (j = 0; j < ny; j++) a[j * nx + i] = d[j];
+    }
+    for (j = 0; j < ny; j++) {
+      var row = j * nx;
+      for (i = 0; i < nx; i++) f[i] = a[row + i];
+      edt1d(f, nx, d, v, z);
+      for (i = 0; i < nx; i++) a[row + i] = d[i];
+    }
+  }
+
+  // closeField fills, in place, every notch and bay of the inside that a disc
+  // of diameter gapM cannot get into: a morphological closing (dilate by the
+  // radius, then erode by it), two distance transforms. A closing that wide
+  // needs no fine grid, so it runs on every k-th vertex (CLOSE_CELLS across
+  // the radius, coarser still past CLOSE_MAX_VERTICES: a sprawling cluster
+  // is seen zoomed out) and is interpolated back. It only adds: each vertex keeps
+  // the smaller of its own value and the closing's. And it only counts what
+  // is a coarse cell or more inside the closing, so the coarse grid never
+  // pushes an edge the reach already draws; a filled notch's edge sits up
+  // to a coarse cell short instead. The grid needs the radius of room round
+  // the inside.
+  var CLOSE_CELLS = 6;
+  var CLOSE_MAX_VERTICES = 20000;
+  function closeField(g, gapM) {
+    var nx = g.nx, ny = g.ny, field = g.field;
+    var k = Math.max(1, Math.round(gapM / 2 / CLOSE_CELLS / g.cell), Math.ceil(Math.sqrt(nx * ny / CLOSE_MAX_VERTICES)));
+    var cx = Math.floor((nx - 1) / k) + 1, cy = Math.floor((ny - 1) / k) + 1, n = cx * cy;
+    var a = scratchBuf('edtA', Float64Array, n);
+    var i, j;
+    for (j = 0; j < cy; j++) for (i = 0; i < cx; i++) a[j * cx + i] = field[(j * k) * nx + i * k] < 1 ? 0 : EDT_INF;
+    edt2d(a, cx, cy);
+    // a: squared distance to the inside, in coarse cells. Dilated: within
+    // the radius of it. The second pass measures from every vertex outside
+    // the dilation.
+    var r = gapM / 2 / (g.cell * k), r2 = r * r;
+    for (i = 0; i < n; i++) a[i] = a[i] <= r2 ? EDT_INF : 0;
+    edt2d(a, cx, cy);
+    // Closed, a coarse cell in: further than r + 1 from everything outside
+    // the dilation, where (r + 1) / distance < 1.
+    for (i = 0; i < n; i++) a[i] = a[i] <= 0 ? 3 : (a[i] >= EDT_INF ? 0 : Math.min(3, (r + 1) / Math.sqrt(a[i])));
+    // Back onto the fine grid, bilinear between coarse vertices, one coarse
+    // cell at a time. A cell whose corners are all outside the dilation adds
+    // nothing, and most of a grid is that, so it is skipped; the rows traced
+    // grow by the cells that were not.
+    for (var bj = 0; bj < cy; bj++) {
+      var bj1 = Math.min(cy - 1, bj + 1), fj0 = bj * k, fj1 = bj === cy - 1 ? ny - 1 : fj0 + k - 1;
+      for (var bi = 0; bi < cx; bi++) {
+        var bi1 = Math.min(cx - 1, bi + 1);
+        var a00 = a[bj * cx + bi], a10 = a[bj * cx + bi1], a01 = a[bj1 * cx + bi], a11 = a[bj1 * cx + bi1];
+        if (a00 >= 3 && a10 >= 3 && a01 >= 3 && a11 >= 3) continue;
+        var fi0 = bi * k, fi1 = bi === cx - 1 ? nx - 1 : fi0 + k - 1;
+        for (j = fj0; j <= fj1; j++) {
+          var ty = (j - fj0) / k, l = a00 + (a01 - a00) * ty, rr = a10 + (a11 - a10) * ty;
+          if (fi0 < g.rowLo[j]) g.rowLo[j] = fi0;
+          if (fi1 > g.rowHi[j]) g.rowHi[j] = fi1;
+          for (i = fi0; i <= fi1; i++) {
+            var c = l + (rr - l) * ((i - fi0) / k), idx = j * nx + i;
+            if (c < field[idx]) field[idx] = c;
+          }
+        }
+      }
+    }
+  }
+
+  function usableShapes(shapes) {
+    return (shapes || []).filter(function (s) { return s && isFinite(s.lat) && isFinite(s.lon) && s.minExt > 0; });
+  }
+
+  // contourShapes returns the combined outline of reach shapes (see
+  // shapeFor), the detailed view: an array of rings, each [[lat, lon], ...].
+  // Holes come out as rings of their own; Leaflet's evenodd fill draws them
+  // as holes.
+  function contourShapes(shapes) {
+    var ok = usableShapes(shapes);
+    if (!ok.length) return [];
+    var out = [];
+    clusters(ok, 0).forEach(function (c) { Array.prototype.push.apply(out, traceRings(clusterField(c))); });
+    return out;
+  }
+
+  // wrapShapes returns the shrink-wrapped outline of reach shapes, the wrap
+  // view: their combined reach, bridged between neighbours whose reach comes
+  // within gapM of each other (bridgeField), then with every notch and bay
+  // narrower than gapM filled (closeField): between one repeater's spokes as
+  // much as between repeaters. Groups further apart than gapM are separate
+  // areas. Neither step alone does it: a closing cannot join two small
+  // blobs (a disc slips between them), and bridges leave a lone repeater's
+  // notches open.
+  function wrapShapes(shapes, gapM) {
+    gapM = gapM || WRAP_GAP_M;
+    var ok = usableShapes(shapes);
+    if (!ok.length) return [];
+    var out = [];
+    clusters(ok, gapM).forEach(function (c) {
+      // Room for the closing to grow into; clusterField adds two cells, so
+      // the grid's border stays outside it.
+      var g = clusterField(c, gapM / 2);
+      bridgeField(g, c, gapM);
+      closeField(g, gapM);
+      Array.prototype.push.apply(out, traceRings(g));
+    });
+    return out;
+  }
+
   // ── Hit testing ──────────────────────────────────────────────────────────
 
   function ringsBounds(rings) {
@@ -394,11 +1012,18 @@
   }
 
   // inRings is an even-odd point-in-polygon test over all rings, so a point
-  // in a hole is outside, matching how Leaflet fills them.
-  function inRings(rings, lat, lon) {
+  // in a hole is outside, matching how Leaflet fills them. boxes, when
+  // given, holds each ring's ringsBounds: a ring whose box does not hold
+  // the point crosses the test's ray an even number of times, or not at
+  // all, so it is skipped without changing the answer.
+  function inRings(rings, lat, lon, boxes) {
     var inside = false;
     for (var r = 0; r < rings.length; r++) {
       var ring = rings[r];
+      if (boxes) {
+        var b = boxes[r];
+        if (lat < b[0] || lat > b[2] || lon < b[1] || lon > b[3]) continue;
+      }
       for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
         var a = ring[i], b = ring[j];
         if ((a[0] > lat) !== (b[0] > lat) && lon < (b[1] - a[1]) * (lat - a[0]) / (b[0] - a[0]) + a[1]) inside = !inside;
@@ -532,6 +1157,8 @@
   //   setVisible(bool)  adds or removes the layer; computes lazily
   //   setOnly(scope)    draw one scope ('' = all)
   //   setHidden(names)  scopes not to draw
+  //   setView(view)     'general', 'wrap' or 'detailed' (opts.view: the first)
+  //   view()            the current view
   //   scopes()          [{ scope, colour, observed, configured, hidden }]
   //   onChange(fn)      called after each render; returns an unsubscribe
   //   pulse(scope)      briefly highlight one scope (live page)
@@ -559,9 +1186,10 @@
     var visible = false;
     var only = '';
     var hidden = new Set();
-    var cache = new Map(); // scope|kind → { sig, rings }
+    var view = VIEWS.indexOf(opts.view) >= 0 ? opts.view : VIEWS[0];
+    var cache = new Map(); // view|scope|kind → { sig, rings }; every view kept, so switching back is free
     var drawn = new Map(); // scope → [polygon]
-    var hits = [];         // [{ scope, polys, rings, bounds, text }] for hover
+    var hits = [];         // [{ scope, polys, rings, boxes, bounds, text }] for hover
     var list = [];
     var listeners = [];
     var computed = 0;
@@ -660,7 +1288,7 @@
 
     function rings(scope, kind, members) {
       var entries = members.map(shaped);
-      var key = scope + '|' + kind;
+      var key = view + '|' + scope + '|' + kind;
       // Order-free and cheap: how many members, and the sum and xor of a hash
       // of each member's key.
       var sum = 0, xor = 0;
@@ -673,8 +1301,13 @@
       var hit = cache.get(key);
       if (hit && hit.sig === sig) return hit.rings;
       computed++;
-      var ring = hullOfEdges(entries.map(function (e) { return e.edge; }));
-      var r = ring.length ? [ring] : [];
+      var r;
+      if (view === 'wrap') r = wrapShapes(entries.map(function (e) { return e.shape; }), WRAP_GAP_M);
+      else if (view === 'detailed') r = contourShapes(entries.map(function (e) { return e.shape; }));
+      else {
+        var ring = hullOfEdges(entries.map(function (e) { return e.edge; }));
+        r = ring.length ? [ring] : [];
+      }
       cache.set(key, { sig: sig, rings: r });
       return r;
     }
@@ -687,7 +1320,8 @@
       layer.addLayer(poly);
       var el = poly.getElement && poly.getElement();
       if (el && el.setAttribute) el.setAttribute('data-scope', scope);
-      hits.push({ scope: scope, polys: [poly], rings: r, bounds: ringsBounds(r), text: text });
+      var boxes = r.map(function (ring) { return ringsBounds([ring]); });
+      hits.push({ scope: scope, polys: [poly], rings: r, boxes: boxes, bounds: ringsBounds(r), text: text });
       return poly;
     }
 
@@ -704,8 +1338,10 @@
       list = [];
       groups.forEach(function (g, scope) {
         list.push({ scope: scope, colour: colorIndex(scope), observed: g.observed.length, configured: g.configuredOnly.length, hidden: hidden.has(scope) });
-        if (g.observed.length) live.add(scope + '|observed');
-        if (g.configuredOnly.length) live.add(scope + '|configured');
+        VIEWS.forEach(function (v) {
+          if (g.observed.length) live.add(v + '|' + scope + '|observed');
+          if (g.configuredOnly.length) live.add(v + '|' + scope + '|configured');
+        });
         if ((want && scope !== want) || hidden.has(scope)) return;
         g.observed.forEach(function (n) { members.add(n); });
         g.configuredOnly.forEach(function (n) { members.add(n); });
@@ -732,7 +1368,7 @@
         Array.from(edgeCache.keys()).forEach(function (k) { if (!used.has(k)) edgeCache.delete(k); });
       }
       if (visible) requestTerrain(members);
-      var info = { terrain: opts.terrain ? opts.terrain.status() : 'off' };
+      var info = { terrain: opts.terrain ? opts.terrain.status() : 'off', view: view };
       listeners.forEach(function (fn) { fn(list, visible, info); });
     }
 
@@ -754,7 +1390,7 @@
       for (var i = 0; i < hits.length; i++) {
         var h = hits[i], b = h.bounds;
         if (lat < b[0] || lat > b[2] || lon < b[1] || lon > b[3]) continue;
-        if (inRings(h.rings, lat, lon)) found.push(h);
+        if (inRings(h.rings, lat, lon, h.boxes)) found.push(h);
       }
       return found;
     }
@@ -819,6 +1455,14 @@
         render();
       },
       hidden: function () { return Array.from(hidden); },
+      setView: function (v) {
+        if (VIEWS.indexOf(v) < 0 || v === view) return;
+        view = v;
+        // The popup lists the scopes under a click on the old outlines.
+        if (popupOpen()) map.closePopup(popup);
+        render();
+      },
+      view: function () { return view; },
       scopes: function () { return list.slice(); },
       isVisible: function () { return visible; },
       onChange: function (fn) {
@@ -847,6 +1491,12 @@
   function hashFlag(hash) {
     var v = hashParam(hash, 'contours');
     return v === '1' ? true : (v === '0' ? false : null);
+  }
+
+  // viewFromHash reads ?contoursView=; null when absent or not a view.
+  function viewFromHash(hash) {
+    var v = hashParam(hash, 'contoursView');
+    return VIEWS.indexOf(v) >= 0 ? v : null;
   }
 
   // hiddenFromHash reads ?contoursHide=a,b; null when absent.
@@ -880,10 +1530,16 @@
 
   // ── Scope list ───────────────────────────────────────────────────────────
 
-  var TERRAIN_NOTE = 'Each area spans the farthest reach of its repeaters, at least 1 km round each. A repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links. ' +
+  // What an area is, per view.
+  var AREA_NOTE = {
+    general: 'Each area spans the farthest reach of its repeaters, at least 1 km round each.',
+    wrap: 'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least 1 km round each.',
+    detailed: 'Each area is where its repeaters reach, at least 1 km round each.',
+  };
+  var TERRAIN_NOTE = 'A repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links. ' +
     'Antenna heights are the operator\'s where set; otherwise 10 m, raised where a repeater\'s links need more (click an outline to see them). ' +
     'Terrain: AWS Terrain Tiles (Mapzen; SRTM, USGS 3DEP and others), bare earth: buildings and trees are not in it.';
-  var NO_TERRAIN_NOTE = 'Terrain unavailable: each area spans its repeaters\' range from their two-way links, stretched to proven links, with no terrain trimming.';
+  var NO_TERRAIN_NOTE = 'Terrain unavailable: a repeater\'s range comes from its two-way links, stretched to proven links, with no terrain trimming.';
 
   function listHtml(items, opts, info) {
     var rows = items.map(function (it) {
@@ -901,7 +1557,8 @@
       '<div class="filter-group mc-scope-list-actions"><button type="button" class="btn" data-scope-all>All</button> ' +
       '<button type="button" class="btn" data-scope-none>None</button></div>' +
       rows +
-      '<div class="mc-scope-hint">' + (info && info.terrain === 'unavailable' ? NO_TERRAIN_NOTE : TERRAIN_NOTE) + ' Click an outline to list its repeaters.</div>';
+      '<div class="mc-scope-hint">' + AREA_NOTE[(info && info.view) || VIEWS[0]] + ' ' +
+      (info && info.terrain === 'unavailable' ? NO_TERRAIN_NOTE : TERRAIN_NOTE) + ' Click an outline to list its repeaters.</div>';
   }
 
   // mountScopeList renders a show/hide row per scope into el and keeps it in
@@ -939,9 +1596,60 @@
     return off;
   }
 
+  // ── View picker ──────────────────────────────────────────────────────────
+
+  var VIEW_LABEL = { general: 'General', wrap: 'Shrink-wrap', detailed: 'Detailed' };
+  var VIEW_TITLE = {
+    general: 'One rubber band round each scope\'s outermost reach: roughly where the region is',
+    wrap: 'Hugs each scope\'s reach, filling bays and gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km; separate groups stay separate',
+    detailed: 'Each scope\'s combined reach: where its repeaters are expected to be heard',
+  };
+
+  // mountViewPicker renders the area view buttons into el, shown while the
+  // overlay is. The URL wins, then the stored choice; a change is stored and
+  // written to the URL (the default view leaves the URL clean). opts:
+  // storage (defaults to localStorage). Returns an unsubscribe.
+  function mountViewPicker(el, overlay, opts) {
+    opts = opts || {};
+    var store = opts.storage || localStorage;
+    var start = viewFromHash(location.hash);
+    if (!start) { try { start = store.getItem(VIEW_KEY); } catch (e) { start = null; } }
+    overlay.setView(VIEWS.indexOf(start) >= 0 ? start : VIEWS[0]);
+    var shown = null;
+    function paint(_, visible) {
+      el.hidden = !visible;
+      var key = visible ? overlay.view() : '';
+      if (key === shown) return;
+      shown = key;
+      el.innerHTML = !visible ? '' :
+        '<span class="mc-scope-view-label" id="mcScopeViewLabel">Area shape</span>' +
+        '<div class="filter-group" role="group" aria-labelledby="mcScopeViewLabel">' + VIEWS.map(function (v) {
+          var on = v === overlay.view();
+          return '<button type="button" class="btn' + (on ? ' active' : '') + '" data-view="' + v + '" aria-pressed="' + on + '" title="' + VIEW_TITLE[v] + '">' + VIEW_LABEL[v] + '</button>';
+        }).join('') + '</div>';
+    }
+    el.addEventListener('click', function (e) {
+      var t = e.target, v = t && t.getAttribute && t.getAttribute('data-view');
+      if (VIEWS.indexOf(v) < 0) return;
+      overlay.setView(v);
+      try { store.setItem(VIEW_KEY, v); } catch (err) { /* private mode */ }
+      writeHash({ contoursView: v === VIEWS[0] ? null : v });
+      paint(null, overlay.isVisible());
+    });
+    var off = overlay.onChange(paint);
+    paint(null, overlay.isVisible());
+    return off;
+  }
+
   window.ScopeContours = {
     hashFlag: hashFlag,
     hiddenFromHash: hiddenFromHash,
+    viewFromHash: viewFromHash,
+    views: VIEWS.slice(),
+    wrapGapM: WRAP_GAP_M,
+    contourShapes: contourShapes,
+    wrapShapes: wrapShapes,
+    mountViewPicker: mountViewPicker,
     writeHashFlag: writeHashFlag,
     normRegion: normRegion,
     nodeRegionEvidence: nodeRegionEvidence,

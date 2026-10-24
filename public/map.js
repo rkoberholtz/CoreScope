@@ -532,6 +532,7 @@
             <select id="mcRegionFilter" title="Show nodes that declare a region scope or were seen carrying its traffic">${regionFilterOptionsHtml([], filters.regionScope)}</select>
             <div id="mcRegionHint" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
             <label for="mcScopeContours" title="Outline where each region scope's repeaters reach: each one's range from its two-way links, trimmed by line of sight over terrain and stretched to proven links. Solid: seen carrying its traffic. Dashed: configured for it but not seen carrying it. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Reach contours</label>
+            <div id="mcScopeView" class="mc-scope-view" hidden></div>
             <div id="mcScopeList" class="mc-scope-list" hidden></div>
           </fieldset>
           <fieldset class="mc-section">
@@ -742,6 +743,9 @@
         loadAntennaHeights: () => api('/config/map', { ttl: 3600 }).then(d => (d && d.antennaHeights) || {}),
       });
       reachOverlay.setOnly(filters.regionScope);
+      // General, shrink-wrap or detailed areas; set before the overlay is
+      // shown, so only the chosen view is computed.
+      window.ScopeContours.mountViewPicker(document.getElementById('mcScopeView'), reachOverlay);
       window.ScopeContours.mountScopeList(document.getElementById('mcScopeList'), reachOverlay);
       reachOverlay.setVisible(filters.scopeContours);
     }

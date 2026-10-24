@@ -44,7 +44,7 @@ console.log('\n=== scope-contours.js: hull geometry ===');
 
 test('exposes its API', () => {
   assert.ok(SC, 'window.ScopeContours not defined');
-  for (const fn of ['normRegion', 'nodeRegionEvidence', 'groupNodesByScope', 'convexHull', 'scopeHull', 'shapeFor', 'reachFor', 'linkReach', 'inRings', 'colorIndex', 'createPulser', 'createOverlay']) {
+  for (const fn of ['normRegion', 'nodeRegionEvidence', 'groupNodesByScope', 'convexHull', 'scopeHull', 'contourShapes', 'wrapShapes', 'shapeFor', 'reachFor', 'linkReach', 'inRings', 'colorIndex', 'createPulser', 'createOverlay', 'mountViewPicker', 'viewFromHash']) {
     assert.strictEqual(typeof SC[fn], 'function', fn + ' not exported');
   }
 });
@@ -368,6 +368,237 @@ test('inRings: even-odd, so a hole is outside', () => {
   assert.strictEqual(SC.inRings([outer, hole], 2, 2), true);
   assert.strictEqual(SC.inRings([outer, hole], 5, 5), false);
   assert.strictEqual(SC.inRings([outer, hole], 20, 5), false);
+  // Per-ring boxes skip rings that cannot hold the point, same answers.
+  const far = [[50, 50], [50, 60], [60, 60], [60, 50]];
+  const rings = [outer, hole, far], boxes = [[0, 0, 10, 10], [4, 4, 6, 6], [50, 50, 60, 60]];
+  for (const p of [[2, 2], [5, 5], [20, 5], [55, 55], [5, 55], [55, 5]]) {
+    assert.strictEqual(SC.inRings(rings, p[0], p[1], boxes), SC.inRings(rings, p[0], p[1]), 'at ' + p);
+  }
+});
+
+console.log('\n=== scope-contours.js: detailed view (combined reach) ===');
+
+const circles = (pts, R) => pts.map(p => SC.shapeFor(p, null, R));
+
+test('no shapes, or only unusable ones, give no rings', () => {
+  assert.deepStrictEqual(ringPlain(SC.contourShapes([])), []);
+  assert.deepStrictEqual(ringPlain(SC.contourShapes([null, { lat: NaN, lon: 1, minExt: 1000 }])), []);
+});
+
+test('one circle gives one ring at its radius, within 5%', () => {
+  const c = [40.7, -74.0];
+  const rings = SC.contourShapes(circles([{ lat: c[0], lon: c[1] }], 8000));
+  assert.strictEqual(rings.length, 1);
+  assert.ok(rings[0].length >= 16, 'ring too coarse: ' + rings[0].length + ' points');
+  for (const p of rings[0]) assert.ok(Math.abs(metres(c, p) - 8000) <= 400, 'ring point ' + Math.round(metres(c, p)) + ' m from the node');
+});
+
+test('far-apart circles give two rings, overlapping ones one', () => {
+  const a = offset(40.7, -74.0, 0, 0);
+  assert.strictEqual(SC.contourShapes(circles([a, offset(40.7, -74.0, 100000, 0)], 8000)).length, 2);
+  const b = offset(40.7, -74.0, 5000, 0);
+  const rings = SC.contourShapes(circles([a, b], 8000));
+  assert.strictEqual(rings.length, 1);
+  const lons = rings[0].map(p => p[1]);
+  assert.ok(Math.min(...lons) < a.lon && Math.max(...lons) > b.lon, 'the merged outline reaches past both');
+});
+
+test('members round an empty middle give an outer ring and a hole', () => {
+  const pts = [];
+  for (let k = 0; k < 24; k++) { const t = (k / 24) * 2 * Math.PI; pts.push(offset(40.7, -74.0, 40000 * Math.cos(t), 40000 * Math.sin(t))); }
+  const rings = SC.contourShapes(circles(pts, 8000));
+  assert.strictEqual(rings.length, 2);
+  assert.ok(!SC.inRings(rings, 40.7, -74.0), 'the middle is not reached');
+});
+
+test('distant clusters keep full resolution', () => {
+  const nyc = { lat: 40.7, lon: -74.0 }, ams = { lat: 52.37, lon: 4.9 };
+  const rings = SC.contourShapes(circles([nyc, ams], 8000));
+  assert.strictEqual(rings.length, 2);
+  for (const r of rings) {
+    const c = metres([nyc.lat, nyc.lon], r[0]) < 100000 ? nyc : ams;
+    for (const p of r) assert.ok(Math.abs(metres([c.lat, c.lon], p) - 8000) <= 400);
+  }
+});
+
+test('the outline follows the reach: cut by terrain west, radius north, a lobe east', () => {
+  const cut = new Float64Array(SC.sectors).fill(30000);
+  for (let d = 225; d <= 315; d += 5) cut[RAY(d)] = 2000;
+  const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
+  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(8000, cut, lobe, 1000), 1000)]);
+  assert.strictEqual(rings.length, 1);
+  const west = reachToward(rings, HOME, 270), north = reachToward(rings, HOME, 0), east = reachToward(rings, HOME, 90);
+  assert.ok(Math.abs(west - 2000) < 250, 'west ' + west);
+  assert.ok(Math.abs(north - 8000) < 400, 'north ' + north);
+  // The lobe runs to 22 km (the link x 1.1); its last few hundred metres are
+  // narrower than a grid cell, so the drawn tip stops up to a cell or two
+  // short, but always past the linked node at 20 km.
+  assert.ok(east >= 20000 && east <= 22500, 'east ' + east);
+  assert.ok(SC.inRings(rings, EAST.lat, EAST.lon), 'the linked node is outside');
+});
+
+test('an edge slanting across the rays (a ridge line) is not pushed out', () => {
+  // Terrain cuts every westward ray at a north-south line 3 km west: the
+  // reach edge slants across the rays, up to 60° off them here.
+  const cut = new Float64Array(SC.sectors).fill(30000);
+  for (let d = 210; d <= 330; d += 5) cut[RAY(d)] = 3000 / Math.abs(Math.sin(d * Math.PI / 180));
+  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(8000, cut, null, 1000), 1000)]);
+  // How far past the ridge line the outline reaches, along a row: walking
+  // west, the last point inside. Grid cells are 600 m here.
+  const past = (dn) => {
+    let x = -2000;
+    while (x > -6000) { const q = offset(HOME.lat, HOME.lon, x - 10, dn); if (!SC.inRings(rings, q.lat, q.lon)) break; x -= 10; }
+    return -x - 3000;
+  };
+  const out = [-4000, -2000, 0, 2000, 4000].map(past);
+  assert.ok(out.every((m) => m < 150), 'metres past the ridge line: ' + out.join(', '));
+});
+
+test('a lone link\'s lobe is narrow and stays attached to its 1 km circle', () => {
+  const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
+  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)]);
+  assert.strictEqual(rings.length, 1, 'the lobe came loose from the circle');
+  const on = reachToward(rings, HOME, 90), off = reachToward(rings, HOME, 80), far = reachToward(rings, HOME, 70);
+  assert.ok(on > 20000, 'on the link ' + on);
+  assert.ok(off < 7000, '10° off the link ' + off);
+  assert.ok(far < 2500, '20° off the link ' + far);
+});
+
+test('detailed: every member has at least 1 km of area all round, even boxed in by terrain', () => {
+  const boxed = new Float64Array(SC.sectors).fill(300);
+  const rings = SC.contourShapes([
+    SC.shapeFor(HOME, SC.reachFor(8000, boxed, null, 1000), 1000),
+    SC.shapeFor(EAST, SC.reachFor(1000, null, null, 1000), 1000),
+  ]);
+  for (const n of [HOME, EAST]) assertKmAround(rings, n, n.public_key);
+});
+
+console.log('\n=== scope-contours.js: wrap view (shrink-wrap) ===');
+
+// selfCrosses: whether any two non-adjacent edges of a ring cross.
+function selfCrosses(ring) {
+  const n = ring.length;
+  const crossP = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  for (let i = 0; i < n; i++) {
+    const a = ring[i], b = ring[(i + 1) % n];
+    for (let j = i + 2; j < n; j++) {
+      if (i === 0 && j === n - 1) continue;
+      const c = ring[j], d = ring[(j + 1) % n];
+      if (crossP(a, b, c) * crossP(a, b, d) < 0 && crossP(c, d, a) * crossP(c, d, b) < 0) return true;
+    }
+  }
+  return false;
+}
+
+test('members whose reach comes within 15 km are joined; further apart they stay two areas', () => {
+  assert.strictEqual(SC.wrapGapM, 15000);
+  const a = offset(40.7, -74.0, 0, 0);
+  // Reach 1 km each: centres 12 km apart leave a 10 km gap, 30 km apart 28 km.
+  const near = SC.wrapShapes(circles([a, offset(40.7, -74.0, 12000, 0)], 1000));
+  assert.strictEqual(near.length, 1, 'a 10 km gap should be bridged');
+  const mid = offset(40.7, -74.0, 6000, 0);
+  assert.ok(SC.inRings(near, mid.lat, mid.lon), 'the gap is part of the area');
+  assert.ok(!SC.inRings(SC.contourShapes(circles([a, offset(40.7, -74.0, 12000, 0)], 1000)), mid.lat, mid.lon), 'detailed leaves the gap');
+  const far = SC.wrapShapes(circles([a, offset(40.7, -74.0, 30000, 0)], 1000));
+  assert.strictEqual(far.length, 2, 'a 28 km gap should not be bridged');
+});
+
+test('the gap is measured between reach edges, not between repeaters', () => {
+  // 30 km apart, but each reaches 8 km toward the other: a 14 km gap.
+  const rings = SC.wrapShapes(circles([offset(40.7, -74.0, 0, 0), offset(40.7, -74.0, 30000, 0)], 8000));
+  assert.strictEqual(rings.length, 1);
+});
+
+test('the middle of a group is filled, and a bay narrower than 15 km too', () => {
+  const tri = [offset(40.7, -74.0, 0, 0), offset(40.7, -74.0, 12000, 0), offset(40.7, -74.0, 6000, 10000)];
+  const rings = SC.wrapShapes(circles(tri, 1000));
+  assert.strictEqual(rings.length, 1);
+  const c = offset(40.7, -74.0, 6000, 3300);
+  assert.ok(SC.inRings(rings, c.lat, c.lon), 'the middle of the triangle is outside');
+  // A U of members 6 km apart, 12 km across (a 10 km gap): its bay is
+  // filled. One 16 km across (14 km gap, its diagonal 15.9 km) is only
+  // filled as far as its corners bridge.
+  const u = [[0, 0], [6000, 0], [12000, 0], [0, 6000], [12000, 6000], [0, 12000], [12000, 12000]].map(p => offset(40.7, -74.0, p[0], p[1]));
+  const ur = SC.wrapShapes(circles(u, 1000));
+  const bay = offset(40.7, -74.0, 6000, 9000);
+  assert.ok(SC.inRings(ur, bay.lat, bay.lon), 'the bay is outside');
+});
+
+test('a lone repeater\'s spokes are wrapped: the notch between them is filled while narrower than 15 km', () => {
+  // One repeater, 1 km round it, with link lobes 20 km long every 60°: what
+  // the live map showed (one central repeater, a star of proven links).
+  const lobe = new Float64Array(SC.sectors);
+  for (let b = 0; b < 360; b += 60) for (let k = -2; k <= 2; k++) lobe[RAY(b + 5 * k + 360)] = Math.max(lobe[RAY(b + 5 * k + 360)], 20000 * (1 - Math.abs(5 * k) / 11.25));
+  const shapes = [SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)];
+  const wrap = SC.wrapShapes(shapes), det = SC.contourShapes(shapes);
+  // Between two spokes, 30° off each: 6 km out the gap is 6 km wide, 22 km
+  // out (past the tips) 22 km.
+  const near = offset(HOME.lat, HOME.lon, 6000 * Math.sin(Math.PI / 6), 6000 * Math.cos(Math.PI / 6));
+  assert.ok(!SC.inRings(det, near.lat, near.lon), 'detailed fills the notch');
+  assert.ok(SC.inRings(wrap, near.lat, near.lon), 'wrap leaves the notch between spokes open');
+  const far = offset(HOME.lat, HOME.lon, 19000 * Math.sin(Math.PI / 6), 19000 * Math.cos(Math.PI / 6));
+  assert.ok(!SC.inRings(wrap, far.lat, far.lon), 'wrap fills between spokes where they are 19 km apart');
+  assert.ok(reachToward(wrap, HOME, 0) >= 18000, 'the spoke itself is cut short');
+});
+
+test('a long link lobe stays a lobe: no big triangle toward its tip', () => {
+  const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
+  const shapes = [SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000), SC.shapeFor(NORTH, null, 1000)];
+  const wrap = SC.wrapShapes(shapes), hull = SC.scopeHull(shapes);
+  const between = offset(HOME.lat, HOME.lon, 11000, 3000);
+  assert.ok(SC.inRings(hull, between.lat, between.lon), 'the general view fills it (the contrast this view is for)');
+  assert.ok(!SC.inRings(wrap, between.lat, between.lon), 'wrap filled the triangle to the lobe tip');
+  assert.ok(reachToward(wrap, HOME, 90) > 20000, 'the lobe itself is kept');
+});
+
+test('wrap contains what each member reaches, and 1 km round every member', () => {
+  const rnd = prng(11);
+  const shapes = [];
+  for (let i = 0; i < 25; i++) {
+    const p = offset(40.7, -74.0, (rnd() - 0.5) * 60000, (rnd() - 0.5) * 60000);
+    const cut = new Float64Array(SC.sectors).fill(30000);
+    for (let k = 0; k < 20; k++) cut[Math.floor(rnd() * SC.sectors)] = 500;
+    shapes.push(Object.assign(SC.shapeFor(p, SC.reachFor(1000 + rnd() * 9000, cut, null, 1000), 1000), { _p: p }));
+  }
+  const wrap = SC.wrapShapes(shapes);
+  for (const s of shapes) assertKmAround(wrap, s._p, 'member');
+  // Every point a member reaches on both rays either side of it (2% in,
+  // which is as close as a grid outline is drawn) is inside the wrap.
+  // Between a ray cut to the floor and a long one the shape is a sliver
+  // narrower than a grid cell, and the terrain there is not known anyway.
+  const reaches = (s, q) => {
+    const kx = 111320 * Math.cos(s.lat * Math.PI / 180);
+    const dx = (q.lon - s.lon) * kx, dy = (q.lat - s.lat) * 111320, d = Math.sqrt(dx * dx + dy * dy);
+    let b = Math.atan2(dx, dy); if (b < 0) b += 2 * Math.PI;
+    const i = Math.floor(b / (2 * Math.PI / SC.sectors)) % SC.sectors;
+    return d < Math.min(s.ext[i], s.ext[(i + 1) % SC.sectors]) * 0.98;
+  };
+  let checked = 0;
+  for (let k = 0; k < 3000; k++) {
+    const q = offset(40.7, -74.0, (rnd() - 0.5) * 80000, (rnd() - 0.5) * 80000);
+    if (!shapes.some((s) => reaches(s, q))) continue;
+    checked++;
+    assert.ok(SC.inRings(wrap, q.lat, q.lon), 'a reached point is outside the wrap');
+  }
+  assert.ok(checked > 100, 'too few points checked: ' + checked);
+});
+
+test('wrap rings never cross themselves', () => {
+  const rnd = prng(3);
+  const pts = [];
+  for (let i = 0; i < 40; i++) pts.push(offset(40.7, -74.0, (rnd() - 0.5) * 70000, (rnd() - 0.5) * 70000));
+  const rings = SC.wrapShapes(pts.map(p => SC.shapeFor(p, SC.reachFor(1000 + rnd() * 6000, null, null, 1000), 1000)));
+  assert.ok(rings.length >= 1);
+  rings.forEach((r, i) => assert.ok(!selfCrosses(r), 'ring ' + i + ' crosses itself'));
+});
+
+test('co-located and collinear members do not break the wrap', () => {
+  const a = offset(40.7, -74.0, 0, 0);
+  assert.strictEqual(SC.wrapShapes(circles([a, a, a], 1000)).length, 1);
+  const line = [0, 10000, 20000, 30000].map(x => offset(40.7, -74.0, x, 0));
+  const rings = SC.wrapShapes(circles(line, 1000));
+  assert.strictEqual(rings.length, 1, 'collinear members 8 km apart should be one area');
+  assert.deepStrictEqual(ringPlain(SC.wrapShapes([])), []);
 });
 
 console.log('\n=== scope-contours.js: overlay ===');
@@ -987,6 +1218,143 @@ test('hiddenFromHash parses the list, null when absent', () => {
   assert.strictEqual(SC.hiddenFromHash('#/map?contours=1'), null);
 });
 
+console.log('\n=== scope-contours.js: area views ===');
+
+test('views are general (default), wrap and detailed', () => {
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(SC.views)), ['general', 'wrap', 'detailed']);
+  const { L, map } = fakeLeaflet();
+  assert.strictEqual(SC.createOverlay(L, map, {}).view(), 'general');
+  assert.strictEqual(SC.createOverlay(L, map, { view: 'wrap' }).view(), 'wrap');
+  assert.strictEqual(SC.createOverlay(L, map, { view: 'bogus' }).view(), 'general');
+});
+
+// Two members of one scope 12 km apart, 1 km reach each: the views differ
+// on whether the gap between them is part of the area.
+const GAP_NODES = [
+  Object.assign({ public_key: 'g1', transported_scopes: ['#gap'] }, offset(40.7, -74.0, 0, 0)),
+  Object.assign({ public_key: 'g2', transported_scopes: ['#gap'] }, offset(40.7, -74.0, 12000, 0)),
+];
+const GAP_MID = offset(40.7, -74.0, 6000, 0);
+
+test('setView redraws in that view: general and wrap fill the gap, detailed does not', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, sync);
+  o.setNodes(GAP_NODES); o.setVisible(true);
+  const last = () => rec.polygons[rec.polygons.length - 1].rings;
+  assert.ok(SC.inRings(last(), GAP_MID.lat, GAP_MID.lon), 'general');
+  o.setView('detailed');
+  assert.strictEqual(o.view(), 'detailed');
+  assert.strictEqual(last().length, 2, 'detailed: two separate circles');
+  assert.ok(!SC.inRings(last(), GAP_MID.lat, GAP_MID.lon), 'detailed fills the gap');
+  o.setView('wrap');
+  assert.strictEqual(last().length, 1);
+  assert.ok(SC.inRings(last(), GAP_MID.lat, GAP_MID.lon), 'wrap');
+  // Hover follows the drawn view.
+  map.fire('mousemove', { latlng: { lat: GAP_MID.lat, lng: GAP_MID.lon } });
+  assert.strictEqual(rec.tipOpen, true);
+});
+
+test('each view is cached: switching back computes nothing, an unknown view changes nothing', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, {});
+  o.setNodes(NODES); o.setVisible(true);
+  const general = o.stats().computed;
+  o.setView('wrap');
+  const afterWrap = o.stats().computed;
+  assert.ok(afterWrap > general);
+  o.setView('general'); o.setView('wrap');
+  assert.strictEqual(o.stats().computed, afterWrap, 'a view seen before was recomputed');
+  const drawn = rec.polygons.length;
+  o.setView('nope'); o.setView('wrap');
+  assert.strictEqual(rec.polygons.length, drawn, 'no redraw for an unknown or unchanged view');
+});
+
+test('a hidden overlay computes no view; switching view closes the click box', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, {});
+  o.setNodes(NODES);
+  o.setView('wrap'); o.setView('detailed');
+  assert.strictEqual(o.stats().computed, 0);
+  o.setVisible(true);
+  map.fire('click', { latlng: { lat: 40.70, lng: -74.00 }, sourceTarget: map });
+  assert.strictEqual(rec.popup._onMap, true);
+  o.setView('general');
+  assert.strictEqual(rec.popup._onMap, false);
+});
+
+test('the list hint says what an area is in the current view', () => {
+  const { S } = listSandbox('#/map');
+  const { L, map } = fakeLeaflet();
+  const o = S.createOverlay(L, map, {});
+  const el = fakeListEl();
+  S.mountScopeList(el, o);
+  o.setNodes(NODES); o.setVisible(true);
+  assert.ok(/farthest reach/.test(el.innerHTML));
+  o.setView('wrap');
+  assert.ok(/narrower than 15 km/.test(el.innerHTML), el.innerHTML);
+  o.setView('detailed');
+  assert.ok(/is where its repeaters reach/.test(el.innerHTML));
+});
+
+const viewButton = (v) => ({ getAttribute: k => (k === 'data-view' ? v : null) });
+
+test('the view picker shows three buttons while the overlay is shown, the current one pressed', () => {
+  const { S } = listSandbox('#/map');
+  const { L, map } = fakeLeaflet();
+  const o = S.createOverlay(L, map, {});
+  const el = fakeListEl();
+  S.mountViewPicker(el, o);
+  o.setNodes(NODES);
+  assert.strictEqual(el.hidden, true, 'hidden while the overlay is off');
+  o.setVisible(true);
+  assert.strictEqual(el.hidden, false);
+  assert.strictEqual((el.innerHTML.match(/data-view="/g) || []).length, 3);
+  assert.ok(/class="btn active" data-view="general" aria-pressed="true"/.test(el.innerHTML), el.innerHTML);
+  assert.ok(/Area shape/.test(el.innerHTML));
+  o.setVisible(false);
+  assert.strictEqual(el.hidden, true);
+});
+
+test('picking a view switches it, stores it, and writes it to the URL; the default clears the URL', () => {
+  const { S, ctx, store } = listSandbox('#/map?contours=1');
+  const { L, map } = fakeLeaflet();
+  const o = S.createOverlay(L, map, {});
+  const el = fakeListEl();
+  S.mountViewPicker(el, o);
+  o.setNodes(NODES); o.setVisible(true);
+  el.fire('click', viewButton('wrap'));
+  assert.strictEqual(o.view(), 'wrap');
+  assert.strictEqual(store['meshcore-scope-contours-view'], 'wrap');
+  assert.ok(/[?&]contoursView=wrap\b/.test(ctx.location.hash) && /contours=1/.test(ctx.location.hash), ctx.location.hash);
+  assert.ok(/class="btn active" data-view="wrap"/.test(el.innerHTML));
+  el.fire('click', viewButton('general'));
+  assert.strictEqual(store['meshcore-scope-contours-view'], 'general');
+  assert.ok(!/contoursView/.test(ctx.location.hash), ctx.location.hash);
+  el.fire('click', viewButton('bogus'));
+  el.fire('click', { getAttribute: () => null });
+  assert.strictEqual(o.view(), 'general');
+});
+
+test('the starting view comes from the URL first, then the stored choice', () => {
+  const start = (hash, stored) => {
+    const { S } = listSandbox(hash, stored);
+    const { L, map } = fakeLeaflet();
+    const o = S.createOverlay(L, map, {});
+    S.mountViewPicker(fakeListEl(), o);
+    return o.view();
+  };
+  assert.strictEqual(start('#/map?contoursView=detailed', { 'meshcore-scope-contours-view': 'wrap' }), 'detailed');
+  assert.strictEqual(start('#/map', { 'meshcore-scope-contours-view': 'wrap' }), 'wrap');
+  assert.strictEqual(start('#/map?contoursView=bogus', { 'meshcore-scope-contours-view': 'nope' }), 'general');
+  assert.strictEqual(start('#/map'), 'general');
+});
+
+test('viewFromHash reads ?contoursView=, null when absent or unknown', () => {
+  assert.strictEqual(SC.viewFromHash('#/map?contoursView=wrap'), 'wrap');
+  assert.strictEqual(SC.viewFromHash('#/map?contours=1'), null);
+  assert.strictEqual(SC.viewFromHash('#/map?contoursView=x'), null);
+});
+
 console.log('\n=== scope-contours.js: performance ===');
 
 // Deterministic PRNG so the timing is of the same work every run.
@@ -1002,7 +1370,8 @@ const SCmain = (() => {
   return win.ScopeContours;
 })();
 
-test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes: median rebuild within budget', () => {
+// 2,000 nodes in 32 scopes, with 2,800 links shaped like a real mesh.
+function perfMesh() {
   const rnd = prng(42);
   const nodes = [];
   for (let i = 0; i < 2000; i++) {
@@ -1026,14 +1395,20 @@ test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes: median rebuild 
     nodes.push(b);
     edges.push({ source: a.public_key, target: b.public_key, bidirectional: true });
   }
+  return { nodes, edges };
+}
+
+// Same shape as test-hop-path-inference.js: let the JIT settle, then the
+// median of 5 full rebuilds (a fresh overlay each, so nothing is cached),
+// then one rebuild of the same nodes, cached.
+function timeRebuild(view) {
+  const { nodes, edges } = perfMesh();
   const { L, map } = fakeLeaflet();
-  // Same shape as test-hop-path-inference.js: let the JIT settle, then the
-  // median of 5 full rebuilds (a fresh overlay each, so nothing is cached).
-  for (let w = 0; w < 2; w++) { const warm = SCmain.createOverlay(L, map, {}); warm.setVisible(true); warm.setLinks(edges); warm.setNodes(nodes); }
+  for (let w = 0; w < 2; w++) { const warm = SCmain.createOverlay(L, map, { view }); warm.setVisible(true); warm.setLinks(edges); warm.setNodes(nodes); }
   const times = [];
   let o = null;
   for (let r = 0; r < 5; r++) {
-    o = SCmain.createOverlay(L, map, {});
+    o = SCmain.createOverlay(L, map, { view });
     o.setVisible(true);
     o.setLinks(edges);
     const t0 = process.hrtime.bigint();
@@ -1041,17 +1416,22 @@ test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes: median rebuild 
     times.push(Number(process.hrtime.bigint() - t0) / 1e6);
   }
   times.sort((a, b) => a - b);
-  const median = times[2];
   const t1 = process.hrtime.bigint();
   o.setNodes(nodes.slice());
-  const cachedMs = Number(process.hrtime.bigint() - t1) / 1e6;
-  console.log('     (median ' + median.toFixed(1) + ' ms over 5 runs (target 30 ms) for ' + o.stats().computed + ' contours over ' + edges.length + ' links; cached rebuild ' + cachedMs.toFixed(1) + ' ms)');
-  assert.ok(o.stats().computed >= 32);
-  // Headroom over the target for slower CI runners.
-  assert.ok(median < 60, 'median ' + median.toFixed(1) + ' ms');
+  return { median: times[2], cachedMs: Number(process.hrtime.bigint() - t1) / 1e6, computed: o.stats().computed, links: edges.length };
+}
+
+// Targets per view; the assertion allows twice that for slower CI runners.
+[['general', 30], ['wrap', 210], ['detailed', 90]].forEach(([view, target]) => {
+  test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes, ' + view + ' view: median rebuild within budget', () => {
+    const r = timeRebuild(view);
+    console.log('     (median ' + r.median.toFixed(1) + ' ms over 5 runs (target ' + target + ' ms) for ' + r.computed + ' outlines over ' + r.links + ' links; cached rebuild ' + r.cachedMs.toFixed(1) + ' ms)');
+    assert.ok(r.computed >= 32);
+    assert.ok(r.median < 2 * target, 'median ' + r.median.toFixed(1) + ' ms');
+  });
 });
 
-test('a hover hit test over 64 outlines takes under 1 ms', () => {
+['general', 'wrap', 'detailed'].forEach((view) => test('a hover hit test over 64 outlines takes under 1 ms, ' + view + ' view', () => {
   const rnd = prng(7);
   const nodes = [];
   for (let i = 0; i < 2000; i++) {
@@ -1059,7 +1439,7 @@ test('a hover hit test over 64 outlines takes under 1 ms', () => {
     nodes.push({ public_key: 'k' + i, lat: p.lat, lon: p.lon, transported_scopes: ['#s' + Math.floor(rnd() * 32)], declared_regions: ['s' + Math.floor(rnd() * 32)] });
   }
   const { L, map } = fakeLeaflet();
-  const o = SCmain.createOverlay(L, map, { raf: fn => fn() });
+  const o = SCmain.createOverlay(L, map, { raf: fn => fn(), view });
   o.setVisible(true); o.setNodes(nodes);
   const N = 200;
   const t0 = process.hrtime.bigint();
@@ -1067,7 +1447,7 @@ test('a hover hit test over 64 outlines takes under 1 ms', () => {
   const per = Number(process.hrtime.bigint() - t0) / 1e6 / N;
   console.log('     (' + per.toFixed(3) + ' ms per hit test)');
   assert.ok(per < 1, per.toFixed(3) + ' ms');
-});
+}));
 
 Promise.all(pending).then(() => {
   console.log(`\n${passed} passed, ${failed} failed`);

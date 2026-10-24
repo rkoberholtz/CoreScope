@@ -8,7 +8,9 @@
  * it (default_scope, configured_scope, declared_regions) but not carrying it.
  * Clicking inside outlines lists each scope's repeaters. The "Reach contours" toggle draws them,
  * ?contours=1 deep-links them, the Region Scope picker narrows them to one
- * scope, a per-scope list shows and hides them (?contoursHide=), hovering
+ * scope, a per-scope list shows and hides them (?contoursHide=), an area
+ * shape picker on the map draws them General, Shrink-wrap or Detailed
+ * (?contoursView=), hovering
  * names every scope under the cursor on both pages (the live map draws
  * canvases above the outlines), and the outlines never take pointer events.
  * On the live page a scope's outline flashes when one of its packets arrives.
@@ -140,6 +142,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
   await page.evaluate(() => {
     localStorage.removeItem('meshcore-map-scope-contours');
     localStorage.removeItem('meshcore-scope-contours-hidden');
+    localStorage.removeItem('meshcore-scope-contours-view');
     localStorage.setItem('meshcore-map-clustering', 'false');
   });
   await page.reload({ waitUntil: 'load' });
@@ -305,6 +308,94 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 3);
   });
 
+  // How much of the map each scope's outline fills: the count of points on a
+  // 6 px grid over the map inside its drawn path, by the path's own fill
+  // test. Comparable between views of the same scope.
+  const fillCounts = () => page.evaluate(() => {
+    const out = {};
+    const box = window.__mc_map.getContainer().getBoundingClientRect();
+    document.querySelectorAll('path.mc-scope-area').forEach((p) => {
+      const inv = p.getScreenCTM().inverse();
+      let n = 0;
+      for (let y = box.top; y < box.bottom; y += 6) {
+        for (let x = box.left; x < box.right; x += 6) if (p.isPointInFill(new DOMPoint(x, y).matrixTransform(inv))) n++;
+      }
+      const k = p.getAttribute('data-scope') + (p.classList.contains('mc-scope-area-configured') ? ':configured' : '');
+      out[k] = n;
+    });
+    return out;
+  });
+  const pickView = async (label, hintRe) => {
+    await page.click('#mcScopeView button[data-view="' + label + '"]');
+    await page.waitForFunction((src) => new RegExp(src).test(document.querySelector('#mcScopeList').textContent), hintRe.source, { timeout: 5000 });
+    await page.waitForFunction((v) => {
+      const b = document.querySelector('#mcScopeView button[aria-pressed="true"]');
+      return b && b.getAttribute('data-view') === v && document.querySelectorAll('path.mc-scope-area').length === 3;
+    }, label, { timeout: 5000 });
+  };
+
+  await step('the area shape picker shows while contours are on, General first', async () => {
+    assert(!(await page.$eval('#mcScopeView', (el) => el.hidden)), 'picker hidden while contours are on');
+    const btns = await page.$$eval('#mcScopeView button', (els) => els.map((b) => b.textContent + ':' + b.getAttribute('aria-pressed')));
+    assert(btns.join(',') === 'General:true,Shrink-wrap:false,Detailed:false', 'buttons: ' + btns.join(','));
+  });
+
+  let general = null;
+  const pathsD = () => page.$$eval('path.mc-scope-area', (els) => els.map((el) => el.getAttribute('d')).join('|'));
+  await step('Shrink-wrap and Detailed redraw every scope, each inside the one before', async () => {
+    general = await fillCounts();
+    const generalD = await pathsD();
+    await pickView('wrap', /narrower than 15 km/);
+    const wrap = await fillCounts();
+    await pickView('detailed', /is where its repeaters reach/);
+    const detailed = await fillCounts();
+    assert((await pathsD()) !== generalD, 'Detailed drew the same outlines as General');
+    const keys = Object.keys(general);
+    assert(keys.length === 3 && keys.every((k) => k in wrap && k in detailed), 'scopes: ' + JSON.stringify([general, wrap, detailed]));
+    // Along the edge the views may differ by under a pixel: the hull's
+    // chords sit just inside each reach, the grid outlines just outside
+    // (drawn out so every member keeps its 1 km). Allow 1%.
+    const within = (a, b) => a <= b * 1.01 + 3;
+    console.log('    (grid points filled, general / wrap / detailed: ' + keys.map((k) => k + ' ' + general[k] + '/' + wrap[k] + '/' + detailed[k]).join(', ') + ')');
+    for (const k of keys) {
+      assert(within(wrap[k], general[k]), k + ': wrap fills more than general ' + JSON.stringify([general[k], wrap[k]]));
+      assert(within(detailed[k], wrap[k]), k + ': detailed fills more than wrap ' + JSON.stringify([wrap[k], detailed[k]]));
+    }
+  });
+
+  await step('in Detailed, hover and click still name and list the scopes', async () => {
+    const pt = await pointInside(['sf']);
+    assert(pt, 'no point inside #sf');
+    await page.mouse.move(pt.x, pt.y);
+    await page.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
+    assert(/#sf · carried by 3 nodes/.test(await page.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent)), 'tooltip');
+    await page.mouse.click(pt.x, pt.y);
+    await page.waitForSelector('.leaflet-popup.mc-scope-popup', { timeout: 3000 });
+    assert(/#sf 1 configured · 3 carrying/.test(await page.$eval('.mc-scope-popup', (el) => el.textContent.replace(/\s+/g, ' '))), 'popup');
+    await page.keyboard.press('Escape');
+    await page.mouse.move(5, 450);
+  });
+
+  await step('the view is stored and in the URL, survives a reload, and General clears the URL', async () => {
+    assert(await page.evaluate(() => localStorage.getItem('meshcore-scope-contours-view')) === 'detailed', 'not stored');
+    assert(/[?&]contoursView=detailed\b/.test(await page.evaluate(() => location.hash)), 'hash: ' + (await page.evaluate(() => location.hash)));
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForSelector('path.mc-scope-area');
+    assert(await page.$eval('#mcScopeView button[data-view="detailed"]', (b) => b.getAttribute('aria-pressed')) === 'true', 'Detailed not pressed after reload');
+    await pickView('general', /farthest reach/);
+    assert(!/contoursView/.test(await page.evaluate(() => location.hash)), 'contoursView left in the URL');
+    const again = await fillCounts();
+    assert(Object.keys(general).every((k) => Math.abs(again[k] - general[k]) <= 3), 'General is not the same as before: ' + JSON.stringify([general, again]));
+  });
+
+  await step('?contoursView=wrap opens Shrink-wrap, over the stored choice', async () => {
+    await page.goto(BASE + '/#/map?contours=1&contoursView=wrap', { waitUntil: 'load' });
+    await page.waitForSelector('path.mc-scope-area');
+    assert(await page.$eval('#mcScopeView button[data-view="wrap"]', (b) => b.getAttribute('aria-pressed')) === 'true', 'Shrink-wrap not pressed');
+    assert(/narrower than 15 km/.test(await page.$eval('#mcScopeList', (el) => el.textContent)), 'hint not for wrap');
+    await pickView('general', /farthest reach/);
+  });
+
   await step('?contours=0 overrides the stored choice; ?contours=1&contoursHide= restores both', async () => {
     await page.goto(BASE + '/#/map?contours=0', { waitUntil: 'load' });
     await page.waitForSelector('.leaflet-marker-icon');
@@ -321,6 +412,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.click('#mcScopeContours');
     await page.waitForFunction(() => !document.querySelector('path.mc-scope-area'));
     assert(await page.$eval('#mcScopeList', (el) => el.hidden), 'list still shown');
+    assert(await page.$eval('#mcScopeView', (el) => el.hidden), 'area shape picker still shown');
     assert(!/[?&]contours=/.test(await page.evaluate(() => location.hash)), 'contours param left in the URL');
   });
 
