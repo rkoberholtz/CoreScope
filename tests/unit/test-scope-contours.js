@@ -1452,6 +1452,48 @@ test('the starting view comes from the URL first, then the stored choice', () =>
   assert.strictEqual(start('#/map'), 'hull');
 });
 
+test('the view picker takes an optional heading (live puts REGION SCOPES above it)', () => {
+  const { S } = listSandbox('#/live');
+  const { L, map } = fakeLeaflet();
+  const o = S.createOverlay(L, map, {});
+  const el = fakeListEl();
+  S.mountViewPicker(el, o, { titleHtml: '<h3 class="legend-title">REGION SCOPES</h3>' });
+  o.setNodes(NODES); o.setVisible(true);
+  assert.ok(el.innerHTML.startsWith('<h3 class="legend-title">REGION SCOPES</h3>') && /Area shape/.test(el.innerHTML), el.innerHTML);
+  o.setVisible(false);
+  assert.strictEqual(el.innerHTML, '', 'heading hidden with the picker');
+});
+
+test('the map and live pages share one stored view', () => {
+  const { S, store } = listSandbox('#/map');
+  const { L, map } = fakeLeaflet();
+  const onMap = S.createOverlay(L, map, {});
+  const mapEl = fakeListEl();
+  S.mountViewPicker(mapEl, onMap);
+  onMap.setNodes(NODES); onMap.setVisible(true);
+  mapEl.fire('click', viewButton('detailed'));
+  const { S: S2 } = listSandbox('#/live', store);
+  const onLive = S2.createOverlay(L, map, {});
+  S2.mountViewPicker(fakeListEl(), onLive);
+  assert.strictEqual(onLive.view(), 'detailed');
+});
+
+test('in Detailed, a pulse lights a scope drawn as two separate areas', () => {
+  const clock = fakeClock();
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, { view: 'detailed', pulseMs: 1500, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+  // Two repeaters 60 km apart: Detailed leaves them as two areas.
+  const far = offset(40.0, -75.3, 60000, 0);
+  o.setNodes([{ public_key: 'd1', lat: 40.0, lon: -75.3, transported_scopes: ['#two'] }, { public_key: 'd2', lat: far.lat, lon: far.lon, transported_scopes: ['#two'] }]);
+  o.setVisible(true);
+  const poly = rec.polygons[rec.polygons.length - 1];
+  assert.strictEqual(poly.rings.length, 2, 'Detailed drew ' + poly.rings.length + ' areas');
+  o.pulse('two');
+  assert.ok(poly.getElement().classList.contains('is-pulsing'));
+  clock.advance(1600);
+  assert.ok(!poly.getElement().classList.contains('is-pulsing'));
+});
+
 test('viewFromHash reads ?contoursView=, null when absent or unknown', () => {
   assert.strictEqual(SC.viewFromHash('#/map?contoursView=detailed'), 'detailed');
   assert.strictEqual(SC.viewFromHash('#/map?contoursView=wrap'), null);

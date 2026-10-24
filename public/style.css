@@ -5904,11 +5904,12 @@ path.mc-scope-area.is-hovered { stroke-width: 3; stroke-opacity: 1; fill-opacity
 /* Show/hide list: under Reach contours on the map, in the legend on live. */
 .mc-scope-list { margin: 4px 0 0 20px; font-size: 12px; }
 .mc-scope-list[hidden] { display: none; }
-.live-legend .mc-scope-list { margin-left: 0; }
-/* The live legend takes no pointer events (#1616); the list is a control. */
-.live-legend .mc-scope-list { pointer-events: auto; }
-/* Area view picker (map): General, Shrink-wrap, Detailed. */
+/* Area shape picker: Convex Hull, Detailed. Under Reach contours on the
+ * map, under REGION SCOPES in the legend on live. */
 .mc-scope-view { margin: 4px 0 0 20px; font-size: 12px; }
+.live-legend .mc-scope-list, .live-legend .mc-scope-view { margin-left: 0; }
+/* The live legend takes no pointer events (#1616); these two are controls. */
+.live-legend .mc-scope-list, .live-legend .mc-scope-view { pointer-events: auto; }
 .mc-scope-view[hidden] { display: none; }
 .mc-scope-view .btn { white-space: nowrap; }
 .mc-scope-view-label { display: block; font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }

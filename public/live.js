@@ -1366,6 +1366,7 @@
             <li><span class="live-ring live-ring--repeater" aria-hidden="true"></span> Bright white ring — repeater</li>
             <li><span class="live-ring live-ring--other" aria-hidden="true"></span> Faded ring — companion / sensor / room</li>
           </ul>
+          <div id="liveScopeView" class="mc-scope-view" hidden></div>
           <div id="liveScopeList" class="mc-scope-list" hidden></div>
           </div>
         </div>
@@ -1709,9 +1710,12 @@
         terrain: window.TerrainReach ? window.TerrainReach.shared() : null,
         loadAntennaHeights: () => api('/config/map', { ttl: 3600 }).then(d => (d && d.antennaHeights) || {}),
       });
-      window.ScopeContours.mountScopeList(document.getElementById('liveScopeList'), reachOverlay, {
+      // Area shape above the list, under one heading; the choice is shared
+      // with the map page.
+      window.ScopeContours.mountViewPicker(document.getElementById('liveScopeView'), reachOverlay, {
         titleHtml: '<h3 class="legend-title" style="margin-top:8px">REGION SCOPES</h3>',
       });
+      window.ScopeContours.mountScopeList(document.getElementById('liveScopeList'), reachOverlay);
       reachOverlay.setVisible(scopeContoursOn);
     }
 

@@ -1709,8 +1709,10 @@
 
   // mountViewPicker renders the area view buttons into el, shown while the
   // overlay is. The URL wins, then the stored choice; a change is stored and
-  // written to the URL (the default view leaves the URL clean). opts:
-  // storage (defaults to localStorage). Returns an unsubscribe.
+  // written to the URL (the default view leaves the URL clean). The map and
+  // live pages share the stored choice and the URL key. opts: storage
+  // (defaults to localStorage), titleHtml (a heading shown above it, with
+  // it). Returns an unsubscribe.
   function mountViewPicker(el, overlay, opts) {
     opts = opts || {};
     var store = opts.storage || localStorage;
@@ -1723,7 +1725,7 @@
       var key = visible ? overlay.view() : '';
       if (key === shown) return;
       shown = key;
-      el.innerHTML = !visible ? '' :
+      el.innerHTML = !visible ? '' : (opts.titleHtml || '') +
         '<span class="mc-scope-view-label" id="mcScopeViewLabel">Area shape</span>' +
         '<div class="filter-group" role="group" aria-labelledby="mcScopeViewLabel">' + VIEWS.map(function (v) {
           var on = v === overlay.view();
