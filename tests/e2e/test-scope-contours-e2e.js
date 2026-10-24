@@ -460,6 +460,13 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.waitForFunction(() => !document.querySelector('path.is-pulsing'), null, { timeout: 4000 });
   });
 
+  await step('live: the legend\'s scope checkboxes and All work (the legend itself takes no clicks)', async () => {
+    await page.click('#liveScopeList input[data-scope="sf"]');
+    await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 2, null, { timeout: 3000 });
+    await page.click('#liveScopeList [data-scope-all]');
+    await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 3, null, { timeout: 3000 });
+  });
+
   await step('when elevation tiles fail, outlines fall back to radius + links and say so', async () => {
     const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const p2 = await ctx2.newPage();
