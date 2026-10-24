@@ -295,11 +295,12 @@ test('ambiguous, one-way, self links and links to unplaced nodes prove nothing',
   assert.strictEqual(r.lobes.size, 0);
 });
 
-test('a link lobe is its distance x 1.1 on its bearing, tapering to nothing at 11.25°', () => {
+test('a link lobe is its distance x 1.1 within one ray of its bearing, tapering to nothing at 11.25°', () => {
   const r = SC.linkReach([HOME, EAST], [two('h0', 'e1')]);
   const h = plain(r.lobes.get('h0')), e = plain(r.lobes.get('e1'));
   assert.ok(Math.abs(h[RAY(90)] - 22000) < 150, 'on bearing ' + h[RAY(90)]);
-  assert.ok(Math.abs(h[RAY(80)] - 22000 * (1 - 10 / 11.25)) < 400, '10° off ' + h[RAY(80)]);
+  assert.ok(Math.abs(h[RAY(85)] - 22000) < 150 && Math.abs(h[RAY(95)] - 22000) < 150, 'one ray off ' + h[RAY(85)] + ' ' + h[RAY(95)]);
+  assert.ok(Math.abs(h[RAY(80)] - 22000 * (1 - 5 / 6.25)) < 400, '10° off ' + h[RAY(80)]);
   assert.strictEqual(h[RAY(75)], 0, '15° off');
   assert.ok(Math.abs(e[RAY(270)] - 22000) < 150, 'the far end gets the reverse lobe');
 });
@@ -334,6 +335,23 @@ test('a far link\'s tip is a corner of the area', () => {
   const tip = offset(HOME.lat, HOME.lon, 22000, 0);
   assert.ok(rings[0].some(p => metres([tip.lat, tip.lon], p) < 60), 'no vertex at the lobe tip');
   assert.ok(SC.inRings(rings, EAST.lat, EAST.lon), 'the linked node is outside');
+});
+
+test('a linked node off the 5° rays is still inside, with room past it, in both views', () => {
+  // Rays sit every 5°; a partner between two of them got a lobe that fell
+  // short of it (to ~86% of its distance at 2.5° off), leaving it just
+  // outside a corner. Real case: Hazelwood Amon Sûl -> Frisbeepeater.
+  for (const deg of [2.5, 37.5, 62, 118.7, 211.2, 333.3]) {
+    const t = deg * Math.PI / 180;
+    const far = Object.assign({ public_key: 'p1' }, offset(HOME.lat, HOME.lon, 30000 * Math.sin(t), 30000 * Math.cos(t)));
+    const past = offset(HOME.lat, HOME.lon, 31500 * Math.sin(t), 31500 * Math.cos(t));
+    const lobe = SC.linkReach([HOME, far], [two('h0', 'p1')]).lobes.get('h0');
+    const shape = SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000);
+    for (const [view, rings] of [['hull', SC.scopeHull([shape])], ['detailed', SC.wrapShapes([shape])]]) {
+      assert.ok(SC.inRings(rings, far.lat, far.lon), view + ': partner at ' + deg + '° is outside');
+      assert.ok(SC.inRings(rings, past.lat, past.lon), view + ': no room past the partner at ' + deg + '°');
+    }
+  }
 });
 
 // The guarantee the floor exists for: every member has at least 1 km of

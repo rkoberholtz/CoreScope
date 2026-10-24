@@ -18,8 +18,10 @@
    - The terrain cut is where line of sight over elevation data ends in that
      direction (terrain-reach.js). Real radios reach roughly a circle, trimmed
      where a ridge or valley shadows the ground.
-   - Each proven link still stretches its own bearing out to it, tapering over
-     ±11.25°, so evidence always beats the model.
+   - Each proven link still stretches its own bearing out past it: full
+     length within 5° (one ray) of it, so the partner is inside even between
+     two rays, tapering to nothing at ±11.25°. Evidence always beats the
+     model.
    Interpolating between the 72 directions keeps the shape smooth.
 
    A scope's outline is drawn in one of two views (setView), each built from
@@ -61,7 +63,9 @@
   // 72 rays of 5°, the same as terrain-reach.js walks.
   var SECTORS = 72;
   var SECTOR_RAD = 2 * Math.PI / SECTORS;
-  // A proven link's lobe tapers to nothing this far either side of it.
+  // A proven link's lobe is at full length within one ray of its bearing,
+  // so both rays either side of it reach the partner, and tapers to nothing
+  // this far either side of it.
   var LOBE_HALF_RAD = 11.25 * Math.PI / 180;
   // A link proves the far node hears this one; the outline is drawn a little
   // past it so the linked node sits inside rather than on the edge.
@@ -200,8 +204,10 @@
   //           It ignores one exceptional long link and a crowd of close
   //           neighbours alike.
   //   lobes:  Map pk → Float64Array(SECTORS), each link stretching its own
-  //           bearing out to its distance × 1.1, tapering to nothing over
-  //           ±11.25°, so a proven link always sits inside the outline.
+  //           bearing out to its distance × 1.1: at full length on the rays
+  //           within 5° of it, so interpolating between them still reaches
+  //           past the partner, then tapering to nothing at ±11.25°. A
+  //           proven link always sits inside the outline.
   //   partners: Map pk → [{ lat, lon }] of the other ends, from which the
   //           terrain provider estimates the node's antenna height.
   function linkReach(nodes, edges) {
@@ -215,7 +221,7 @@
       for (var i = 0; i < SECTORS; i++) {
         var off = angleDiff(i * SECTOR_RAD, bearing);
         if (off >= LOBE_HALF_RAD) continue;
-        var v = len * (1 - off / LOBE_HALF_RAD);
+        var v = off <= SECTOR_RAD ? len : len * (1 - (off - SECTOR_RAD) / (LOBE_HALF_RAD - SECTOR_RAD));
         if (v > e[i]) e[i] = v;
       }
     }
