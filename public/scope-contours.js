@@ -1237,9 +1237,13 @@
   // scopePopupHtml: one section per scope under the click, each listing its
   // repeaters with why they are listed, and the antenna height the terrain
   // model used for them (antennaOf(pk) → { antennaM, source }, when known).
-  // Every name is escaped.
+  // Scopes whose lists are the same (the same repeaters, listed for the same
+  // reasons) share one section, in the order of the first: a few repeaters
+  // that each carry many scopes would otherwise list themselves once per
+  // scope. Every name is escaped.
   function scopePopupHtml(scopes, nodes, antennaOf) {
-    return '<div class="mc-scope-pop">' + scopes.map(function (scope) {
+    var sections = [], byBody = new Map();
+    scopes.forEach(function (scope) {
       var members = scopeMembers(scope, nodes);
       var nConf = members.filter(function (m) { return m.conf; }).length;
       var nCarry = members.filter(function (m) { return m.carrying; }).length;
@@ -1258,10 +1262,18 @@
         return '<li><a href="#/nodes/' + encodeURIComponent(pk) + '">' + escapeHtml(n.name || pk.slice(0, 8)) + '</a> ' + tags + '</li>';
       }).join('');
       var more = members.length > POPUP_ROWS ? '<li class="mc-scope-pop-more">+' + (members.length - POPUP_ROWS) + ' more</li>' : '';
-      return '<section class="mc-scope-pop-scope">' +
-        '<div class="mc-scope-pop-head"><span class="mc-scope-swatch mc-reach-c' + colorIndex(scope) + '" aria-hidden="true"></span> ' +
-        '<strong>#' + escapeHtml(scope) + '</strong> <span class="mc-scope-pop-sum">' + nConf + ' configured · ' + nCarry + ' carrying</span></div>' +
+      var body = '<span class="mc-scope-pop-sum">' + nConf + ' configured · ' + nCarry + ' carrying</span></div>' +
         '<ul class="mc-scope-pop-list">' + rows + more + '</ul></section>';
+      var sec = byBody.get(body);
+      if (!sec) { sec = { scopes: [], body: body }; byBody.set(body, sec); sections.push(sec); }
+      sec.scopes.push(scope);
+    });
+    return '<div class="mc-scope-pop">' + sections.map(function (sec) {
+      return '<section class="mc-scope-pop-scope"><div class="mc-scope-pop-head"><span class="mc-scope-pop-names">' +
+        sec.scopes.map(function (scope) {
+          return '<span class="mc-scope-pop-name"><span class="mc-scope-swatch mc-reach-c' + colorIndex(scope) + '" aria-hidden="true"></span> ' +
+            '<strong>#' + escapeHtml(scope) + '</strong></span>';
+        }).join(' ') + '</span> ' + sec.body;
     }).join('') + '</div>';
   }
 

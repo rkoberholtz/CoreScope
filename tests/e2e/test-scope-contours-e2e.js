@@ -253,6 +253,9 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.waitForSelector('.leaflet-popup.mc-scope-popup', { timeout: 3000 });
     const text = await page.$eval('.mc-scope-popup', (el) => el.textContent.replace(/\s+/g, ' '));
     assert(/#sf 1 configured · 3 carrying/.test(text) && /#bay 0 configured · 2 carrying/.test(text), 'popup: ' + text);
+    // Different lists, so a section each (scopes with the same list share one).
+    const heads = await page.$$eval('.mc-scope-popup .mc-scope-pop-scope', (els) => els.map((el) => el.querySelectorAll('.mc-scope-pop-name').length));
+    assert(heads.length === 2 && heads.every((n) => n === 1), 'sections: ' + JSON.stringify(heads));
     const sfPart = text.split('#bay')[0].split('#sf')[1] || text;
     assert(sfPart.indexOf('SF Default') < sfPart.indexOf('SF One'), 'configured repeater not listed first: ' + sfPart);
     assert(/SF Default\s*default\s*carrying/.test(text), 'tags: ' + text);

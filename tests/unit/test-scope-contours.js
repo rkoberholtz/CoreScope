@@ -1193,7 +1193,7 @@ test('clicking inside outlines lists each scope\'s repeaters with why they are t
   map.fire('click', { latlng: { lat: 40.001, lng: -75.300 }, sourceTarget: map });
   assert.ok(rec.popup && rec.popup._onMap, 'popup not opened');
   const html = rec.popup.content;
-  assert.ok(/#phl<\/strong> <span class="mc-scope-pop-sum">3 configured · 2 carrying/.test(html), html);
+  assert.ok(/#phl<\/strong>(<\/span>)* <span class="mc-scope-pop-sum">3 configured · 2 carrying/.test(html), html);
   assert.ok(/#philly<\/strong>/.test(html), 'overlapping #philly not listed');
   assert.ok(!/#nj/.test(html), 'a scope not under the click is listed');
   const phl = html.split('#philly')[0];
@@ -1241,6 +1241,23 @@ test('a hover queued just before a click does not draw over the popup', () => {
   assert.ok(rec.popup._onMap);
   frames.forEach(fn => fn());
   assert.strictEqual(rec.tipOpen, false, 'tooltip drawn over the popup');
+});
+
+test('scopes with the same repeaters, listed the same way, share one popup entry', () => {
+  // Near Philadelphia a few repeaters each carry many scopes, so a click
+  // there was 11 entries, most of them the same list.
+  const ns = [
+    { public_key: 'r1', name: 'Treebeard', lat: 40.0, lon: -75.3, transported_scopes: ['#a', '#b', '#c'], default_scope: '#c', declared_regions: ['d'] },
+    { public_key: 'r2', name: 'Amon Sul', lat: 40.0, lon: -75.31, transported_scopes: ['#a', '#b'], declared_regions: ['d'] },
+  ];
+  const html = SC.scopePopupHtml(['a', 'c', 'b', 'd'], ns);
+  const sections = html.split('<section class="mc-scope-pop-scope">').slice(1);
+  assert.strictEqual(sections.length, 3, html);
+  assert.ok(/#a<\/strong>[\s\S]*#b<\/strong>/.test(sections[0]) && !/#c</.test(sections[0]), '#a and #b together, first: ' + sections[0]);
+  assert.ok(/#c<\/strong>/.test(sections[1]) && !/#b</.test(sections[1]), '#c alone: it is its default');
+  assert.ok(/#d<\/strong>/.test(sections[2]) && !/#a</.test(sections[2]), '#d alone: the same repeaters, but declared, not carrying');
+  assert.strictEqual((sections[0].match(/<li><a /g) || []).length, 2, 'the shared list once');
+  assert.strictEqual((sections[0].match(/mc-scope-swatch/g) || []).length, 2, 'a swatch per scope');
 });
 
 test('the popup lists at most 50 rows per scope, then says how many more', () => {
