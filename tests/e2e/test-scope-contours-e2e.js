@@ -256,7 +256,9 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     // Different lists, so a section each (scopes with the same list share one).
     const heads = await page.$$eval('.mc-scope-popup .mc-scope-pop-scope', (els) => els.map((el) => el.querySelectorAll('.mc-scope-pop-name').length));
     assert(heads.length === 2 && heads.every((n) => n === 1), 'sections: ' + JSON.stringify(heads));
-    const sfPart = text.split('#bay')[0].split('#sf')[1] || text;
+    // Sorted by name: #bay, then #sf.
+    assert(text.indexOf('#bay') < text.indexOf('#sf'), 'not sorted by name: ' + text);
+    const sfPart = text.split('#sf')[1];
     assert(sfPart.indexOf('SF Default') < sfPart.indexOf('SF One'), 'configured repeater not listed first: ' + sfPart);
     assert(/SF Default\s*default\s*carrying/.test(text), 'tags: ' + text);
     // Mast heights the terrain model used: SF One's is set in config (by a
@@ -264,7 +266,10 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     // needs no more than the assumed 10 m.
     assert(/SF One\s*carrying\s*30 m mast \(set\)/.test(text), 'set mast: ' + text);
     assert(/SF Two\s*carrying\s*10 m mast/.test(text), 'assumed mast: ' + text);
-    const href = await page.$eval('.mc-scope-popup a', (a) => a.getAttribute('href'));
+    const href = await page.$$eval('.mc-scope-popup .mc-scope-pop-scope', (els) => {
+      const sf = els.find((el) => /#sf\b/.test(el.textContent));
+      return sf && sf.querySelector('a').getAttribute('href');
+    });
     assert(href === '#/nodes/' + encodeURIComponent('a5' + '0'.repeat(62)), 'link: ' + href);
     assert(!(await page.$('.leaflet-tooltip.mc-scope-tip')), 'hover tooltip over the popup');
     await page.keyboard.press('Escape');

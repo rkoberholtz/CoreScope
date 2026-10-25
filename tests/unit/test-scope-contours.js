@@ -1196,7 +1196,7 @@ test('clicking inside outlines lists each scope\'s repeaters with why they are t
   assert.ok(/#phl<\/strong>(<\/span>)* <span class="mc-scope-pop-sum">3 configured · 2 carrying/.test(html), html);
   assert.ok(/#philly<\/strong>/.test(html), 'overlapping #philly not listed');
   assert.ok(!/#nj/.test(html), 'a scope not under the click is listed');
-  const phl = html.split('#philly')[0];
+  const phl = html.split('<section').find(sec => sec.includes('#phl</strong>'));
   // Configured first (by name), then carrying-only.
   const order = ['Amon', 'Nowhere', 'Treebeard', 'Carrier'].map(n => phl.indexOf(n));
   assert.ok(order.every((v, i) => v > 0 && (i === 0 || v > order[i - 1])), 'order ' + order);
@@ -1258,6 +1258,17 @@ test('scopes with the same repeaters, listed the same way, share one popup entry
   assert.ok(/#d<\/strong>/.test(sections[2]) && !/#a</.test(sections[2]), '#d alone: the same repeaters, but declared, not carrying');
   assert.strictEqual((sections[0].match(/<li><a /g) || []).length, 2, 'the shared list once');
   assert.strictEqual((sections[0].match(/mc-scope-swatch/g) || []).length, 2, 'a swatch per scope');
+});
+
+test('the popup lists its scopes by name, whatever order they were drawn in', () => {
+  const ns = [
+    { public_key: 'r1', name: 'Treebeard', lat: 40.0, lon: -75.3, transported_scopes: ['#us-pa', '#us', '#PHL', '#northeast'], default_scope: '#phl' },
+    { public_key: 'r2', name: 'Amon Sul', lat: 40.0, lon: -75.31, transported_scopes: ['#us-pa', '#us'], default_scope: '#northeast' },
+  ];
+  const html = SC.scopePopupHtml(['us-pa', 'phl', 'northeast', 'us', 'PHL'], ns);
+  const heads = html.split('<section class="mc-scope-pop-scope">').slice(1)
+    .map(s => (s.match(/#[^<]+(?=<\/strong>)/g) || []).join(' '));
+  assert.deepStrictEqual(heads, ['#northeast', '#PHL', '#phl', '#us #us-pa']);
 });
 
 test('the popup lists at most 50 rows per scope, then says how many more', () => {

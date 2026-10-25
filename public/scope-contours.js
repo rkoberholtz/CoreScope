@@ -1238,12 +1238,18 @@
   // repeaters with why they are listed, and the antenna height the terrain
   // model used for them (antennaOf(pk) → { antennaM, source }, when known).
   // Scopes whose lists are the same (the same repeaters, listed for the same
-  // reasons) share one section, in the order of the first: a few repeaters
-  // that each carry many scopes would otherwise list themselves once per
-  // scope. Every name is escaped.
+  // reasons) share one section: a few repeaters that each carry many scopes
+  // would otherwise list themselves once per scope. Sorted by name, case
+  // aside, so the order does not follow how the areas happened to be drawn;
+  // a section sits where its first name does. Every name is escaped.
+  function byScopeName(a, b) {
+    var la = a.toLowerCase(), lb = b.toLowerCase();
+    if (la !== lb) return la < lb ? -1 : 1;
+    return a < b ? -1 : (a > b ? 1 : 0);
+  }
   function scopePopupHtml(scopes, nodes, antennaOf) {
     var sections = [], byBody = new Map();
-    scopes.forEach(function (scope) {
+    scopes.slice().sort(byScopeName).forEach(function (scope) {
       var members = scopeMembers(scope, nodes);
       var nConf = members.filter(function (m) { return m.conf; }).length;
       var nCarry = members.filter(function (m) { return m.carrying; }).length;
