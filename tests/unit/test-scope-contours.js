@@ -292,12 +292,12 @@ test('ambiguous, one-way, self links and links to unplaced nodes prove nothing',
     two('h0', 'h0'), two('h0', 'u1'), two('h0', 'missing'), null,
   ]);
   assert.strictEqual(r.radius.size, 0);
-  assert.strictEqual(r.lobes.size, 0);
+  assert.strictEqual(r.links.size, 0);
 });
 
 test('a link lobe is its distance x 1.1 within one ray of its bearing, tapering to nothing at 11.25°', () => {
   const r = SC.linkReach([HOME, EAST], [two('h0', 'e1')]);
-  const h = plain(r.lobes.get('h0')), e = plain(r.lobes.get('e1'));
+  const h = plain(SC.lobeOf(r.links.get('h0'))), e = plain(SC.lobeOf(r.links.get('e1')));
   assert.ok(Math.abs(h[RAY(90)] - 22000) < 150, 'on bearing ' + h[RAY(90)]);
   assert.ok(Math.abs(h[RAY(85)] - 22000) < 150 && Math.abs(h[RAY(95)] - 22000) < 150, 'one ray off ' + h[RAY(85)] + ' ' + h[RAY(95)]);
   assert.ok(Math.abs(h[RAY(80)] - 22000 * (1 - 5 / 6.25)) < 400, '10° off ' + h[RAY(80)]);
@@ -330,7 +330,7 @@ test('the hull spans a terrain notch from the directions either side of it', () 
 });
 
 test('a far link\'s tip is a corner of the area', () => {
-  const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
+  const lobe = plain(SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0')));
   const rings = SC.scopeHull([SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)]);
   const tip = offset(HOME.lat, HOME.lon, 22000, 0);
   assert.ok(rings[0].some(p => metres([tip.lat, tip.lon], p) < 60), 'no vertex at the lobe tip');
@@ -345,7 +345,7 @@ test('a linked node off the 5° rays is still inside, with room past it, in both
     const t = deg * Math.PI / 180;
     const far = Object.assign({ public_key: 'p1' }, offset(HOME.lat, HOME.lon, 30000 * Math.sin(t), 30000 * Math.cos(t)));
     const past = offset(HOME.lat, HOME.lon, 31500 * Math.sin(t), 31500 * Math.cos(t));
-    const lobe = SC.linkReach([HOME, far], [two('h0', 'p1')]).lobes.get('h0');
+    const lobe = SC.lobeOf(SC.linkReach([HOME, far], [two('h0', 'p1')]).links.get('h0'));
     const shape = SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000);
     for (const [view, rings] of [['hull', SC.scopeHull([shape])], ['detailed', SC.wrapShapes([shape])]]) {
       assert.ok(SC.inRings(rings, far.lat, far.lon), view + ': partner at ' + deg + '° is outside');
@@ -410,7 +410,7 @@ function assertAround(rings, n, m, label) {
 
 test('the hull with a 2 km margin: 2 km past the bare hull everywhere, corners rounded', () => {
   const r = SC.linkReach([HOME, EAST, FAR], [two('h0', 'e1'), two('h0', 'f1')]);
-  const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, r.lobes.get(n.public_key), 1000), 1000));
+  const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, SC.lobeOf(r.links.get(n.public_key)), 1000), 1000));
   const bare = SC.scopeHull(shapes)[0], rings = SC.scopeHull(shapes, 2000), ring = rings[0];
   assert.strictEqual(rings.length, 1);
   for (const p of ring) {
@@ -424,7 +424,7 @@ test('the hull with a 2 km margin: 2 km past the bare hull everywhere, corners r
 });
 
 test('Detailed with a 2 km margin: about 2 km past the bare area, a lobe tip rounded', () => {
-  const lobe = SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0');
+  const lobe = SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0'));
   const shapes = [SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)];
   const bare = SC.wrapShapes(shapes), rings = SC.wrapShapes(shapes, undefined, 2000);
   assert.strictEqual(rings.length, 1);
@@ -459,7 +459,7 @@ test('the overlay draws both views with the 2 km margin: 3 km round a lone repea
 
 test('linked nodes sit inside the area they extend', () => {
   const r = SC.linkReach([HOME, EAST, FAR], [two('h0', 'e1'), two('h0', 'f1')]);
-  const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, r.lobes.get(n.public_key), 1000), 1000));
+  const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, SC.lobeOf(r.links.get(n.public_key)), 1000), 1000));
   const rings = SC.scopeHull(shapes);
   for (const n of [HOME, EAST, FAR]) assert.ok(SC.inRings(rings, n.lat, n.lon), n.public_key + ' outside its own area');
 });
@@ -525,7 +525,7 @@ test('distant clusters keep full resolution', () => {
 test('the outline follows the reach: cut by terrain west, radius north, a lobe east', () => {
   const cut = new Float64Array(SC.sectors).fill(30000);
   for (let d = 225; d <= 315; d += 5) cut[RAY(d)] = 2000;
-  const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
+  const lobe = plain(SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0')));
   const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(8000, cut, lobe, 1000), 1000)]);
   assert.strictEqual(rings.length, 1);
   const west = reachToward(rings, HOME, 270), north = reachToward(rings, HOME, 0), east = reachToward(rings, HOME, 90);
@@ -556,7 +556,7 @@ test('an edge slanting across the rays (a ridge line) is not pushed out', () => 
 });
 
 test('a lone link\'s lobe is narrow and stays attached to its 1 km circle', () => {
-  const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
+  const lobe = plain(SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0')));
   const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)]);
   assert.strictEqual(rings.length, 1, 'the lobe came loose from the circle');
   const on = reachToward(rings, HOME, 90), off = reachToward(rings, HOME, 80), far = reachToward(rings, HOME, 70);
@@ -643,7 +643,7 @@ test('a lone repeater\'s spokes are wrapped: the notch between them is filled wh
 });
 
 test('a long link lobe stays a lobe: no big triangle toward its tip', () => {
-  const lobe = plain(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).lobes.get('h0'));
+  const lobe = plain(SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0')));
   const shapes = [SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000), SC.shapeFor(NORTH, null, 1000)];
   const wrap = SC.wrapShapes(shapes), hull = SC.scopeHull(shapes);
   const between = offset(HOME.lat, HOME.lon, 11000, 3000);
@@ -1015,6 +1015,57 @@ test('an operator height (longest matching prefix) is sent instead, and requests
     assert.strictEqual(h.antennaM, 25, 'the longer prefix should win');
     assert.ok(!h.links, 'links sent despite a set height');
   });
+});
+
+// Phlm.sh Amon Dîn's case: a repeater whose long links are all to hilltop
+// repeaters in none of its areas. Five neighbours 1 km round it keep its
+// radius at 1.1 km; PEAK, 40 km east, would stretch a 44 km lobe.
+const PEAK = Object.assign({ public_key: 'pk' }, offset(HOME.lat, HOME.lon, 40000, 0));
+const NEARS = [0, 72, 144, 216, 288].map((d, i) => Object.assign({ public_key: 'nb' + i },
+  offset(HOME.lat, HOME.lon, 1000 * Math.sin(d * Math.PI / 180), 1000 * Math.cos(d * Math.PI / 180))));
+const PEAK_LINKS = NEARS.map(n => two('h0', n.public_key)).concat([two('h0', 'pk')]);
+function areaOf(o, rec, scope) { o.setOnly(scope); return rec.polygons[rec.polygons.length - 1].rings; }
+
+test('a link to a repeater outside the area does not stretch it, in both views', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, sync);
+  o.setVisible(true);
+  o.setLinks(PEAK_LINKS);
+  o.setNodes([Object.assign({ default_scope: '#solo' }, HOME), Object.assign({ transported_scopes: ['#peak'] }, PEAK)].concat(NEARS));
+  for (const view of ['hull', 'detailed']) {
+    o.setView(view);
+    const east = reachToward(areaOf(o, rec, 'solo'), HOME, 90);
+    assert.ok(east < 1100 + SC.areaMarginM + 400, view + ': stretched toward a partner in another area, east ' + east);
+  }
+});
+
+test('a link to a repeater in the same area still stretches it past the partner', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, sync);
+  o.setVisible(true);
+  o.setLinks(PEAK_LINKS);
+  o.setNodes([Object.assign({ default_scope: '#solo' }, HOME), Object.assign({ default_scope: '#solo' }, PEAK)].concat(NEARS));
+  for (const view of ['hull', 'detailed']) {
+    o.setView(view);
+    const rings = areaOf(o, rec, 'solo');
+    const past = offset(PEAK.lat, PEAK.lon, 1500, 0);
+    assert.ok(SC.inRings(rings, past.lat, past.lon), view + ': no room past the partner');
+  }
+});
+
+test('a repeater in two areas is shaped for each: only partners in that area count', () => {
+  // #b: PEAK is configured for it but not seen carrying it, a separate area.
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, sync);
+  o.setVisible(true);
+  o.setLinks(PEAK_LINKS);
+  o.setNodes([Object.assign({ transported_scopes: ['#a', '#b'] }, HOME),
+    Object.assign({ transported_scopes: ['#a'], default_scope: '#b' }, PEAK)].concat(NEARS));
+  const a = areaOf(o, rec, 'a');
+  assert.ok(SC.inRings(a, PEAK.lat, PEAK.lon), '#a: its partner is outside');
+  o.setOnly('b');
+  const bObserved = ofKind(rec, 'observed').pop().rings;
+  assert.ok(reachToward(bObserved, HOME, 90) < 1100 + SC.areaMarginM + 400, '#b carried: stretched toward a configured-only partner');
 });
 
 test('a new link changes what the height is estimated from, so it is asked again', () => {
@@ -1568,7 +1619,12 @@ function timeRebuild(view) {
 }
 
 // Targets per view; the assertion allows twice that for slower CI runners.
-[['hull', 30], ['detailed', 260]].forEach(([view, target]) => {
+// Detailed rose from 260 ms when lobes started counting only toward
+// partners in the same area: none of this mesh's partners are in one (2% on
+// a real 190-node instance), so members merge into fewer clusters (512 grids
+// rather than 296) and small reaches get finer cells (11.2M vertices rather
+// than 4.9M).
+[['hull', 30], ['detailed', 400]].forEach(([view, target]) => {
   test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes, ' + view + ' view: median rebuild within budget', () => {
     const r = timeRebuild(view);
     console.log('     (median ' + r.median.toFixed(1) + ' ms over 5 runs (target ' + target + ' ms) for ' + r.computed + ' outlines over ' + r.links + ' links; cached rebuild ' + r.cachedMs.toFixed(1) + ' ms)');

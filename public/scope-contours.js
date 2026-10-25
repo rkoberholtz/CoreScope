@@ -18,10 +18,12 @@
    - The terrain cut is where line of sight over elevation data ends in that
      direction (terrain-reach.js). Real radios reach roughly a circle, trimmed
      where a ridge or valley shadows the ground.
-   - Each proven link still stretches its own bearing out past it: full
-     length within 5° (one ray) of it, so the partner is inside even between
-     two rays, tapering to nothing at ±11.25°. Evidence always beats the
-     model.
+   - Each proven link to a repeater in the same area still stretches its own
+     bearing out past it: full length within 5° (one ray) of it, so the
+     partner is inside even between two rays, tapering to nothing at
+     ±11.25°. Evidence always beats the model. A link to a repeater outside
+     the area (a hilltop site 60 km off) stretches nothing: it proves the two
+     ends hear each other, not that the ground between them is covered.
    Interpolating between the 72 directions keeps the shape smooth.
 
    A scope's outline is drawn in one of two views (setView), each built from
@@ -210,27 +212,18 @@
   //           percentile of its link distances × 1.1, clamped to 1-20 km.
   //           It ignores one exceptional long link and a crowd of close
   //           neighbours alike.
-  //   lobes:  Map pk → Float64Array(SECTORS), each link stretching its own
-  //           bearing out to its distance × 1.1: at full length on the rays
-  //           within 5° of it, so interpolating between them still reaches
-  //           past the partner, then tapering to nothing at ±11.25°. A
-  //           proven link always sits inside the outline.
+  //   links:  Map pk → [{ pk, bearing, len }], each link's partner, its
+  //           bearing and its distance × 1.1, for lobeOf.
   //   partners: Map pk → [{ lat, lon }] of the other ends, from which the
   //           terrain provider estimates the node's antenna height.
   function linkReach(nodes, edges) {
     var pos = new Map();
     (nodes || []).forEach(function (n) { var p = position(n); if (p && n.public_key) pos.set(n.public_key, p); });
-    var dists = new Map(), lobes = new Map(), partners = new Map();
+    var dists = new Map(), links = new Map(), partners = new Map();
     function partner(pk, p) { var l = partners.get(pk); if (l) l.push({ lat: p[0], lon: p[1] }); else partners.set(pk, [{ lat: p[0], lon: p[1] }]); }
-    function lobe(pk, bearing, len) {
-      var e = lobes.get(pk);
-      if (!e) { e = new Float64Array(SECTORS); lobes.set(pk, e); }
-      for (var i = 0; i < SECTORS; i++) {
-        var off = angleDiff(i * SECTOR_RAD, bearing);
-        if (off >= LOBE_HALF_RAD) continue;
-        var v = off <= SECTOR_RAD ? len : len * (1 - (off - SECTOR_RAD) / (LOBE_HALF_RAD - SECTOR_RAD));
-        if (v > e[i]) e[i] = v;
-      }
+    function link(pk, other, bearing, len) {
+      var l = links.get(pk), k = { pk: other, bearing: bearing, len: len };
+      if (l) l.push(k); else links.set(pk, [k]);
     }
     function dist(pk, d) { var l = dists.get(pk); if (l) l.push(d); else dists.set(pk, [d]); }
     (edges || []).forEach(function (e) {
@@ -244,8 +237,8 @@
       partner(e.source, b); partner(e.target, a);
       if (!(d > 0)) return;
       var fwd = Math.atan2(dx, dy);
-      lobe(e.source, fwd, d * LINK_MARGIN);
-      lobe(e.target, fwd + Math.PI, d * LINK_MARGIN);
+      link(e.source, e.target, fwd, d * LINK_MARGIN);
+      link(e.target, e.source, fwd + Math.PI, d * LINK_MARGIN);
     });
     var radius = new Map();
     dists.forEach(function (l, pk) {
@@ -253,7 +246,29 @@
       var r = percentile(l, RADIUS_PCT) * LINK_MARGIN;
       radius.set(pk, Math.min(MAX_RADIUS_M, Math.max(MIN_RADIUS_M, r)));
     });
-    return { radius: radius, lobes: lobes, partners: partners };
+    return { radius: radius, links: links, partners: partners };
+  }
+
+  // lobeOf stretches each of a node's links (from linkReach) along its own
+  // bearing out to its distance × 1.1: at full length on the rays within 5°
+  // of it, so interpolating between them still reaches past the partner,
+  // then tapering to nothing at ±11.25°. Float64Array(SECTORS), or null
+  // with no links. The overlay passes only the links to partners in the
+  // same area: a link proves the two ends hear each other, not that the
+  // ground between them is covered, so a lobe toward a hilltop repeater in
+  // another area would only inflate this one.
+  function lobeOf(links) {
+    if (!links || !links.length) return null;
+    var e = new Float64Array(SECTORS);
+    links.forEach(function (k) {
+      for (var i = 0; i < SECTORS; i++) {
+        var off = angleDiff(i * SECTOR_RAD, k.bearing);
+        if (off >= LOBE_HALF_RAD) continue;
+        var v = off <= SECTOR_RAD ? k.len : k.len * (1 - (off - SECTOR_RAD) / (LOBE_HALF_RAD - SECTOR_RAD));
+        if (v > e[i]) e[i] = v;
+      }
+    });
+    return e;
   }
 
   // reachFor combines the three into per-sector reach:
@@ -1282,7 +1297,7 @@
     var nodes = [];
     var links = null;
     var reach = null;       // linkReach(nodes, links), rebuilt when either changes
-    var shapes = new Map(); // pubkey → { shape, key, edge }, rebuilt with reach
+    var shapes = new Map(); // pubkey → Map(area partners → { shape, key, edge }), rebuilt with reach
     var edgeCache = new Map(); // shape key → sampled edge, kept across rebuilds while used
     var terrain = new Map(); // pubkey → { key, ext, meta } from the terrain provider
     var heights = null;      // operator antenna heights, { key: metres }; null until loaded
@@ -1329,17 +1344,25 @@
         (h ? 'a' + h : 'L' + partnersOf(n).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4); }).sort().join(';'));
     }
 
-    // A node in several scopes is shaped once.
-    function shaped(n) {
-      var e = shapes.get(n.public_key);
+    // A node's shape in one area (area: Set of its members' pubkeys): lobes
+    // only toward its partners in that area. Shaped once per set of such
+    // partners, so a node in several areas with the same partners in each
+    // is shaped once.
+    function shaped(n, area) {
+      var own = (reach && reach.links.get(n.public_key)) || [];
+      var inArea = own.filter(function (k) { return area.has(k.pk); });
+      var sub = inArea.map(function (k) { return k.pk; }).sort().join(',');
+      var byArea = shapes.get(n.public_key);
+      if (!byArea) { byArea = new Map(); shapes.set(n.public_key, byArea); }
+      var e = byArea.get(sub);
       if (!e) {
         var t = terrain.get(n.public_key);
         var cut = t && t.key === terrainKey(n) ? t.ext : null;
-        var s = shapeFor(n, reachFor(radiusOf(n), cut, reach && reach.lobes.get(n.public_key), floorM), floorM);
+        var s = shapeFor(n, reachFor(radiusOf(n), cut, lobeOf(inArea), floorM), floorM);
         var key = shapeKey(n, s), edge = edgeCache.get(key);
         if (!edge) { edge = shapeEdge(s); edgeCache.set(key, edge); }
         e = { shape: s, key: key, edge: edge };
-        shapes.set(n.public_key, e);
+        byArea.set(sub, e);
       }
       return e;
     }
@@ -1392,7 +1415,8 @@
     }
 
     function rings(scope, kind, members) {
-      var entries = members.map(shaped);
+      var area = new Set(members.map(function (n) { return n.public_key; }));
+      var entries = members.map(function (n) { return shaped(n, area); });
       var key = view + '|' + scope + '|' + kind;
       // Order-free and cheap: how many members, and the sum and xor of a hash
       // of each member's key.
@@ -1468,7 +1492,7 @@
       // Bounded the same way: only the edges this render used survive.
       if (visible) {
         var used = new Set();
-        shapes.forEach(function (e) { used.add(e.key); });
+        shapes.forEach(function (byArea) { byArea.forEach(function (e) { used.add(e.key); }); });
         Array.from(edgeCache.keys()).forEach(function (k) { if (!used.has(k)) edgeCache.delete(k); });
       }
       if (visible) requestTerrain(members);
@@ -1639,10 +1663,10 @@
     hull: 'Each area spans the farthest reach of its repeaters, at least ' + ((DEFAULT_FLOOR_M + AREA_MARGIN_M) / 1000) + ' km round each.',
     detailed: 'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least ' + ((DEFAULT_FLOOR_M + AREA_MARGIN_M) / 1000) + ' km round each.',
   };
-  var TERRAIN_NOTE = 'A repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links. ' +
+  var TERRAIN_NOTE = 'A repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links within its area. ' +
     'Antenna heights are the operator\'s where set; otherwise 10 m, raised where a repeater\'s links need more (click an outline to see them). ' +
     'Terrain: AWS Terrain Tiles (Mapzen; SRTM, USGS 3DEP and others), bare earth: buildings and trees are not in it.';
-  var NO_TERRAIN_NOTE = 'Terrain unavailable: a repeater\'s range comes from its two-way links, stretched to proven links, with no terrain trimming.';
+  var NO_TERRAIN_NOTE = 'Terrain unavailable: a repeater\'s range comes from its two-way links, stretched to proven links within its area, with no terrain trimming.';
 
   function listHtml(items, opts, info) {
     var rows = items.map(function (it) {
@@ -1762,6 +1786,7 @@
     configuredScopes: configuredScopes,
     scopePopupHtml: scopePopupHtml,
     linkReach: linkReach,
+    lobeOf: lobeOf,
     reachFor: reachFor,
     noLinkRadius: NO_LINK_RADIUS_M,
     shapeFor: shapeFor,
