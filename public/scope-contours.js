@@ -5,10 +5,12 @@
 
    - observed: nodes whose full pubkey appears in the path of traffic for the
      scope (transported_scopes, #1751/#1902). Drawn solid.
-   - configured only: nodes configured for the region (configuredScopes: its
-     default scope, the regions an observer reported it allows, or its own
-     declared list) but not seen carrying it. Drawn dashed, because
-     configuration is not evidence of reach.
+   - configured: drawn when some nodes are configured for the region
+     (configuredScopes: its default scope, the regions an observer reported
+     it allows, or its own declared list) but not seen carrying it. The
+     scope's whole extent, those nodes and the observed ones together, so
+     it extends the solid area rather than overlapping it. Drawn dashed,
+     under the solid one, because configuration is not evidence of reach.
 
    A node's reach, in 72 directions (reachFor):
      max( min(R, terrain cut), link lobe, 1 km floor )
@@ -1467,7 +1469,7 @@
       var el = poly.getElement && poly.getElement();
       if (el && el.setAttribute) el.setAttribute('data-scope', scope);
       var boxes = r.map(function (ring) { return ringsBounds([ring]); });
-      hits.push({ scope: scope, polys: [poly], rings: r, boxes: boxes, bounds: ringsBounds(r), text: text });
+      hits.push({ scope: scope, kind: kind, polys: [poly], rings: r, boxes: boxes, bounds: ringsBounds(r), text: text });
       return poly;
     }
 
@@ -1493,13 +1495,18 @@
         g.configuredOnly.forEach(function (n) { members.add(n); });
         var name = '#' + escapeHtml(scope);
         var polys = [];
+        // The dashed area is the scope's whole extent, carrying members and
+        // configured ones together, drawn first so the solid one sits on it.
+        if (g.configuredOnly.length) {
+          var all = g.observed.concat(g.configuredOnly);
+          var pc = draw(scope, 'configured', all, g.observed.length
+            ? name + ' · ' + plural(all.length) + ', ' + g.configuredOnly.length + ' not yet seen carrying it'
+            : name + ' · configured on ' + plural(all.length) + ', not yet seen carrying it');
+          if (pc) polys.push(pc);
+        }
         if (g.observed.length) {
           var po = draw(scope, 'observed', g.observed, name + ' · carried by ' + plural(g.observed.length));
           if (po) polys.push(po);
-        }
-        if (g.configuredOnly.length) {
-          var pc = draw(scope, 'configured', g.configuredOnly, name + ' · configured on ' + plural(g.configuredOnly.length) + ', not yet seen carrying it');
-          if (pc) polys.push(pc);
         }
         if (polys.length) drawn.set(scope, polys);
       });
@@ -1550,10 +1557,16 @@
       var found = hitsAt(ll);
       clearHover();
       if (!found.length) return;
-      found.forEach(function (h) { hovered = hovered.concat(h.polys); });
+      // One line a scope: inside its solid area, that one's; the dashed
+      // area around it lights up with it.
+      var lines = new Map();
+      found.forEach(function (h) {
+        hovered = hovered.concat(h.polys);
+        if (!lines.has(h.scope) || h.kind === 'observed') lines.set(h.scope, h.text);
+      });
       setClass(hovered, 'is-hovered', true);
       tip.setLatLng(ll);
-      tip.setContent(found.map(function (h) { return h.text; }).join('<br>'));
+      tip.setContent(Array.from(lines.values()).join('<br>'));
       map.openTooltip(tip);
     }
     function onMove(e) {

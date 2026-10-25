@@ -1068,6 +1068,74 @@ test('a repeater in two areas is shaped for each: only partners in that area cou
   assert.ok(reachToward(bObserved, HOME, 90) < 1100 + SC.areaMarginM + 400, '#b carried: stretched toward a configured-only partner');
 });
 
+// #m: HOME and its NEARS carry it; PEAK, 40 km east and linked to HOME, is
+// only configured for it.
+const MIXED = [Object.assign({ transported_scopes: ['#m'] }, HOME), Object.assign({ default_scope: '#m' }, PEAK)]
+  .concat(NEARS.map(n => Object.assign({ transported_scopes: ['#m'] }, n)));
+function mixedAreas(view, nodes) {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, sync);
+  o.setVisible(true);
+  o.setLinks(PEAK_LINKS);
+  o.setNodes(nodes || MIXED);
+  o.setView(view);
+  const dashed = ofKind(rec, 'configured').pop();
+  return { o, map, rec, solid: ofKind(rec, 'observed').pop().rings, dashed: dashed && dashed.rings };
+}
+
+test('a scope\'s dashed area is its whole extent: it contains every member and the solid area', () => {
+  for (const view of ['hull', 'detailed']) {
+    const { solid, dashed } = mixedAreas(view);
+    MIXED.forEach(n => assert.ok(SC.inRings(dashed, n.lat, n.lon), view + ': ' + n.public_key + ' outside the dashed area'));
+    // Every solid vertex, pulled 100 m toward HOME so it is off the line.
+    const pts = solid.flat();
+    const out = pts.filter(([lat, lon]) => {
+      const f = 1 - 100 / Math.max(100, metres([HOME.lat, HOME.lon], [lat, lon]));
+      return !SC.inRings(dashed, HOME.lat + (lat - HOME.lat) * f, HOME.lon + (lon - HOME.lon) * f);
+    });
+    assert.strictEqual(out.length, 0, view + ': ' + out.length + ' of ' + pts.length + ' solid points outside the dashed area');
+  }
+});
+
+test('in the dashed area a link between carrying and configured members stretches it; the solid area stays as it was', () => {
+  for (const view of ['hull', 'detailed']) {
+    const { solid, dashed } = mixedAreas(view);
+    const past = offset(PEAK.lat, PEAK.lon, 1500, 0);
+    assert.ok(SC.inRings(dashed, past.lat, past.lon), view + ': dashed area stops short of PEAK');
+    const without = mixedAreas(view, MIXED.filter(n => n.public_key !== PEAK.public_key)).solid;
+    assert.deepStrictEqual(ringPlain(solid), ringPlain(without), view + ': solid area changed by a configured-only member');
+  }
+});
+
+test('a scope only carried draws no dashed area; one only configured draws it from those members alone', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, sync);
+  o.setVisible(true);
+  o.setNodes(NODES);
+  rec.polygons.length = 0;
+  o.setOnly('ny');
+  assert.deepStrictEqual(rec.polygons.map(p => p.options.className.includes('mc-scope-area-observed')), [true]);
+  const li = areaOf(o, rec, 'li');
+  const alone = fakeLeaflet();
+  const o2 = SC.createOverlay(alone.L, alone.map, sync);
+  o2.setVisible(true);
+  o2.setNodes([NODES.find(n => n.public_key === 'a3')]);
+  assert.deepStrictEqual(ringPlain(areaOf(o2, alone.rec, 'li')), ringPlain(li));
+});
+
+test('the dashed area is drawn under the solid one; hover names the scope once, by the area under it', () => {
+  const { o, map, rec } = mixedAreas('hull');
+  rec.polygons.length = 0;
+  o.setOnly('m');
+  assert.deepStrictEqual(rec.polygons.map(p => p.options.className.includes('mc-scope-area-observed')), [false, true], 'dashed first, solid on top');
+  map.fire('mousemove', { latlng: { lat: HOME.lat, lng: HOME.lon } });
+  assert.strictEqual(rec.tip.content, '#m · carried by 6 nodes');
+  assert.strictEqual(rec.polygons.filter(p => p.getElement().classList.contains('is-hovered')).length, 2, 'both of the scope\'s areas lit');
+  const mid = offset(HOME.lat, HOME.lon, 20000, 0);
+  map.fire('mousemove', { latlng: { lat: mid.lat, lng: mid.lon } });
+  assert.strictEqual(rec.tip.content, '#m · 7 nodes, 1 not yet seen carrying it');
+});
+
 test('a new link changes what the height is estimated from, so it is asked again', () => {
   const { L, map } = fakeLeaflet();
   const t = fakeTerrain();
@@ -1125,8 +1193,10 @@ test('hovering names every scope under the cursor, highlights them, and escapes 
   assert.strictEqual(rec.tipOpen, true);
   assert.ok(/#nyc · carried by 2 nodes/.test(rec.tip.content), rec.tip.content);
   assert.ok(/#ny · carried by 1 node\b/.test(rec.tip.content), rec.tip.content);
+  assert.strictEqual(rec.tip.content.split('<br>').length, 2, 'one line a scope: ' + rec.tip.content);
+  // #nyc's solid area and the dashed one round it (a3 is configured for it), and #ny.
   const lit = rec.polygons.filter(p => p.getElement().classList.contains('is-hovered'));
-  assert.strictEqual(lit.length, 2);
+  assert.strictEqual(lit.length, 3);
   map.fire('mousemove', { latlng: { lat: 41.30, lng: -72.90 } });
   assert.ok(rec.tip.content.includes('#ct&lt;script&gt;') && !rec.tip.content.includes('<script>'), rec.tip.content);
   assert.strictEqual(rec.polygons.filter(p => p.getElement().classList.contains('is-hovered')).length, 1, 'previous highlight cleared');

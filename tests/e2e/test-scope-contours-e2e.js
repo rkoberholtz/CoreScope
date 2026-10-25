@@ -555,6 +555,52 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await ctx2.close();
   });
 
+  await step('a scope with configured repeaters draws its whole extent dashed, round the solid area', async () => {
+    const ctx3 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const p3 = await ctx3.newPage();
+    p3.on('pageerror', (e) => errors.push(e.message));
+    await serveTiles(p3, 'ok');
+    // Bay Edge: configured for #bay, not seen carrying it, 20 km south of
+    // Oakland, past the solid area's 12.8 km radius and clear of the map's
+    // control panel.
+    const nodes = NODES.concat([{ public_key: pk('a6'), name: 'Bay Edge', role: 'repeater', lat: 37.62, lon: -122.25, last_seen: now, hash_size: 1, default_scope: '#bay' }]);
+    await p3.route('**/api/**', (route) => {
+      const path = new URL(route.request().url()).pathname;
+      const json = (body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+      if (path === '/api/nodes') return json({ nodes, total: nodes.length, has_more: false, counts: {} });
+      if (path === '/api/analytics/neighbor-graph') return json({ nodes: [], edges: EDGES, stats: {} });
+      if (path === '/api/config/map') return json({ center: [37.785, -122.35], zoom: 11 });
+      return json({});
+    });
+    await p3.goto(BASE + '/#/map?contours=1', { waitUntil: 'load' });
+    await p3.waitForFunction(() => document.querySelectorAll('path.mc-scope-area[data-scope="bay"]').length === 2);
+    const r = await p3.evaluate(() => {
+      const [first, second] = document.querySelectorAll('path.mc-scope-area[data-scope="bay"]');
+      const box = (el) => el.getBoundingClientRect();
+      const a = box(first), b = box(second);
+      return { order: [first.classList.contains('mc-scope-area-configured'), second.classList.contains('mc-scope-area-observed')],
+        contains: a.left <= b.left + 1 && a.top <= b.top + 1 && a.right >= b.right - 1 && a.bottom >= b.bottom - 1 };
+    });
+    assert(r.order[0] && r.order[1], 'dashed #bay not drawn under the solid one');
+    assert(r.contains, 'dashed #bay does not enclose the solid one');
+    // 2 km south of Bay Edge: in the dashed area only.
+    const pt = await p3.evaluate(() => {
+      const m = window.__mc_map, c = m.latLngToContainerPoint([37.62 - 2 / 111.32, -122.25]), box = m.getContainer().getBoundingClientRect();
+      const x = box.left + c.x, y = box.top + c.y;
+      const inFill = (p) => p.isPointInFill(new DOMPoint(x, y).matrixTransform(p.getScreenCTM().inverse()));
+      // What is on top there: the map, not a control panel over it.
+      const top = document.elementFromPoint(x, y);
+      return { x, y, onMap: !!(top && top.closest('#leaflet-map')), dashed: inFill(document.querySelector('path.mc-scope-area-configured[data-scope="bay"]')),
+        solid: inFill(document.querySelector('path.mc-scope-area-observed[data-scope="bay"]')) };
+    });
+    assert(pt.dashed && !pt.solid && pt.onMap, 'test point not in the dashed area alone: ' + JSON.stringify(pt));
+    await p3.mouse.move(pt.x, pt.y);
+    await p3.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
+    const text = await p3.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent);
+    assert(/#bay · 3 nodes, 1 not yet seen carrying it/.test(text), 'tooltip: ' + text);
+    await ctx3.close();
+  });
+
   await step('no page errors', async () => {
     assert(errors.length === 0, errors.join(' | '));
   });
