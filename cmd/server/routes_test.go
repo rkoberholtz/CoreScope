@@ -2042,7 +2042,7 @@ func TestConfigMapWithCustomDefaults(t *testing.T) {
 	}
 }
 
-// The reach contours read per-repeater antenna heights from here. Keys are
+// The region contours read per-repeater antenna heights from here. Keys are
 // pubkeys or unique hex prefixes (>= 8 chars), lowercased; anything that is
 // not hex or not a plausible height above ground is dropped.
 func TestConfigMapAntennaHeights(t *testing.T) {

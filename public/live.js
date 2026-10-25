@@ -62,7 +62,7 @@
   let matrixMode = localStorage.getItem('live-matrix-mode') === 'true';
   let matrixRain = localStorage.getItem('live-matrix-rain') === 'true';
   let colorByHash = localStorage.getItem('meshcore-color-packets-by-hash') !== 'false';
-  // Region scope reach contours (scope-contours.js). The overlay is made once
+  // Region contours (scope-contours.js). The overlay is made once
   // the map exists; until then the toggle only records the choice.
   let scopeContoursOn = localStorage.getItem('live-scope-contours') === 'true';
   let reachOverlay = null;
@@ -1307,7 +1307,7 @@
             <span id="favDesc" class="sr-only">Show only favorited and claimed nodes</span>
             <label><input type="checkbox" id="liveMultibyteToggle" aria-describedby="multibyteDesc"> Multibyte only</label>
             <span id="multibyteDesc" class="sr-only">Show only multibyte (≥2-byte path-hash) packets; hide unreliable single-byte traffic</span>
-            <label><input type="checkbox" id="liveScopeContoursToggle" aria-describedby="scopeContoursDesc"> Region scopes</label>
+            <label><input type="checkbox" id="liveScopeContoursToggle" aria-describedby="scopeContoursDesc"> Region contours</label>
             <span id="scopeContoursDesc" class="sr-only">Outline the reach of each region scope; an outline flashes when one of its packets arrives</span>
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Mesh live area</label>
             </div>
@@ -1410,7 +1410,7 @@
       </div>`;
 
     // ?contours=1|0 overrides the stored toggle, so a shared link opens with
-    // the reach contours as the sender had them.
+    // the region contours as the sender had them.
     const contoursFlag = window.ScopeContours ? window.ScopeContours.hashFlag(location.hash) : null;
     if (contoursFlag !== null) scopeContoursOn = contoursFlag;
     // Controls are wired BEFORE any await below -- see wireLiveControls().

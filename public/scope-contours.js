@@ -1,4 +1,4 @@
-/* Region scope reach contours for the map and live pages.
+/* Region contours for the map and live pages: where each region scope reaches.
 
    For each MeshCore region scope, outline the general area its nodes reach:
    one area per scope, from every node that is configured for it

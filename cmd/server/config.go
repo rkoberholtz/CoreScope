@@ -102,7 +102,7 @@ type Config struct {
 		Zoom   int       `json:"zoom"`
 		// AntennaHeights: metres above ground of repeater antennas the
 		// operator knows, by pubkey or unique hex prefix (>= 8 chars). The
-		// region-scope reach contours use it in place of their estimate.
+		// region contours use it in place of their estimate.
 		AntennaHeights map[string]float64 `json:"antennaHeights,omitempty"`
 	} `json:"mapDefaults"`
 

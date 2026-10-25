@@ -5878,8 +5878,7 @@ body.embed #app.app-fixed {
 .mc-est-facts dt { color: var(--text-muted); }
 .mc-est-facts dd { margin: 0; }
 
-/* Region scope reach contours (scope-contours.js). Solid: nodes seen carrying
- * the scope's traffic. Dashed: nodes configured for it but not seen carrying it. Each scope takes
+/* Region contours (scope-contours.js): one area per region scope. Each scope takes
  * one of eight colours, picked from its name so it keeps it everywhere. Paul
  * Tol's "muted" palette: told apart under the common colour-vision
  * deficiencies, and none of them is a role colour. The live page pulses a
@@ -5900,10 +5899,10 @@ path.mc-scope-area.is-hovered { stroke-width: 3; stroke-opacity: 1; fill-opacity
 /* One tooltip for every scope under the cursor (hit-tested in JS, since the
  * outlines take no pointer events). */
 .leaflet-tooltip.mc-scope-tip { font-size: 12px; line-height: 1.45; }
-/* Show/hide list: under Reach contours on the map, in the legend on live. */
+/* Show/hide list: under Region contours on the map, in the legend on live. */
 .mc-scope-list { margin: 4px 0 0 20px; font-size: 12px; }
 .mc-scope-list[hidden] { display: none; }
-/* Area shape picker: Convex Hull, Detailed. Under Reach contours on the
+/* Area shape picker: Convex Hull, Detailed. Under Region contours on the
  * map, under REGION SCOPES in the legend on live. */
 .mc-scope-view { margin: 4px 0 0 20px; font-size: 12px; }
 .live-legend .mc-scope-list, .live-legend .mc-scope-view { margin-left: 0; }

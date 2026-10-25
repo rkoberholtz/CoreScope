@@ -788,7 +788,7 @@ const (
 	minAntennaKeyLen  = 8
 )
 
-// cleanAntennaHeights keeps the entries the reach contours can use: keys
+// cleanAntennaHeights keeps the entries the region contours can use: keys
 // that are hex pubkeys or prefixes long enough to identify a node,
 // lowercased; heights in a plausible range. nil when nothing is left, so the
 // response omits the field.

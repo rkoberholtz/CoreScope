@@ -8,7 +8,7 @@
   // Estimated positions of repeaters known only from their reported name
   // (map-estimated.js). A layer of its own: never clustered with real markers.
   let estimatedLayer = null;
-  // Region scope reach contours (scope-contours.js): owns its own layer,
+  // Region contours (scope-contours.js): owns its own layer,
   // pane and cache. Computes nothing while the toggle is off.
   let reachOverlay = null;
   let reported = { nodes: [], method: null };
@@ -177,7 +177,7 @@
   // repeater that holds a region shows no traffic for it until some passes
   // its way. The hint under the picker says so.
 
-  // normRegion and nodeRegionEvidence are shared with the reach contours
+  // normRegion and nodeRegionEvidence are shared with the region contours
   // (scope-contours.js), so the filter and the outlines agree on which nodes
   // belong to a region. Looked up at call time.
   function normRegion(s) { return window.ScopeContours.normRegion(s); }
@@ -531,7 +531,7 @@
             <label for="mcRegionFilter" class="sr-only">Show nodes with evidence for a region scope</label>
             <select id="mcRegionFilter" title="Show nodes that declare a region scope or were seen carrying its traffic">${regionFilterOptionsHtml([], filters.regionScope)}</select>
             <div id="mcRegionHint" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
-            <label for="mcScopeContours" title="Outline where each region scope's repeaters reach: each one's range from its two-way links, trimmed by line of sight over terrain and stretched to proven links within its area. Each area covers the repeaters configured for the scope or seen carrying its traffic. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Reach contours</label>
+            <label for="mcScopeContours" title="Outline where each region scope reaches: each repeater's range from its two-way links, trimmed by line of sight over terrain and stretched to proven links within its area. Each area covers the repeaters configured for the scope or seen carrying its traffic. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Region contours</label>
             <div id="mcScopeView" class="mc-scope-view" hidden></div>
             <div id="mcScopeList" class="mc-scope-list" hidden></div>
           </fieldset>
@@ -607,7 +607,7 @@
     // If navigated with ?node=PUBKEY, highlight that node after markers load
     targetNodeKey = urlParams.get('node') || null;
     // ?contours=1|0 overrides the stored toggle, so a shared link opens with
-    // the reach contours as the sender had them.
+    // the region contours as the sender had them.
     const contoursFlag = window.ScopeContours ? window.ScopeContours.hashFlag(location.hash) : null;
     if (contoursFlag !== null) filters.scopeContours = contoursFlag;
 

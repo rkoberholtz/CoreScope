@@ -1,12 +1,12 @@
 /**
- * E2E: region scope reach contours (scope-contours.js) on the map and live
+ * E2E: region contours (scope-contours.js) on the map and live
  * pages.
  *
  * Each region scope gets an outline of the area its nodes are proven to reach,
  * following their two-way links (the neighbor graph), one solid area per
  * scope from the nodes seen carrying its traffic (transported_scopes) or
  * configured for it (default_scope, configured_scope, declared_regions).
- * Clicking inside outlines lists each scope's repeaters. The "Reach contours" toggle draws them,
+ * Clicking inside outlines lists each scope's repeaters. The "Region contours" toggle draws them,
  * ?contours=1 deep-links them, the Region Scope picker narrows them to one
  * scope, a per-scope list shows and hides them (?contoursHide=), an area
  * shape picker on the map draws them as a Convex Hull or Detailed
@@ -96,7 +96,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
   page.on('pageerror', (e) => errors.push(e.message));
   let graphCalls = 0;
 
-  console.log(`\n=== Region scope reach contours E2E against ${BASE} ===`);
+  console.log(`\n=== Region contours E2E against ${BASE} ===`);
 
   await serveTiles(page, 'ok');
   await page.route('**/api/**', (route) => {
