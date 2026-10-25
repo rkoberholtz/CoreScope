@@ -1,16 +1,14 @@
 /* Region scope reach contours for the map and live pages.
 
    For each MeshCore region scope, outline the general area its nodes reach:
-   one area per scope and kind. Two kinds:
-
-   - observed: nodes whose full pubkey appears in the path of traffic for the
-     scope (transported_scopes, #1751/#1902). Drawn solid.
-   - configured: drawn when some nodes are configured for the region
-     (configuredScopes: its default scope, the regions an observer reported
-     it allows, or its own declared list) but not seen carrying it. The
-     scope's whole extent, those nodes and the observed ones together, so
-     it extends the solid area rather than overlapping it. Drawn dashed,
-     under the solid one, because configuration is not evidence of reach.
+   one area per scope, from every node that is configured for it
+   (configuredScopes: its default scope, the regions an observer reported
+   it allows, or its own declared list) or whose full pubkey appears in the
+   path of traffic for it (transported_scopes, #1751/#1902). A configured
+   node forwards the scope wherever it hears it, so it extends the scope's
+   reach whether or not an observer has happened to see it do so; being
+   seen carrying it is the only way in for a node whose configuration is
+   unknown. The click box still says which each member is.
 
    A node's reach, in 72 directions (reachFor):
      max( min(R, terrain cut), link lobe, 1 km floor )
@@ -1327,7 +1325,7 @@
     var only = '';
     var hidden = new Set();
     var view = VIEWS.indexOf(opts.view) >= 0 ? opts.view : VIEWS[0];
-    var cache = new Map(); // view|scope|kind → { sig, rings }; every view kept, so switching back is free
+    var cache = new Map(); // view|scope → { sig, rings }; every view kept, so switching back is free
     var drawn = new Map(); // scope → [polygon]
     var hits = [];         // [{ scope, polys, rings, boxes, bounds, text }] for hover
     var list = [];
@@ -1434,10 +1432,10 @@
       raf(function () { renderQueued = false; if (visible) render(); });
     }
 
-    function rings(scope, kind, members) {
+    function rings(scope, members) {
       var area = new Set(members.map(function (n) { return n.public_key; }));
       var entries = members.map(function (n) { return shaped(n, area); });
-      var key = view + '|' + scope + '|' + kind;
+      var key = view + '|' + scope;
       // Order-free and cheap: how many members, and the sum and xor of a hash
       // of each member's key.
       var sum = 0, xor = 0;
@@ -1460,16 +1458,16 @@
       return r;
     }
 
-    function draw(scope, kind, members, text) {
-      var r = rings(scope, kind, members);
+    function draw(scope, members, text) {
+      var r = rings(scope, members);
       if (!r.length) return null;
       var poly = L.polygon(r, { pane: PANE, renderer: renderer, interactive: false,
-        className: 'mc-scope-area mc-scope-area-' + kind + ' mc-reach-c' + colorIndex(scope) });
+        className: 'mc-scope-area mc-reach-c' + colorIndex(scope) });
       layer.addLayer(poly);
       var el = poly.getElement && poly.getElement();
       if (el && el.setAttribute) el.setAttribute('data-scope', scope);
       var boxes = r.map(function (ring) { return ringsBounds([ring]); });
-      hits.push({ scope: scope, kind: kind, polys: [poly], rings: r, boxes: boxes, bounds: ringsBounds(r), text: text });
+      hits.push({ scope: scope, polys: [poly], rings: r, boxes: boxes, bounds: ringsBounds(r), text: text });
       return poly;
     }
 
@@ -1485,30 +1483,13 @@
       var want = normRegion(only);
       list = [];
       groups.forEach(function (g, scope) {
-        list.push({ scope: scope, colour: colorIndex(scope), observed: g.observed.length, configured: g.configuredOnly.length, hidden: hidden.has(scope) });
-        VIEWS.forEach(function (v) {
-          if (g.observed.length) live.add(v + '|' + scope + '|observed');
-          if (g.configuredOnly.length) live.add(v + '|' + scope + '|configured');
-        });
+        var all = g.observed.concat(g.configuredOnly);
+        list.push({ scope: scope, colour: colorIndex(scope), nodes: all.length, carrying: g.observed.length, hidden: hidden.has(scope) });
+        VIEWS.forEach(function (v) { live.add(v + '|' + scope); });
         if ((want && scope !== want) || hidden.has(scope)) return;
-        g.observed.forEach(function (n) { members.add(n); });
-        g.configuredOnly.forEach(function (n) { members.add(n); });
-        var name = '#' + escapeHtml(scope);
-        var polys = [];
-        // The dashed area is the scope's whole extent, carrying members and
-        // configured ones together, drawn first so the solid one sits on it.
-        if (g.configuredOnly.length) {
-          var all = g.observed.concat(g.configuredOnly);
-          var pc = draw(scope, 'configured', all, g.observed.length
-            ? name + ' · ' + plural(all.length) + ', ' + g.configuredOnly.length + ' not yet seen carrying it'
-            : name + ' · configured on ' + plural(all.length) + ', not yet seen carrying it');
-          if (pc) polys.push(pc);
-        }
-        if (g.observed.length) {
-          var po = draw(scope, 'observed', g.observed, name + ' · carried by ' + plural(g.observed.length));
-          if (po) polys.push(po);
-        }
-        if (polys.length) drawn.set(scope, polys);
+        all.forEach(function (n) { members.add(n); });
+        var poly = draw(scope, all, '#' + escapeHtml(scope) + ' · ' + plural(all.length));
+        if (poly) drawn.set(scope, [poly]);
       });
       list.sort(function (a, b) { return a.scope < b.scope ? -1 : (a.scope > b.scope ? 1 : 0); });
       // Bounded by the scopes in the current node list: a scope that left it
@@ -1557,16 +1538,10 @@
       var found = hitsAt(ll);
       clearHover();
       if (!found.length) return;
-      // One line a scope: inside its solid area, that one's; the dashed
-      // area around it lights up with it.
-      var lines = new Map();
-      found.forEach(function (h) {
-        hovered = hovered.concat(h.polys);
-        if (!lines.has(h.scope) || h.kind === 'observed') lines.set(h.scope, h.text);
-      });
+      found.forEach(function (h) { hovered = hovered.concat(h.polys); });
       setClass(hovered, 'is-hovered', true);
       tip.setLatLng(ll);
-      tip.setContent(Array.from(lines.values()).join('<br>'));
+      tip.setContent(found.map(function (h) { return h.text; }).join('<br>'));
       map.openTooltip(tip);
     }
     function onMove(e) {
@@ -1702,14 +1677,11 @@
   function listHtml(items, opts, info) {
     var rows = items.map(function (it) {
       var name = escapeHtml(it.scope);
-      var count = it.observed ? String(it.observed) : it.configured + ' configured';
-      var title = it.observed
-        ? '#' + name + ': carried by ' + plural(it.observed) + (it.configured ? ', configured on ' + it.configured + ' more' : '')
-        : '#' + name + ': configured on ' + plural(it.configured) + ', not yet seen carrying it';
+      var title = '#' + name + ': ' + plural(it.nodes) + ', ' + (it.carrying ? it.carrying + ' seen carrying it' : 'none seen carrying it yet');
       return '<label class="mc-scope-row" title="' + title + '">' +
         '<input type="checkbox" data-scope="' + name + '"' + (it.hidden ? '' : ' checked') + '> ' +
-        '<span class="mc-scope-swatch mc-reach-c' + it.colour + (it.observed ? '' : ' mc-scope-swatch--configured') + '" aria-hidden="true"></span> ' +
-        '#' + name + ' <span class="mc-scope-count">' + count + '</span></label>';
+        '<span class="mc-scope-swatch mc-reach-c' + it.colour + '" aria-hidden="true"></span> ' +
+        '#' + name + ' <span class="mc-scope-count">' + it.nodes + '</span></label>';
     }).join('');
     return (opts.titleHtml || '') +
       '<div class="filter-group mc-scope-list-actions"><button type="button" class="btn" data-scope-all>All</button> ' +
