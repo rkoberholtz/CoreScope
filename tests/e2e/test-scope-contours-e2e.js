@@ -263,11 +263,8 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     const sfPart = text.split('#sf')[1];
     assert(sfPart.indexOf('SF Default') < sfPart.indexOf('SF One'), 'configured repeater not listed first: ' + sfPart);
     assert(/SF Default\s*default\s*carrying/.test(text), 'tags: ' + text);
-    // Mast heights the terrain model used: SF One's is set in config (by a
-    // 12-char prefix); SF Two's link to Oakland crosses flat ground, which
-    // needs no more than the assumed 10 m.
-    assert(/SF One\s*carrying\s*30 m mast \(set\)/.test(text), 'set mast: ' + text);
-    assert(/SF Two\s*carrying\s*10 m mast/.test(text), 'assumed mast: ' + text);
+    // The terrain model's antenna heights are an estimate, left out.
+    assert(!/mast/.test(text), 'antenna height in the click box: ' + text);
     const href = await page.$$eval('.mc-scope-popup .mc-scope-pop-scope', (els) => {
       const sf = els.find((el) => /#sf\b/.test(el.textContent));
       return sf && sf.querySelector('a').getAttribute('href');
