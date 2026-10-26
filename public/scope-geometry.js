@@ -49,7 +49,8 @@
   // or one per sector for a plain circle (a 5° chord sits 0.1% inside the
   // arc). Between samples the edge bulges out by about 0.1% of the reach,
   // too little to see. Sampled once per member and shared between the
-  // scopes it is in. null for an unusable shape.
+  // scopes it is in. star: its points go round the node in bearing order
+  // (hullOfStar). null for an unusable shape.
   function shapeEdge(shape) {
     if (!shape || !isFinite(shape.lat) || !isFinite(shape.lon) || !(shape.minExt > 0)) return null;
     var n = SECTORS * (shape.uniform ? 1 : BOUNDARY_PER_SECTOR);
@@ -62,7 +63,34 @@
       if (la < box[0]) box[0] = la; if (la > box[1]) box[1] = la;
       if (lo < box[2]) box[2] = lo; if (lo > box[3]) box[3] = lo;
     }
-    return { pts: pts, box: box };
+    return { pts: pts, box: box, star: true };
+  }
+
+  // hullOfStar is the convex hull of one shape's edge, without a sort: its
+  // points go round the node in bearing order, and the node is inside the
+  // shape (every reach is at least the floor), so a Graham scan from the
+  // lowest point (on the hull) walks them in angular order already. O(n).
+  // The same ring as hullOfEdges gives for that edge, up to where it starts.
+  function hullOfStar(edge) {
+    var p = edge.pts, n = p.length / 2, i;
+    if (n < 3) return [];
+    var kx = Math.cos(((edge.box[0] + edge.box[1]) / 2) * Math.PI / 180);
+    var xs = new Float64Array(n), ys = new Float64Array(n), lo = 0;
+    for (i = 0; i < n; i++) {
+      ys[i] = p[2 * i]; xs[i] = p[2 * i + 1] * kx;
+      if (ys[i] < ys[lo] || (ys[i] === ys[lo] && xs[i] < xs[lo])) lo = i;
+    }
+    function cross(o, a, b) { return (xs[a] - xs[o]) * (ys[b] - ys[o]) - (ys[a] - ys[o]) * (xs[b] - xs[o]); }
+    // Bearings run clockwise; walk them backwards, counter-clockwise like
+    // the monotone chain, keeping left turns.
+    var hull = [];
+    for (var c = 0; c <= n; c++) {
+      var j = (lo - c + n) % n;
+      while (hull.length >= 2 && cross(hull[hull.length - 2], hull[hull.length - 1], j) <= 0) hull.pop();
+      hull.push(j);
+    }
+    hull.pop();
+    return hull.length >= 3 ? hull.map(function (j) { return [ys[j], xs[j] / kx]; }) : [];
   }
 
   // hullOfEdges is the convex hull of all the edges' points as one ring of
@@ -75,6 +103,7 @@
   // three distinct points.
   function hullOfEdges(edges) {
     edges = edges.filter(Boolean);
+    if (edges.length === 1 && edges[0].star) return hullOfStar(edges[0]);
     var n = 0, lat0 = 0, e, i, k;
     for (e = 0; e < edges.length; e++) { n += edges[e].pts.length / 2; lat0 += (edges[e].box[0] + edges[e].box[1]) / 2; }
     if (n < 3) return [];
@@ -158,7 +187,8 @@
 
   // roundOut grows a convex ring by m metres all round: each edge pushed out
   // by m, joined round each corner by an arc of radius m (the ring's
-  // Minkowski sum with a disc), in steps of at most a sector. The arcs turn
+  // Minkowski sum with a disc), in steps of at most a sector, or by one
+  // mitred point where the corner turns a sector or less. The arcs turn
   // once round in all, so they add at most SECTORS points. The ring itself
   // when m is not positive.
   function roundOut(ring, m) {
@@ -170,17 +200,30 @@
     var xs = new Float64Array(n), ys = new Float64Array(n), area = 0;
     for (i = 0; i < n; i++) { xs[i] = ring[i][1] * kx; ys[i] = ring[i][0] * ky; }
     for (i = 0; i < n; i++) { var j = (i + 1) % n; area += xs[i] * ys[j] - xs[j] * ys[i]; }
-    // Outward is right of travel round a counter-clockwise ring, left round
-    // a clockwise one.
+    // Each edge's outward unit normal: right of travel round a
+    // counter-clockwise ring, left round a clockwise one.
     var s = area > 0 ? 1 : -1;
-    var normal = new Float64Array(n);
-    for (i = 0; i < n; i++) { var k = (i + 1) % n; normal[i] = Math.atan2(-(xs[k] - xs[i]) * s, (ys[k] - ys[i]) * s); }
+    var nx = new Float64Array(n), ny = new Float64Array(n);
+    for (i = 0; i < n; i++) {
+      var k = (i + 1) % n, dx = xs[k] - xs[i], dy = ys[k] - ys[i], len = Math.sqrt(dx * dx + dy * dy) || 1;
+      nx[i] = s * dy / len; ny[i] = -s * dx / len;
+    }
+    // A hair over a sector, so a circle's exact 5° corners count as shallow.
+    var cosSector = Math.cos(SECTOR_RAD * (1 + 1e-6));
     var out = [];
     for (i = 0; i < n; i++) {
-      var a1 = normal[(i + n - 1) % n], d = normal[i] - a1;
-      while (d > Math.PI) d -= 2 * Math.PI;
-      while (d <= -Math.PI) d += 2 * Math.PI;
-      var steps = Math.max(1, Math.ceil(Math.abs(d) / SECTOR_RAD));
+      var p = (i + n - 1) % n, ax = nx[p], ay = ny[p], bx = nx[i], by = ny[i];
+      var dot = ax * bx + ay * by;
+      if (dot >= cosSector) {
+        // A shallow corner (a sector or less): one mitred point on the
+        // bisector, m / cos(half the turn) out, rather than an arc. At most
+        // 1/cos(2.5°) - 1 = 0.1% further out, 2 m on a 2 km margin; no trig.
+        var f = m / (1 + dot);
+        out.push([(ys[i] + (ay + by) * f) / ky, (xs[i] + (ax + bx) * f) / kx]);
+        continue;
+      }
+      var a1 = Math.atan2(ay, ax), d = Math.atan2(ax * by - ay * bx, dot);
+      var steps = Math.ceil(Math.abs(d) / SECTOR_RAD);
       for (var t = 0; t <= steps; t++) {
         var a = a1 + d * t / steps;
         out.push([(ys[i] + m * Math.sin(a)) / ky, (xs[i] + m * Math.cos(a)) / kx]);
@@ -188,6 +231,7 @@
     }
     return out;
   }
+
 
   // ── Distance field (wrap and detailed views) ─────────────────────────────
 

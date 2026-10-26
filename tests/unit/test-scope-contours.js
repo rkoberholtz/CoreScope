@@ -219,6 +219,30 @@ test('a default scope the repeater\'s own list leaves out does not count', () =>
   assert.strictEqual(SC.configuredScopes({ role: 'repeater', default_scope: '#c', configured_scope: '*' }).size, 0);
 });
 
+test('linkedGroups splits members by the two-way links between them', () => {
+  const ns = [
+    { public_key: 'a', lat: 45, lon: -100.0 }, { public_key: 'b', lat: 45, lon: -99.9 },
+    { public_key: 'c', lat: 45, lon: -99.5 }, { public_key: 'd', lat: 45, lon: -99.4 },
+    { public_key: 'x', lat: 45, lon: -99.7 },
+    { public_key: 'e', lat: 46, lon: -99.0 }, { public_key: 'f', lat: 46, lon: -99.0 },
+  ];
+  const r = SC.linkReach(ns, [
+    { source: 'a', target: 'b', bidirectional: true },
+    { source: 'c', target: 'd', bidirectional: true },
+    // Through x, which is not a member: it forwards nothing for the scope.
+    { source: 'b', target: 'x', bidirectional: true }, { source: 'x', target: 'c', bidirectional: true },
+    { source: 'b', target: 'c', bidirectional: false },
+    { source: 'a', target: 'd', bidirectional: true, ambiguous: true },
+    // Co-located, still linked.
+    { source: 'e', target: 'f', bidirectional: true },
+  ]);
+  const members = ns.filter(n => n.public_key !== 'x');
+  const keys = gs => JSON.parse(JSON.stringify(gs.map(g => g.map(n => n.public_key))));
+  assert.deepStrictEqual(keys(SC.linkedGroups(members, r.peers)), [['a', 'b'], ['c', 'd'], ['e', 'f']]);
+  assert.deepStrictEqual(keys(SC.linkedGroups(members, null)), [['a'], ['b'], ['c'], ['d'], ['e'], ['f']], 'no links yet: each alone');
+  assert.deepStrictEqual(keys(SC.linkedGroups([], r.peers)), []);
+});
+
 test('the click box drops a stale carrying member and tags carrying only for listed scopes', () => {
   const nodes = [
     { public_key: 'p1', name: 'Listed', lat: 45.0, lon: -100.0, configured_scope: '*,#metro', transported_scopes: ['#metro', '#east-side'] },
@@ -794,7 +818,8 @@ function fakeLeaflet() {
       };
     },
     polygon(rings, opts) {
-      const el = { classList: classList() };
+      const attrs = {};
+      const el = { classList: classList(), setAttribute: (k, v) => { attrs[k] = String(v); }, getAttribute: k => attrs[k] };
       const p = { rings, options: opts, getElement: () => el };
       rec.polygons.push(p);
       return p;
@@ -831,6 +856,10 @@ const NODES = [
   { public_key: 'a3', lat: 40.90, lon: -73.50, declared_regions: ['nyc', 'li'] },
   { public_key: 'a4', lat: 41.30, lon: -72.90, transported_scopes: ['#ct<script>'] },
 ];
+// Links that make #nyc one area (a1, a2 and a3 carry or declare it).
+const NYC_LINKS = [two('a1', 'a2'), two('a2', 'a3')];
+// The polygons drawn by the last render.
+const drawnNow = o => Array.from(o.layer._layers);
 
 test('hidden overlay computes nothing and fetches no links', () => {
   const { L, map, rec } = fakeLeaflet();
@@ -842,10 +871,10 @@ test('hidden overlay computes nothing and fetches no links', () => {
   assert.strictEqual(loads, 0);
 });
 
-test('visible overlay draws one non-interactive outline per scope in its own SVG pane', () => {
+test('visible overlay draws one non-interactive outline per scope (members linked) in its own SVG pane', () => {
   const { L, map, rec } = fakeLeaflet();
   const o = SC.createOverlay(L, map, {});
-  o.setNodes(NODES);
+  o.setNodes(NODES); o.setLinks(NYC_LINKS);
   o.setVisible(true);
   assert.ok(rec.panes.mcScopeContoursPane, 'pane created');
   assert.ok(Number(rec.panes.mcScopeContoursPane.style.zIndex) < 600, 'pane sits under the marker pane');
@@ -895,7 +924,7 @@ test('links are loaded once shown, and change the shape', () => {
 test('setOnly narrows to one scope, regardless of # spelling', () => {
   const { L, map, rec } = fakeLeaflet();
   const o = SC.createOverlay(L, map, {});
-  o.setNodes(NODES); o.setVisible(true);
+  o.setNodes(NODES); o.setLinks(NYC_LINKS); o.setVisible(true);
   rec.polygons.length = 0;
   o.setOnly('#li');
   assert.strictEqual(rec.polygons.length, 1);
@@ -1016,8 +1045,8 @@ test('the floor is 1 km by default: the overlay keeps every member 1 km inside i
   const ns = [Object.assign({ transported_scopes: ['#x'] }, HOME), Object.assign({ transported_scopes: ['#x'] }, EAST)];
   o.setNodes(ns);
   return tick().then(() => {
-    const rings = rec.polygons[rec.polygons.length - 1].rings;
-    for (const n of ns) assertKmAround(rings, n, n.public_key);
+    // Unlinked: each in its own area.
+    for (const n of ns) assertKmAround(drawnNow(o).find(p => SC.inRings(p.rings, n.lat, n.lon)).rings, n, n.public_key);
   });
 });
 
@@ -1194,6 +1223,61 @@ test('the click box does not show the antenna height the terrain model used', ()
   });
 });
 
+// Two groups of a scope's repeaters with no two-way link between them: no
+// repeater forwarding the scope is known to bridge the gap, so the area must
+// not paint it.
+const WEST = [{ public_key: 'w1', name: 'West One', lat: 45, lon: -100.30 }, { public_key: 'w2', name: 'West Two', lat: 45, lon: -100.29 }];
+const EASTS = [{ public_key: 'x1', name: 'East One', lat: 45, lon: -100.00 }, { public_key: 'x2', name: 'East Two', lat: 45, lon: -99.99 }];
+const scoped = (ns, s) => ns.map(n => Object.assign({ transported_scopes: [s] }, n));
+
+test('unlinked groups of one scope get separate outlines, not one area over the gap, in both views', () => {
+  for (const view of ['hull', 'detailed']) {
+    const { L, map } = fakeLeaflet();
+    const o = SC.createOverlay(L, map, Object.assign({ view }, sync));
+    o.setNodes(scoped(WEST.concat(EASTS), '#us'));
+    o.setLinks([two('w1', 'w2'), two('x1', 'x2')]);
+    o.setVisible(true);
+    let polys = drawnNow(o);
+    assert.strictEqual(polys.length, 2, view + ': ' + polys.length + ' outlines');
+    assert.ok(polys.every(p => !SC.inRings(p.rings, 45, -100.145)), view + ': the gap is painted');
+    for (const n of WEST.concat(EASTS)) assert.ok(polys.some(p => SC.inRings(p.rings, n.lat, n.lon)), view + ': ' + n.name + ' outside');
+    assert.ok(polys.every(p => p.getElement().getAttribute('data-scope') === 'us'));
+    // A link across the gap joins them.
+    o.setLinks([two('w1', 'w2'), two('x1', 'x2'), two('w2', 'x1')]);
+    polys = drawnNow(o);
+    assert.strictEqual(polys.length, 1, view + ': linked, one outline');
+    assert.ok(SC.inRings(polys[0].rings, 45, -100.145), view + ': the linked gap is part of the area');
+  }
+});
+
+test('a split scope is hovered, pulsed and listed once, and the click box says how many groups', () => {
+  const { L, map, rec } = fakeLeaflet();
+  let now = 0; const timers = [];
+  const o = SC.createOverlay(L, map, Object.assign({ pulseMs: 100, setTimeout: (fn, ms) => { timers.push([now + ms, fn]); return timers.length; }, clearTimeout: () => {} }, sync));
+  // Close enough that the two areas overlap between them, still unlinked.
+  const near = [WEST[0], WEST[1], Object.assign({}, EASTS[0], { lon: -100.25 }), Object.assign({}, EASTS[1], { lon: -100.24 })];
+  o.setNodes(scoped(near, '#us'));
+  o.setLinks([two('w1', 'w2'), two('x1', 'x2')]);
+  o.setVisible(true);
+  assert.strictEqual(drawnNow(o).length, 2);
+  map.fire('mousemove', { latlng: { lat: 45, lng: -100.27 } });
+  assert.strictEqual(rec.tip.content, '#us · 4 nodes · 2 separate groups', rec.tip.content);
+  assert.strictEqual(drawnNow(o).filter(p => p.getElement().classList.contains('is-hovered')).length, 2, 'both groups lit');
+  o.pulse('#us');
+  assert.strictEqual(drawnNow(o).filter(p => p.getElement().classList.contains('is-pulsing')).length, 2, 'both groups pulse');
+  map.fire('click', { latlng: { lat: 45, lng: -100.27 }, sourceTarget: map });
+  const html = rec.popup.content;
+  assert.strictEqual(html.split('#us</strong>').length - 1, 1, 'listed once: ' + html);
+  assert.ok(/0 configured · 4 carrying · <span[^>]*title="[^"]*">2 separate groups<\/span>/.test(html), html);
+});
+
+test('the click box mentions groups only when a scope is split', () => {
+  const ns = scoped(WEST, '#us');
+  assert.ok(!/group/.test(SC.scopePopupHtml(['us'], ns)), 'no count given');
+  assert.ok(!/group/.test(SC.scopePopupHtml(['us'], ns, () => 1)), 'one group');
+  assert.ok(/3 separate groups/.test(SC.scopePopupHtml(['us'], ns, () => 3)));
+});
+
 test('the list says when terrain is unavailable or off, and credits the source when it is used', () => {
   const run = (state, url) => {
     const { S } = listSandbox('#/map');
@@ -1235,7 +1319,7 @@ console.log('\n=== scope-contours.js: hover ===');
 test('hovering names every scope under the cursor, highlights them, and escapes names', () => {
   const { L, map, rec } = fakeLeaflet();
   const o = SC.createOverlay(L, map, sync);
-  o.setNodes(NODES); o.setVisible(true);
+  o.setNodes(NODES); o.setLinks(NYC_LINKS); o.setVisible(true);
   // a2 carries both #nyc and #ny: their outlines overlap there.
   map.fire('mousemove', { latlng: { lat: 40.72, lng: -73.98 } });
   assert.strictEqual(rec.tipOpen, true);
@@ -1489,7 +1573,7 @@ test('None hides every scope, All shows them again', () => {
   const o = S.createOverlay(L, map, {});
   const el = fakeListEl();
   S.mountScopeList(el, o);
-  o.setNodes(NODES); o.setVisible(true);
+  o.setNodes(NODES); o.setLinks(NYC_LINKS); o.setVisible(true);
   rec.polygons.length = 0;
   el.fire('click', button('data-scope-none'));
   assert.strictEqual(rec.polygons.length, 0);
@@ -1540,17 +1624,20 @@ const GAP_NODES = [
 ];
 const GAP_MID = offset(40.7, -74.0, 15000, 0);
 
-test('setView redraws in that view: the hull spans a 28 km gap, detailed does not', () => {
+// Unlinked, so two groups: neither view draws the 28 km gap between them,
+// and switching view redraws them.
+test('setView redraws in that view; an unlinked pair stays two areas in both', () => {
   const { L, map, rec } = fakeLeaflet();
   const o = SC.createOverlay(L, map, sync);
   o.setNodes(GAP_NODES); o.setVisible(true);
-  const last = () => rec.polygons[rec.polygons.length - 1].rings;
-  assert.strictEqual(last().length, 1);
-  assert.ok(SC.inRings(last(), GAP_MID.lat, GAP_MID.lon), 'hull');
+  const hull = drawnNow(o).map(p => JSON.stringify(p.rings));
+  assert.strictEqual(hull.length, 2, 'hull: two areas');
+  assert.ok(drawnNow(o).every(p => !SC.inRings(p.rings, GAP_MID.lat, GAP_MID.lon)), 'hull drew the gap');
   o.setView('detailed');
   assert.strictEqual(o.view(), 'detailed');
-  assert.strictEqual(last().length, 2, 'detailed: two separate areas');
-  assert.ok(!SC.inRings(last(), GAP_MID.lat, GAP_MID.lon), 'detailed bridged a 28 km gap');
+  assert.strictEqual(drawnNow(o).length, 2, 'detailed: two areas');
+  assert.ok(drawnNow(o).every(p => !hull.includes(JSON.stringify(p.rings))), 'detailed redrew');
+  assert.ok(drawnNow(o).every(p => !SC.inRings(p.rings, GAP_MID.lat, GAP_MID.lon)), 'detailed drew the gap');
   // Hover follows the drawn view.
   map.fire('mousemove', { latlng: { lat: GAP_MID.lat, lng: GAP_MID.lon } });
   assert.strictEqual(rec.tipOpen, false, 'hovering the gap names the scope');
@@ -1687,12 +1774,12 @@ test('in Detailed, a pulse lights a scope drawn as two separate areas', () => {
   const far = offset(45.0, -100.0, 60000, 0);
   o.setNodes([{ public_key: 'd1', lat: 45.0, lon: -100.0, transported_scopes: ['#two'] }, { public_key: 'd2', lat: far.lat, lon: far.lon, transported_scopes: ['#two'] }]);
   o.setVisible(true);
-  const poly = rec.polygons[rec.polygons.length - 1];
-  assert.strictEqual(poly.rings.length, 2, 'Detailed drew ' + poly.rings.length + ' areas');
+  const polys = drawnNow(o);
+  assert.strictEqual(polys.length, 2, 'Detailed drew ' + polys.length + ' areas');
   o.pulse('two');
-  assert.ok(poly.getElement().classList.contains('is-pulsing'));
+  assert.ok(polys.every(p => p.getElement().classList.contains('is-pulsing')));
   clock.advance(1600);
-  assert.ok(!poly.getElement().classList.contains('is-pulsing'));
+  assert.ok(polys.every(p => !p.getElement().classList.contains('is-pulsing')));
 });
 
 test('viewFromHash reads ?contoursView=, null when absent or unknown', () => {
@@ -1775,6 +1862,13 @@ function timeRebuild(view) {
 // a real 190-node instance), so members merge into fewer clusters (512 grids
 // rather than 296) and small reaches get finer cells (11.2M vertices rather
 // than 4.9M).
+// This mesh links no member to another, so since each linked group gets its
+// own area every member is a lone outline: 2,000 of them, not 32. That is
+// the worst case (a carrying repeater got the packet from a hop that also
+// forwards the scope, so real members link). Hull stays near its ~20 ms
+// (~28 ms) through one hull per lone shape without a sort and a mitred
+// point at each shallow margin corner; Detailed fell from ~185 to ~105 ms,
+// its grids now one small group each.
 [['hull', 30], ['detailed', 400]].forEach(([view, target]) => {
   test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes, ' + view + ' view: median rebuild within budget', () => {
     const r = timeRebuild(view);

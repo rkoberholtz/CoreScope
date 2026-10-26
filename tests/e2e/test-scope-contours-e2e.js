@@ -4,8 +4,9 @@
  *
  * Each region scope gets an outline of the area its nodes are proven to reach,
  * following their two-way links (the neighbor graph), one solid area per
- * scope from the nodes seen carrying its traffic (transported_scopes) or
- * configured for it (default_scope, configured_scope, declared_regions).
+ * linked group of the nodes seen carrying its traffic (transported_scopes)
+ * or configured for it (default_scope, configured_scope, declared_regions):
+ * groups with no link between them get separate areas.
  * Clicking inside outlines lists each scope's repeaters. The "Region contours" toggle draws them,
  * ?contours=1 deep-links them, the Region Scope picker narrows them to one
  * scope, a per-scope list shows and hides them (?contoursHide=), an area
@@ -81,9 +82,14 @@ function serveTiles(page, mode) {
   });
 }
 
-// One proven link: SF Two ↔ Oakland, about 11.6 km. #bay's outline follows
-// it into one lobed shape instead of two separate floor circles.
-const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bidirectional: true, avg_snr: 4, ambiguous: false }];
+// Two proven links. SF Two ↔ Oakland, about 11.6 km: #bay's outline follows
+// it into one lobed shape instead of two separate floor circles. SF One ↔ SF
+// Default, about 2.1 km. Nothing links SF Two to either, so #sf is two
+// groups, [SF One, SF Default] and [SF Two], each with its own area.
+const EDGES = [
+  { source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bidirectional: true, avg_snr: 4, ambiguous: false },
+  { source: pk('a1'), target: pk('a5'), weight: 20, score: 0.9, bidirectional: true, avg_snr: 8, ambiguous: false },
+];
 
 (async () => {
   const browser = await chromium.launch({
@@ -114,7 +120,18 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     return json({});
   });
 
-  const areas = () => page.$$eval('path.mc-scope-area', (els) => els.map((el) => el.getAttribute('class')));
+  // One entry per scope drawn: a scope split into groups with no link
+  // between them draws a path per group.
+  const areas = () => page.$$eval('path.mc-scope-area', (els) => {
+    const seen = new Map();
+    els.forEach((el) => { const s = el.getAttribute('data-scope'); if (!seen.has(s)) seen.set(s, el.getAttribute('class')); });
+    return Array.from(seen.values());
+  });
+  const pathsPerScope = () => page.$$eval('path.mc-scope-area', (els) => {
+    const out = {};
+    els.forEach((el) => { const s = el.getAttribute('data-scope'); out[s] = (out[s] || 0) + 1; });
+    return out;
+  });
   const colourOf = (scope) => page.evaluate((s) => 'mc-reach-c' + window.ScopeContours.colorIndex(s), scope);
   const outline = (scope) => 'path.mc-scope-area[data-scope="' + scope + '"]';
   // A screen point well inside every listed scope's outline (and outside
@@ -164,6 +181,9 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     const cls = await areas();
     assert(cls.length === 3, 'outlines: ' + cls.join(' | '));
     assert(cls.every((c) => !/observed|configured/.test(c)), 'a kind of outline: ' + cls.join(' | '));
+    // #sf: [SF One, SF Default] and [SF Two], with no link between them.
+    const per = await pathsPerScope();
+    assert(per.sf === 2 && per.bay === 1 && per['south-bay'] === 1, 'paths per scope: ' + JSON.stringify(per));
     // Terrain answers re-draw the outlines as they arrive; read a path that
     // is still in the page.
     const dash = await page.waitForFunction(() => {
@@ -193,13 +213,13 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     assert(mid, 'the #bay outline does not follow the SF Two - Oakland link');
   });
 
-  // Whether a point is inside a scope's drawn outline, by the SVG path's own
-  // fill test at the point's screen position.
+  // Whether a point is inside any of a scope's drawn outlines (one per linked
+  // group), by the SVG paths' own fill test at the point's screen position.
   const insideAt = (scope, lat, lon) => page.evaluate(({ sel, lat, lon }) => {
-    const p = document.querySelector(sel); if (!p) return null;
+    const ps = Array.from(document.querySelectorAll(sel)); if (!ps.length) return null;
     const m = window.__mc_map, pt = m.latLngToContainerPoint([lat, lon]);
     const box = m.getContainer().getBoundingClientRect();
-    return p.isPointInFill(new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse()));
+    return ps.some((p) => p.isPointInFill(new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse())));
   }, { sel: outline(scope), lat, lon });
   // 1 km east/west at this latitude, in degrees of longitude.
   const KM_LON = 1 / (111.32 * Math.cos(37.79 * Math.PI / 180));
@@ -210,9 +230,9 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     // 2 km margin, 8 km east is open ground. Terrain arrives after the first
     // draw, so wait for it.
     await page.waitForFunction(({ sel, lon }) => {
-      const p = document.querySelector(sel); if (!p) return false;
+      const ps = Array.from(document.querySelectorAll(sel)); if (!ps.length) return false;
       const m = window.__mc_map, pt = m.latLngToContainerPoint([37.79, lon]), box = m.getContainer().getBoundingClientRect();
-      return !p.isPointInFill(new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse()));
+      return !ps.some((p) => p.isPointInFill(new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse())));
     }, { sel: outline('sf'), lon: -122.40 - 9 * KM_LON }, { timeout: 10000 });
     assert(await insideAt('sf', 37.79, -122.40 + 8 * KM_LON), '8 km east of SF Two is outside #sf');
     assert(!(await insideAt('sf', 37.79, -122.40 - 9 * KM_LON)), '9 km west, behind the ridge, is inside #sf');
@@ -241,8 +261,10 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.mouse.move(pt.x, pt.y);
     await page.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
     const text = await page.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent);
-    assert(/#sf · 3 nodes/.test(text) && /#bay · 2 nodes/.test(text), 'tooltip: ' + text);
-    assert((await page.$$('path.mc-scope-area.is-hovered')).length === 2, 'hovered outlines not highlighted');
+    assert(/#sf · 3 nodes · 2 separate groups/.test(text) && /#bay · 2 nodes/.test(text), 'tooltip: ' + text);
+    assert(text.split('#sf').length === 2, 'a split scope named twice: ' + text);
+    // Both of #sf's areas light up, and #bay's.
+    assert((await page.$$('path.mc-scope-area.is-hovered')).length === 3, 'hovered outlines not highlighted');
     await page.mouse.move(5, 450);
     await page.waitForFunction(() => !document.querySelector('.leaflet-tooltip.mc-scope-tip'), null, { timeout: 3000 });
   });
@@ -253,7 +275,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.mouse.click(pt.x, pt.y);
     await page.waitForSelector('.leaflet-popup.mc-scope-popup', { timeout: 3000 });
     const text = await page.$eval('.mc-scope-popup', (el) => el.textContent.replace(/\s+/g, ' '));
-    assert(/#sf 1 configured · 3 carrying/.test(text) && /#bay 0 configured · 2 carrying/.test(text), 'popup: ' + text);
+    assert(/#sf 1 configured · 3 carrying · 2 separate groups/.test(text) && /#bay 0 configured · 2 carrying(?! ·)/.test(text), 'popup: ' + text);
     // Different lists, so a section each (scopes with the same list share one).
     const heads = await page.$$eval('.mc-scope-popup .mc-scope-pop-scope', (els) => els.map((el) => el.querySelectorAll('.mc-scope-pop-name').length));
     assert(heads.length === 2 && heads.every((n) => n === 1), 'sections: ' + JSON.stringify(heads));
@@ -290,7 +312,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
 
   await step('unchecking a scope hides it, stores it, and writes it to the URL', async () => {
     await page.uncheck('#mcScopeList input[data-scope="bay"]');
-    await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 2);
+    await page.waitForFunction(() => new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 2);
     assert(/[?&]contoursHide=bay\b/.test(await page.evaluate(() => location.hash)), 'hash: ' + (await page.evaluate(() => location.hash)));
     assert(await page.evaluate(() => localStorage.getItem('meshcore-scope-contours-hidden')) === '["bay"]', 'not stored');
     await page.reload({ waitUntil: 'load' });
@@ -301,19 +323,19 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
 
   await step('None hides every scope; All brings them back', async () => {
     await page.click('#mcScopeList [data-scope-none]');
-    await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 0);
+    await page.waitForFunction(() => new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 0);
     await page.click('#mcScopeList [data-scope-all]');
-    await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 3);
+    await page.waitForFunction(() => new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 3);
     assert(!/contoursHide/.test(await page.evaluate(() => location.hash)), 'contoursHide left in the URL');
   });
 
   await step('the Region Scope picker narrows the outlines to one scope', async () => {
     await page.waitForSelector('#mcRegionFilter option[value="south-bay"]', { state: 'attached' });
     await page.selectOption('#mcRegionFilter', 'south-bay');
-    await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 1);
+    await page.waitForFunction(() => new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 1);
     assert((await areas())[0].includes(await colourOf('south-bay')), (await areas()).join(' | '));
     await page.selectOption('#mcRegionFilter', '');
-    await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 3);
+    await page.waitForFunction(() => new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 3);
   });
 
   // How much of the map each scope's outline fills: the count of points on a
@@ -328,7 +350,8 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
       for (let y = box.top; y < box.bottom; y += 6) {
         for (let x = box.left; x < box.right; x += 6) if (p.isPointInFill(new DOMPoint(x, y).matrixTransform(inv))) n++;
       }
-      out[p.getAttribute('data-scope')] = n;
+      const k = p.getAttribute('data-scope');
+      out[k] = (out[k] || 0) + n;
     });
     return out;
   });
@@ -337,7 +360,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.waitForFunction((src) => new RegExp(src).test(document.querySelector('#mcScopeList').textContent), hintRe.source, { timeout: 5000 });
     await page.waitForFunction((v) => {
       const b = document.querySelector('#mcScopeView button[aria-pressed="true"]');
-      return b && b.getAttribute('data-view') === v && document.querySelectorAll('path.mc-scope-area').length === 3;
+      return b && b.getAttribute('data-view') === v && new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 3;
     }, label, { timeout: 5000 });
   };
 
@@ -370,10 +393,10 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     assert(pt, 'no point inside #sf');
     await page.mouse.move(pt.x, pt.y);
     await page.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
-    assert(/#sf · 3 nodes/.test(await page.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent)), 'tooltip');
+    assert(/#sf · 3 nodes · 2 separate groups/.test(await page.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent)), 'tooltip');
     await page.mouse.click(pt.x, pt.y);
     await page.waitForSelector('.leaflet-popup.mc-scope-popup', { timeout: 3000 });
-    assert(/#sf 1 configured · 3 carrying/.test(await page.$eval('.mc-scope-popup', (el) => el.textContent.replace(/\s+/g, ' '))), 'popup');
+    assert(/#sf 1 configured · 3 carrying · 2 separate groups/.test(await page.$eval('.mc-scope-popup', (el) => el.textContent.replace(/\s+/g, ' '))), 'popup');
     await page.keyboard.press('Escape');
     await page.mouse.move(5, 450);
   });
@@ -466,15 +489,16 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     });
     await page.waitForSelector('path.mc-scope-area.is-pulsing', { timeout: 3000 });
     const pulsing = await page.$$eval('path.mc-scope-area.is-pulsing', (els) => els.map((el) => el.getAttribute('class')));
-    assert(pulsing.length === 1 && pulsing[0].includes(sfClass), 'pulsing: ' + pulsing.join(' | '));
+    // Both of #sf's areas, and nothing else.
+    assert(pulsing.length === 2 && pulsing.every((c) => c.includes(sfClass)), 'pulsing: ' + pulsing.join(' | '));
     await page.waitForFunction(() => !document.querySelector('path.is-pulsing'), null, { timeout: 4000 });
   });
 
   await step('live: the legend\'s scope checkboxes and All work (the legend itself takes no clicks)', async () => {
     await page.click('#liveScopeList input[data-scope="sf"]');
-    await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 2, null, { timeout: 3000 });
+    await page.waitForFunction(() => new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 2, null, { timeout: 3000 });
     await page.click('#liveScopeList [data-scope-all]');
-    await page.waitForFunction(() => document.querySelectorAll('path.mc-scope-area').length === 3, null, { timeout: 3000 });
+    await page.waitForFunction(() => new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 3, null, { timeout: 3000 });
   });
 
   const livePick = async (v, hintRe) => {
@@ -482,7 +506,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await page.waitForFunction(({ src, v }) => {
       const b = document.querySelector('#liveScopeView button[aria-pressed="true"]');
       return b && b.getAttribute('data-view') === v && new RegExp(src).test(document.querySelector('#liveScopeList').textContent) &&
-        document.querySelectorAll('path.mc-scope-area').length === 3;
+        new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 3;
     }, { src: hintRe.source, v }, { timeout: 5000 });
   };
 
@@ -545,45 +569,70 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     await p2.waitForSelector('path.mc-scope-area[data-scope="sf"]');
     await p2.waitForFunction(() => /Terrain unavailable/.test((document.getElementById('mcScopeList') || {}).textContent || ''), null, { timeout: 10000 });
     const westInside = await p2.evaluate(({ lon }) => {
-      const p = document.querySelector('path.mc-scope-area[data-scope="sf"]');
+      const ps = Array.from(document.querySelectorAll('path.mc-scope-area[data-scope="sf"]'));
       const m = window.__mc_map, pt = m.latLngToContainerPoint([37.79, lon]), box = m.getContainer().getBoundingClientRect();
-      return p.isPointInFill(new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse()));
+      return ps.some((p) => p.isPointInFill(new DOMPoint(box.left + pt.x, box.top + pt.y).matrixTransform(p.getScreenCTM().inverse())));
     }, { lon: -122.40 - 6 * KM_LON });
     assert(westInside, 'without terrain, 6 km west of SF Two should be inside its 12.8 km radius');
     await ctx2.close();
   });
 
-  await step('a repeater configured for a scope, not seen carrying it, extends the scope\'s one area', async () => {
+  // Bay Edge: configured for #bay, not seen carrying it, 20 km south of
+  // Oakland, past its radius and clear of the map's control panel.
+  const BAY_EDGE = { public_key: pk('a6'), name: 'Bay Edge', role: 'repeater', lat: 37.62, lon: -122.25, last_seen: now, hash_size: 1, default_scope: '#bay' };
+  const bayEdgePage = async (edges) => {
     const ctx3 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const p3 = await ctx3.newPage();
     p3.on('pageerror', (e) => errors.push(e.message));
     await serveTiles(p3, 'ok');
-    // Bay Edge: configured for #bay, not seen carrying it, 20 km south of
-    // Oakland, past its 12.8 km radius and clear of the map's control panel.
-    const nodes = NODES.concat([{ public_key: pk('a6'), name: 'Bay Edge', role: 'repeater', lat: 37.62, lon: -122.25, last_seen: now, hash_size: 1, default_scope: '#bay' }]);
+    const nodes = NODES.concat([BAY_EDGE]);
     await p3.route('**/api/**', (route) => {
       const path = new URL(route.request().url()).pathname;
       const json = (body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
       if (path === '/api/nodes') return json({ nodes, total: nodes.length, has_more: false, counts: {} });
-      if (path === '/api/analytics/neighbor-graph') return json({ nodes: [], edges: EDGES, stats: {} });
+      if (path === '/api/analytics/neighbor-graph') return json({ nodes: [], edges, stats: {} });
       if (path === '/api/config/map') return json({ center: [37.785, -122.35], zoom: 11 });
       return json({});
     });
     await p3.goto(BASE + '/#/map?contours=1', { waitUntil: 'load' });
     await p3.waitForSelector('path.mc-scope-area[data-scope="bay"]');
-    // 2 km south of Bay Edge: inside #bay's area only because of Bay Edge.
-    const pt = await p3.evaluate(() => {
-      const m = window.__mc_map, c = m.latLngToContainerPoint([37.62 - 2 / 111.32, -122.25]), box = m.getContainer().getBoundingClientRect();
-      const x = box.left + c.x, y = box.top + c.y;
-      const paths = document.querySelectorAll('path.mc-scope-area[data-scope="bay"]');
-      const p = paths[0];
-      // What is on top there: the map, not a control panel over it.
-      const top = document.elementFromPoint(x, y);
-      return { x, y, paths: paths.length, onMap: !!(top && top.closest('#leaflet-map')),
-        inside: p.isPointInFill(new DOMPoint(x, y).matrixTransform(p.getScreenCTM().inverse())) };
+    // Which #bay paths hold each point: 2 km south of Bay Edge, and the gap
+    // between its 3 km area (to 37.647) and Oakland's 12.8 + 2 km (to 37.667).
+    const probe = () => p3.evaluate(() => {
+      const m = window.__mc_map, box = m.getContainer().getBoundingClientRect();
+      const paths = Array.from(document.querySelectorAll('path.mc-scope-area[data-scope="bay"]'));
+      const at = (lat, lon) => {
+        const c = m.latLngToContainerPoint([lat, lon]), x = box.left + c.x, y = box.top + c.y;
+        const top = document.elementFromPoint(x, y);
+        return { x, y, onMap: !!(top && top.closest('#leaflet-map')),
+          inside: paths.filter((p) => p.isPointInFill(new DOMPoint(x, y).matrixTransform(p.getScreenCTM().inverse()))).length };
+      };
+      return { paths: paths.length, south: at(37.62 - 2 / 111.32, -122.25), gap: at(37.657, -122.255) };
     });
-    assert(pt.paths === 1 && pt.inside && pt.onMap, 'Bay Edge not inside #bay\'s one area: ' + JSON.stringify(pt));
-    await p3.mouse.move(pt.x, pt.y);
+    return { ctx3, p3, probe };
+  };
+
+  await step('a configured repeater with no link to the rest of its scope gets an area of its own; the gap is not drawn', async () => {
+    const { ctx3, p3, probe } = await bayEdgePage(EDGES);
+    // Wait for terrain: the first draw is floor circles.
+    await p3.waitForFunction(() => document.querySelectorAll('path.mc-scope-area[data-scope="bay"]').length === 2, null, { timeout: 5000 });
+    const r = await probe();
+    assert(r.paths === 2 && r.south.inside === 1 && r.south.onMap, 'Bay Edge not in an area of its own: ' + JSON.stringify(r));
+    assert(r.gap.inside === 0, 'the unlinked gap is drawn as reached: ' + JSON.stringify(r));
+    await p3.mouse.move(r.south.x, r.south.y);
+    await p3.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
+    const text = await p3.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent);
+    assert(/^#bay · 3 nodes · 2 separate groups$/.test(text.trim()), 'tooltip: ' + text);
+    await ctx3.close();
+  });
+
+  await step('linked to Oakland, it extends #bay\'s one area across the gap', async () => {
+    const link = { source: pk('a3'), target: pk('a6'), weight: 6, score: 0.6, bidirectional: true, avg_snr: 2, ambiguous: false };
+    const { ctx3, p3, probe } = await bayEdgePage(EDGES.concat([link]));
+    await p3.waitForFunction(() => document.querySelectorAll('path.mc-scope-area[data-scope="bay"]').length === 1, null, { timeout: 5000 });
+    const r = await probe();
+    assert(r.paths === 1 && r.south.inside === 1 && r.gap.inside === 1, 'not one area over the linked gap: ' + JSON.stringify(r));
+    await p3.mouse.move(r.south.x, r.south.y);
     await p3.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
     const text = await p3.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent);
     assert(/^#bay · 3 nodes$/.test(text.trim()), 'tooltip: ' + text);
