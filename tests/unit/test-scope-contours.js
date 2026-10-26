@@ -195,6 +195,30 @@ test('a list with no named regions means it carries nothing', () => {
   assert.strictEqual(c({ configured_scope: null, declared_regions: null, transported_scopes: ['#a'] }), 1, 'null is "never reported"');
 });
 
+// Only a repeater checks a scoped flood against its region list (firmware
+// simple_repeater allowPacketForward). A companion (isRepeatEn) and a room
+// server (disable_fwd) forward without looking at the region, so their
+// default scope says nothing about what they forward.
+test('default_scope makes a member only of a repeater, or of a node whose role is unknown', () => {
+  const has = n => SC.configuredScopes(n).has('c');
+  assert.strictEqual(has({ role: 'repeater', default_scope: '#c' }), true);
+  assert.strictEqual(has({ default_scope: '#c' }), true, 'role unknown');
+  assert.strictEqual(has({ role: 'companion', default_scope: '#c' }), false);
+  assert.strictEqual(has({ role: 'room', default_scope: '#c' }), false);
+  assert.strictEqual(has({ role: 'sensor', default_scope: '#c' }), false);
+  const g = SC.groupNodesByScope([{ public_key: 'k', role: 'companion', lat: 1, lon: 1, default_scope: '#c' }]);
+  assert.strictEqual(g.has('c'), false, 'a placed companion does not make an area');
+});
+
+test('a default scope the repeater\'s own list leaves out does not count', () => {
+  const m = n => JSON.parse(JSON.stringify(Array.from(SC.configuredScopes(n))));
+  assert.deepStrictEqual(m({ role: 'repeater', default_scope: '#c', configured_scope: '*,#a' }),
+    [['a', { default: false, allowed: true, declared: false }]]);
+  assert.deepStrictEqual(m({ role: 'repeater', default_scope: '#a', declared_regions: ['a'] }),
+    [['a', { default: true, allowed: false, declared: true }]], 'on the list: still tagged default');
+  assert.strictEqual(SC.configuredScopes({ role: 'repeater', default_scope: '#c', configured_scope: '*' }).size, 0);
+});
+
 test('the click box drops a stale carrying member and tags carrying only for listed scopes', () => {
   const nodes = [
     { public_key: 'p1', name: 'Listed', lat: 40.0, lon: -75.3, configured_scope: '*,#metro', transported_scopes: ['#metro', '#east-side'] },

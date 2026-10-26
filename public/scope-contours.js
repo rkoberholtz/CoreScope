@@ -13,11 +13,12 @@
    reach wherever it hears it, whether or not an observer has happened to
    see it do so. The default scope is weaker evidence: it is the scope the
    repeater's own adverts go out under, and the firmware does not require
-   it to allow floods (the auto-created default does). Being seen carrying
-   a scope is the only way in for a repeater whose configuration is
-   unknown; once a repeater has reported its list, carrying counts only for
-   regions on it (carriedScopes). The click box says which evidence each
-   member has.
+   it to allow floods (the auto-created default does), so it counts only
+   for a repeater, and only while its reported list, if any, names it.
+   Being seen carrying a scope is the only way in for a repeater whose
+   configuration is unknown; once a repeater has reported its list,
+   carrying counts only for regions on it (carriedScopes). The click box
+   says which evidence each member has.
 
    A node's reach, in 72 directions (reachFor):
      max( min(R, terrain cut), link lobe, 1 km floor )
@@ -138,7 +139,13 @@
   // region scopes a node is configured for, from the three sources the API
   // carries, and which of them say so.
   //   default_scope     the scope its own adverts go out under (its
-  //                     firmware default, "region default")
+  //                     firmware default, "region default"). Counted only
+  //                     for a repeater (or a node of unknown role) and, once
+  //                     it has reported a list, only if the list names it:
+  //                     only simple_repeater checks a scoped flood against
+  //                     its regions (allowPacketForward). A companion
+  //                     (isRepeatEn) or a room server (disable_fwd) forwards
+  //                     regardless, so its default says nothing about that.
   //   configured_scope  the comma-separated regions an observer reported it
   //                     allows (#1865); '*' is the flood wildcard, not a region
   //   declared_regions  its own answer to a companion's regions query (#1862)
@@ -152,7 +159,11 @@
       e[key] = true;
     }
     if (!n) return out;
-    if (n.default_scope) add(n.default_scope, 'default');
+    var def = n.default_scope ? normRegion(String(n.default_scope).trim()) : '';
+    if (def && (!n.role || String(n.role).toLowerCase() === 'repeater')) {
+      var list = reportedList(n);
+      if (!list || list.has(def)) add(def, 'default');
+    }
     if (n.configured_scope) String(n.configured_scope).split(',').forEach(function (r) { add(r, 'allowed'); });
     (Array.isArray(n.declared_regions) ? n.declared_regions : []).forEach(function (r) { add(r, 'declared'); });
     return out;
