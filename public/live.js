@@ -1708,7 +1708,7 @@
       reachOverlay = window.ScopeContours.createOverlay(L, map, {
         loadLinks: () => api('/analytics/neighbor-graph', { ttl: CLIENT_TTL.analyticsRF }).then(d => (d && d.edges) || []),
         terrain: window.TerrainReach ? window.TerrainReach.shared() : null,
-        loadAntennaHeights: () => api('/config/map', { ttl: 3600 }).then(d => (d && d.antennaHeights) || {}),
+        loadMapConfig: () => api('/config/map', { ttl: 3600 }),
       });
       // Area shape above the list, under one heading; the choice is shared
       // with the map page.

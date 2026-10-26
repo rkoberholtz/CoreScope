@@ -2096,6 +2096,65 @@ func TestConfigMapOmitsAntennaHeightsWhenUnset(t *testing.T) {
 	}
 }
 
+// mapDefaults.terrainTiles takes false (no terrain), a Terrarium URL
+// template, or nothing (the default source). Anything else falls back to
+// the default rather than failing the whole config.
+func TestTerrainTilesConfigParses(t *testing.T) {
+	cases := []struct {
+		in       string
+		disabled bool
+		url      string
+	}{
+		{`false`, true, ""},
+		{`true`, false, ""},
+		{`"https://tiles.example.org/terrarium/{z}/{x}/{y}.png"`, false, "https://tiles.example.org/terrarium/{z}/{x}/{y}.png"},
+		{`"  http://10.0.0.5/t/{z}/{x}/{y}.png "`, false, "http://10.0.0.5/t/{z}/{x}/{y}.png"},
+		{`"ftp://tiles.example.org/{z}/{x}/{y}.png"`, false, ""}, // not http(s)
+		{`"https://tiles.example.org/{z}/{x}.png"`, false, ""},   // no {y}
+		{`""`, false, ""},
+		{`12`, false, ""},
+		{`{"url": "x"}`, false, ""},
+	}
+	for _, c := range cases {
+		var cfg Config
+		if err := json.Unmarshal([]byte(`{"mapDefaults":{"terrainTiles":`+c.in+`}}`), &cfg); err != nil {
+			t.Fatalf("%s: config failed to load: %v", c.in, err)
+		}
+		got := cfg.MapDefaults.TerrainTiles
+		if got.Disabled != c.disabled || got.URL != c.url {
+			t.Errorf("%s: got %+v, want disabled=%v url=%q", c.in, got, c.disabled, c.url)
+		}
+	}
+}
+
+func TestConfigMapTerrainTiles(t *testing.T) {
+	get := func(tt TerrainTiles) string {
+		db := setupTestDB(t)
+		seedTestData(t, db)
+		cfg := &Config{Port: 3000}
+		cfg.MapDefaults.TerrainTiles = tt
+		srv := NewServer(db, cfg, NewHub())
+		router := mux.NewRouter()
+		srv.RegisterRoutes(router)
+		req := httptest.NewRequest("GET", "/api/config/map", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		return w.Body.String()
+	}
+	if body := get(TerrainTiles{Disabled: true}); !strings.Contains(body, `"terrainTiles":{"disabled":true}`) {
+		t.Errorf("disabled: %s", body)
+	}
+	if body := get(TerrainTiles{URL: "https://tiles.example.org/{z}/{x}/{y}.png"}); !strings.Contains(body, `"terrainTiles":{"url":"https://tiles.example.org/{z}/{x}/{y}.png"}`) {
+		t.Errorf("url: %s", body)
+	}
+	if body := get(TerrainTiles{}); strings.Contains(body, "terrainTiles") {
+		t.Errorf("default source should leave the field out: %s", body)
+	}
+}
+
 func TestHandlerErrorPaths(t *testing.T) {
 	// Create a DB that will error on queries by dropping the view/tables
 	db := setupTestDB(t)

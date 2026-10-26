@@ -8,10 +8,13 @@
    (the caller caps it, and stretches it to proven links).
 
    Elevation comes from AWS Terrain Tiles (Terrarium PNG, public, no key,
-   CORS open), fetched only around the repeaters asked about, decoded once
-   and kept in a small LRU. Results are cached in memory and in localStorage,
-   keyed by repeater, position, radius and model parameters, so a reload
-   costs nothing.
+   CORS open) unless the operator names another Terrarium source or turns
+   terrain off (mapDefaults.terrainTiles, setSource). Tiles are fetched only
+   around the repeaters asked about, decoded once and kept in a small LRU.
+   Results are cached in memory and in localStorage, keyed by repeater,
+   position, radius, source and model parameters, so a reload costs nothing.
+   The persisted cache is capped by size as well as count: localStorage is
+   about 5 MB per site, shared with every other CoreScope setting.
 
    Antenna height above ground is the input that matters most, and adverts
    do not carry it. In order of preference:
@@ -47,10 +50,11 @@
   var EARTH_R = 6371008.8;
   var M_PER_DEG = 111320;
   var MAX_TILES = 64;       // decoded tiles held: 64 x 256 KB
-  var MAX_ENTRIES = 3000;   // persisted results
+  var MAX_ENTRIES = 500;    // persisted results, at most
+  var MAX_CHARS = 600000;   // and at most this much of localStorage (~1 KB each)
   var STORE_KEY = 'meshcore-terrain-reach-v2';
   var PARAMS = 'z' + ZOOM + 'a' + ANTENNA_M + 'r' + RX_M + 't' + TOLERANCE_M + 's' + SHADOW_M + 'e' + EST_MAX_M + 'p' + EST_PCT;
-  var TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/';
+  var TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
 
   // tileOf returns fractional slippy-map tile coordinates of a point.
   function tileOf(lat, lon, z) {
@@ -187,8 +191,14 @@
   // browserFetchTile decodes one Terrarium tile. colorSpaceConversion and
   // premultiplyAlpha off: the pixels are data, any colour management would
   // change the heights.
-  function browserFetchTile(z, x, y) {
-    return fetch(TILE_URL + z + '/' + x + '/' + y + '.png', { mode: 'cors', credentials: 'omit' })
+  // tileUrl fills in a Terrarium URL template ({z}, {x}, {y}); the default
+  // source when there is none.
+  function tileUrl(template, z, x, y) {
+    return (template || TILE_URL).replace('{z}', z).replace('{x}', x).replace('{y}', y);
+  }
+
+  function browserFetchTile(z, x, y, template) {
+    return fetch(tileUrl(template, z, x, y), { mode: 'cors', credentials: 'omit' })
       .then(function (r) { if (!r.ok) throw new Error('tile ' + r.status); return r.blob(); })
       .then(function (b) { return createImageBitmap(b, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }); })
       .then(function (bmp) {
@@ -219,6 +229,9 @@
     var storage = opts.storage !== undefined ? opts.storage : (typeof localStorage !== 'undefined' ? localStorage : null);
     var yieldFn = opts.yieldFn || function () { return new Promise(function (r) { setTimeout(r, 0); }); };
     var maxEntries = opts.maxEntries || MAX_ENTRIES;
+    var maxChars = opts.maxChars || MAX_CHARS;
+    // The tile source: url (a template, null for the default) or off.
+    var source = { off: false, url: null };
     var tiles = new Map();     // 'x/y' → Float32Array; LRU order
     var inflight = new Map();  // 'x/y' → Promise
     var results = new Map();   // key → { ext: Float64Array, antennaM, source }
@@ -240,17 +253,33 @@
       } catch (e) { order = []; }
     })();
 
+    // persist writes the newest entries that fit both limits. If the store
+    // is still too full (other settings take the rest), it tries half as
+    // many, and in the end removes its own entry rather than crowd out
+    // anything else. The memory cache keeps working throughout.
     function persist() {
-      try {
-        if (!storage) return;
-        while (order.length > maxEntries) results.delete(order.shift());
-        var data = {};
-        order.forEach(function (k) {
-          var r = results.get(k);
-          data[k] = { e: Array.prototype.map.call(r.ext, function (v) { return Math.round(v / 10) * 10; }), a: r.antennaM, s: r.source };
-        });
-        storage.setItem(STORE_KEY, JSON.stringify({ order: order, data: data }));
-      } catch (e) { /* full or denied: the memory cache still works */ }
+      if (!storage) return;
+      while (order.length > maxEntries) results.delete(order.shift());
+      var data = {}, keep = [], size = 30;
+      for (var i = order.length - 1; i >= 0; i--) {
+        var k = order[i], r = results.get(k);
+        var d = { e: Array.prototype.map.call(r.ext, function (v) { return Math.round(v / 10) * 10; }), a: r.antennaM, s: r.source };
+        var n = k.length * 2 + JSON.stringify(d).length + 8;
+        if (size + n > maxChars) break;
+        size += n; data[k] = d; keep.unshift(k);
+      }
+      for (var tries = 0; tries < 4; tries++) {
+        try {
+          var out = {};
+          keep.forEach(function (k) { out[k] = data[k]; });
+          storage.setItem(STORE_KEY, JSON.stringify({ order: keep, data: out }));
+          return;
+        } catch (e) {
+          keep = keep.slice(Math.ceil(keep.length / 2));
+          if (!keep.length) break;
+        }
+      }
+      try { if (storage.removeItem) storage.removeItem(STORE_KEY); } catch (e) { /* denied */ }
     }
 
     // The antenna part: the operator's height, or the links an estimate
@@ -259,13 +288,13 @@
       if (it.antennaM > 0) return 'a' + it.antennaM;
       return 'L' + (it.links || []).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4); }).sort().join(';');
     }
-    function keyOf(it) { return it.pk + '@' + it.lat + ',' + it.lon + '|' + Math.round(it.R) + '|' + antennaKey(it) + '|' + PARAMS; }
+    function keyOf(it) { return it.pk + '@' + it.lat + ',' + it.lon + '|' + Math.round(it.R) + '|' + antennaKey(it) + '|' + PARAMS + (source.url ? '|' + source.url : ''); }
 
     function loadTile(x, y) {
       var k = x + '/' + y;
       if (tiles.has(k)) { var t = tiles.get(k); tiles.delete(k); tiles.set(k, t); return Promise.resolve(t); }
       if (inflight.has(k)) return inflight.get(k);
-      var p = Promise.resolve().then(function () { return fetchTile(ZOOM, x, y); })
+      var p = Promise.resolve().then(function () { return fetchTile(ZOOM, x, y, source.url); })
         .then(function (arr) { return arr; }, function () { failures++; return null; })
         .then(function (arr) {
           inflight.delete(k);
@@ -338,6 +367,13 @@
         var sample = sampler(set);
         var est = set_ ? { m: it.antennaM, source: 'set' } : estimateAntenna(sample, it.lat, it.lon, it.links);
         var res = { ext: terrainExtents(sample, it.lat, it.lon, it.R, est.m), antennaM: est.m, source: est.source };
+        // One entry per repeater: a newer one (it moved, its radius or its
+        // links changed) replaces the older, which would only be dead weight.
+        order = order.filter(function (k) {
+          if (k.slice(0, k.indexOf('@')) !== it.pk) return true;
+          results.delete(k);
+          return false;
+        });
         results.set(key, res);
         order.push(key);
         return res;
@@ -346,8 +382,9 @@
 
     return {
       extentsFor: function (items, onProgress) {
-        used = true;
         var out = new Map();
+        if (source.off) return Promise.resolve(out);
+        used = true;
         // Serialised: one batch at a time, so concurrent callers share
         // tiles and results instead of racing for them.
         var run = queue.then(function () {
@@ -364,7 +401,15 @@
         queue = run.then(function () {}, function () {});
         return run;
       },
-      status: function () { return failures ? 'unavailable' : (used ? 'ok' : 'idle'); },
+      // setSource({ disabled }) turns terrain off; setSource({ url }) names a
+      // Terrarium URL template; anything else is the default source. As
+      // /api/config/map serves mapDefaults.terrainTiles.
+      setSource: function (src) {
+        source = { off: !!(src && src.disabled), url: (src && typeof src.url === 'string' && src.url) || null };
+        failures = 0;
+      },
+      status: function () { return source.off ? 'off' : (failures ? 'unavailable' : (used ? 'ok' : 'idle')); },
+      sourceUrl: function () { return source.url; },
       stats: function () { return { computed: computed, tiles: tiles.size, cached: results.size }; },
     };
   }
@@ -388,5 +433,7 @@
     terrainExtents: terrainExtents,
     createTerrainProvider: createTerrainProvider,
     shared: shared,
+    tileUrl: tileUrl,
+    limits: { maxEntries: MAX_ENTRIES, maxChars: MAX_CHARS },
   };
 })();

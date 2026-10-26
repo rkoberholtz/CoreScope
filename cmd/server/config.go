@@ -104,6 +104,10 @@ type Config struct {
 		// operator knows, by pubkey or unique hex prefix (>= 8 chars). The
 		// region contours use it in place of their estimate.
 		AntennaHeights map[string]float64 `json:"antennaHeights,omitempty"`
+		// TerrainTiles: where the region contours fetch elevation from
+		// (Terrarium PNGs). false turns terrain off; a URL template with
+		// {z}, {x} and {y} names another source; unset is AWS Terrain Tiles.
+		TerrainTiles TerrainTiles `json:"terrainTiles,omitempty"`
 	} `json:"mapDefaults"`
 
 	Regions map[string]string `json:"regions"`
@@ -1314,4 +1318,30 @@ func (c *Config) RegionFallbackMaxHops() int {
 		return *c.RegionFallback.MaxHops
 	}
 	return regionFallbackMaxHopsDefault
+}
+
+// TerrainTiles is mapDefaults.terrainTiles: Disabled for false, URL for a
+// usable template, neither for the default source. It never fails the
+// config: a value it cannot use means the default.
+type TerrainTiles struct {
+	Disabled bool
+	URL      string
+}
+
+func (t *TerrainTiles) UnmarshalJSON(b []byte) error {
+	*t = TerrainTiles{}
+	var on bool
+	if json.Unmarshal(b, &on) == nil {
+		t.Disabled = !on
+		return nil
+	}
+	var u string
+	if json.Unmarshal(b, &u) == nil {
+		u = strings.TrimSpace(u)
+		if (strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://")) &&
+			strings.Contains(u, "{z}") && strings.Contains(u, "{x}") && strings.Contains(u, "{y}") {
+			t.URL = u
+		}
+	}
+	return nil
 }
