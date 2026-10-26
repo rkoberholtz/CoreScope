@@ -225,12 +225,18 @@
     return groups;
   }
 
-  // colorIndex picks one of the --mc-reach-N colours from the scope name, so
-  // a scope keeps its colour across reloads, pages and the region picker.
-  function colorIndex(scope) {
-    var s = normRegion(scope), h = 5381;
-    for (var i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
-    return (h % PALETTE_SIZE) + 1;
+  // colorsFor returns Map scope → one of the --mc-reach-N colours (1..8),
+  // handed out in name order over the given scopes: up to PALETTE_SIZE
+  // scopes all differ, and more share each colour as evenly as they can.
+  // Scopes tend to overlap (a city inside its state inside its country), so
+  // alike colours read as one area. A hash of the name kept each colour fixed
+  // but bunched them: on one live instance 12 scopes, all overlapping, took
+  // 6 of the 8 colours, with 8 pairs alike where 4 is the least possible.
+  // The cost: a scope's colour can move when another scope joins or leaves.
+  function colorsFor(scopes) {
+    var out = new Map();
+    Array.from(new Set(scopes)).sort(byScopeName).forEach(function (s, i) { out.set(s, (i % PALETTE_SIZE) + 1); });
+    return out;
   }
 
   // ── Reach ────────────────────────────────────────────────────────────────
@@ -466,7 +472,9 @@
 
   // scopePopupHtml: one section per scope under the click, each listing its
   // repeaters with why they are listed, and how many separate areas the
-  // scope is drawn as when more than one (groupsOf(scope), when given). The
+  // scope is drawn as when more than one (groupsOf(scope), when given). Each
+  // name's swatch is colourOf(scope), the overlay's colour for it; without
+  // one, colours are handed out over the scopes given. The
   // terrain model's antenna height is an estimate, not a fact about the
   // operator's mast, so it is left out.
   // Scopes whose lists are the same (the same repeaters, listed for the same
@@ -479,7 +487,8 @@
     if (la !== lb) return la < lb ? -1 : 1;
     return a < b ? -1 : (a > b ? 1 : 0);
   }
-  function scopePopupHtml(scopes, nodes, groupsOf) {
+  function scopePopupHtml(scopes, nodes, groupsOf, colourOf) {
+    if (!colourOf) { var own = colorsFor(scopes); colourOf = function (s) { return own.get(s); }; }
     var sections = [], byBody = new Map();
     scopes.slice().sort(byScopeName).forEach(function (scope) {
       var members = scopeMembers(scope, nodes);
@@ -507,7 +516,7 @@
     return '<div class="mc-scope-pop">' + sections.map(function (sec) {
       return '<section class="mc-scope-pop-scope"><div class="mc-scope-pop-head"><span class="mc-scope-pop-names">' +
         sec.scopes.map(function (scope) {
-          return '<span class="mc-scope-pop-name"><span class="mc-scope-swatch mc-reach-c' + colorIndex(scope) + '" aria-hidden="true"></span> ' +
+          return '<span class="mc-scope-pop-name"><span class="mc-scope-swatch mc-reach-c' + colourOf(scope) + '" aria-hidden="true"></span> ' +
             '<strong>#' + escapeHtml(scope) + '</strong></span>';
         }).join(' ') + '</span> ' + sec.body;
     }).join('') + '</div>';
@@ -661,6 +670,8 @@
 
     // How many separate areas a scope is drawn as, for the click box.
     function groupsOf(scope) { return (drawn.get(scope) || []).length; }
+    var colours = new Map(); // scope → colour, set each render
+    function colourOf(scope) { return colours.get(scope) || 1; }
 
     function queueRender() {
       if (renderQueued) return;
@@ -717,7 +728,7 @@
       if (parts.length > 1) text += ' · ' + parts.length + ' separate groups';
       parts.forEach(function (r) {
         var poly = L.polygon(r, { pane: PANE, renderer: renderer, interactive: false,
-          className: 'mc-scope-area mc-reach-c' + colorIndex(scope) });
+          className: 'mc-scope-area mc-reach-c' + colourOf(scope) });
         layer.addLayer(poly);
         var el = poly.getElement && poly.getElement();
         if (el && el.setAttribute) el.setAttribute('data-scope', scope);
@@ -740,9 +751,12 @@
       var live = new Set();
       var want = normRegion(only);
       list = [];
+      // Over every scope in the node list, so hiding or narrowing to one
+      // never recolours the rest.
+      colours = colorsFor(Array.from(groups.keys()));
       groups.forEach(function (g, scope) {
         var all = g.observed.concat(g.configuredOnly);
-        list.push({ scope: scope, colour: colorIndex(scope), nodes: all.length, carrying: g.observed.length, hidden: hidden.has(scope) });
+        list.push({ scope: scope, colour: colourOf(scope), nodes: all.length, carrying: g.observed.length, hidden: hidden.has(scope) });
         VIEWS.forEach(function (v) { live.add(v + '|' + scope); });
         if ((want && scope !== want) || hidden.has(scope)) return;
         all.forEach(function (n) { members.add(n); });
@@ -826,7 +840,7 @@
       if (!scopes.length) return;
       clearHover();
       popup.setLatLng(e.latlng);
-      popup.setContent(scopePopupHtml(scopes, nodes, groupsOf));
+      popup.setContent(scopePopupHtml(scopes, nodes, groupsOf, colourOf));
       popup.openOn(map);
     }
     map.on('mousemove', onMove);
@@ -1071,7 +1085,7 @@
     convexHull: convexHull,
     scopeHull: scopeHull,
     inRings: inRings,
-    colorIndex: colorIndex,
+    colorsFor: colorsFor,
     createPulser: createPulser,
     createOverlay: createOverlay,
     sectors: SECTORS,
