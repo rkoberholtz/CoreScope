@@ -20,6 +20,14 @@ node tests/unit/test-aging.js
 node tests/unit/test-analytics-channels-integration.js
 node tests/unit/test-anl1-tooltip-render.js
 node tests/unit/test-area-filter.js
+node tests/unit/test-audio-acid.js
+node tests/unit/test-audio-ambient.js
+node tests/unit/test-audio-dub.js
+node tests/unit/test-audio-lofi.js
+node tests/unit/test-audio-metal.js
+node tests/unit/test-audio-synthkit.js
+node tests/unit/test-audio-synthmetal.js
+node tests/unit/test-audio-technoir.js
 node tests/unit/test-channel-color-picker.js
 node tests/unit/test-channel-colors.js
 node tests/unit/test-channel-decrypt-ecb.js
