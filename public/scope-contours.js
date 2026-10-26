@@ -15,7 +15,9 @@
    repeater's own adverts go out under, and the firmware does not require
    it to allow floods (the auto-created default does). Being seen carrying
    a scope is the only way in for a repeater whose configuration is
-   unknown. The click box says which evidence each member has.
+   unknown; once a repeater has reported its list, carrying counts only for
+   regions on it (carriedScopes). The click box says which evidence each
+   member has.
 
    A node's reach, in 72 directions (reachFor):
      max( min(R, terrain cut), link lobe, 1 km floor )
@@ -156,11 +158,34 @@
     return out;
   }
 
+  // reportedList returns the Set of regions a node has reported it allows
+  // (configured_scope and declared_regions together), or null when it has
+  // reported neither. An empty or '*'-only answer is a list: it names nothing.
+  function reportedList(n) {
+    if (!n || (n.configured_scope == null && !Array.isArray(n.declared_regions))) return null;
+    var out = new Set();
+    function add(r) {
+      r = normRegion(String(r).trim());
+      if (r && r !== '*') out.add(r);
+    }
+    if (n.configured_scope != null) String(n.configured_scope).split(',').forEach(add);
+    (Array.isArray(n.declared_regions) ? n.declared_regions : []).forEach(add);
+    return out;
+  }
+
+  // carriedScopes returns the scopes a node has been seen carrying. A node
+  // that has reported its list keeps only the scopes on it: the firmware
+  // forwards a scoped flood only for a region on that list
+  // (RegionMap::findMatch returns NULL for any other transport code), so
+  // carrying anything else was seen before the list changed. transported_scopes
+  // has no age, so without this a removed region would stay forever.
   function carriedScopes(n) {
     var out = new Set();
-    (n && Array.isArray(n.transported_scopes) ? n.transported_scopes : []).forEach(function (r) {
+    if (!n || !Array.isArray(n.transported_scopes) || !n.transported_scopes.length) return out;
+    var list = reportedList(n);
+    n.transported_scopes.forEach(function (r) {
       r = normRegion(r);
-      if (r) out.add(r);
+      if (r && (!list || list.has(r))) out.add(r);
     });
     return out;
   }
@@ -957,6 +982,7 @@
     nodeRegionEvidence: nodeRegionEvidence,
     groupNodesByScope: groupNodesByScope,
     configuredScopes: configuredScopes,
+    carriedScopes: carriedScopes,
     scopePopupHtml: scopePopupHtml,
     linkReach: linkReach,
     lobeOf: lobeOf,

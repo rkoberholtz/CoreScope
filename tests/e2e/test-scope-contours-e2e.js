@@ -42,7 +42,9 @@ const NODES = [
   { public_key: pk('a2'), name: 'SF Two', role: 'repeater', lat: 37.79, lon: -122.40, last_seen: now, hash_size: 1, transported_scopes: ['#sf', '#bay'] },
   { public_key: pk('a3'), name: 'Oakland', role: 'repeater', lat: 37.80, lon: -122.27, last_seen: now, hash_size: 1, transported_scopes: ['#bay'] },
   // In view at the test zoom: Leaflet leaves an off-screen outline's path empty.
-  { public_key: pk('a4'), name: 'Daly South', role: 'repeater', lat: 37.74, lon: -122.30, last_seen: now, hash_size: 1, declared_regions: ['south-bay'] },
+  // Seen carrying #bay before its list dropped it: the list wins, so it is
+  // not a #bay member (carriedScopes).
+  { public_key: pk('a4'), name: 'Daly South', role: 'repeater', lat: 37.74, lon: -122.30, last_seen: now, hash_size: 1, declared_regions: ['south-bay'], transported_scopes: ['#bay'] },
   { public_key: pk('a5'), name: 'SF Default', role: 'repeater', lat: 37.76, lon: -122.44, last_seen: now, hash_size: 1, default_scope: '#sf', transported_scopes: ['#sf'] },
 ];
 // Terrain: flat 50 m with a 150 m ridge, 300 m wide, running north-south
@@ -257,6 +259,7 @@ const EDGES = [{ source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bid
     assert(heads.length === 2 && heads.every((n) => n === 1), 'sections: ' + JSON.stringify(heads));
     // Sorted by name: #bay, then #sf.
     assert(text.indexOf('#bay') < text.indexOf('#sf'), 'not sorted by name: ' + text);
+    assert(!/Daly South/.test(text.split('#sf')[0]), 'stale carrying listed under #bay: ' + text);
     const sfPart = text.split('#sf')[1];
     assert(sfPart.indexOf('SF Default') < sfPart.indexOf('SF One'), 'configured repeater not listed first: ' + sfPart);
     assert(/SF Default\s*default\s*carrying/.test(text), 'tags: ' + text);

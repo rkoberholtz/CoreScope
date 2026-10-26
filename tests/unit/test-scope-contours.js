@@ -162,6 +162,51 @@ test('a node configured by default_scope or configured_scope is a configured-onl
   assert.deepStrictEqual(keys(g.get('nj').configuredOnly), ['d2']);
 });
 
+// A repeater only forwards scoped floods for regions on its list (firmware
+// RegionMap::findMatch returns NULL for any other transport code), so once it
+// has reported a list, carrying a scope that is not on it is evidence from
+// before the list changed.
+test('a reported list overrides carrying a scope it does not name', () => {
+  const g = SC.groupNodesByScope([
+    { public_key: 'r1', lat: 1, lon: 1, configured_scope: '*,#metro', transported_scopes: ['#metro', '#east-side'] },
+    { public_key: 'r2', lat: 1, lon: 2, declared_regions: ['metro'], transported_scopes: ['#east-side'] },
+    { public_key: 'r3', lat: 1, lon: 3, transported_scopes: ['#east-side'] },
+  ]);
+  const keys = g2 => JSON.parse(JSON.stringify(g2.map(n => n.public_key)));
+  assert.deepStrictEqual(keys(g.get('metro').observed), ['r1']);
+  assert.deepStrictEqual(keys(g.get('metro').configuredOnly), ['r2']);
+  assert.deepStrictEqual(keys(g.get('east-side').observed), ['r3'], 'only the repeater with no list keeps its carrying');
+  assert.strictEqual(g.get('east-side').configuredOnly.length, 0);
+});
+
+test('either reported list keeps a carried scope, and default_scope alone does not', () => {
+  const c = n => JSON.parse(JSON.stringify(Array.from(SC.carriedScopes(n))));
+  assert.deepStrictEqual(c({ configured_scope: '*,#a', declared_regions: ['b'], transported_scopes: ['#a', '#b', '#c'] }), ['a', 'b']);
+  assert.deepStrictEqual(c({ default_scope: '#c', configured_scope: '*,#a', transported_scopes: ['#c'] }), [],
+    'the default region need not allow floods, so it does not vouch for carrying');
+  assert.deepStrictEqual(c({ default_scope: '#c', transported_scopes: ['#c'] }), ['c'], 'no list: carrying stands');
+});
+
+test('a list with no named regions means it carries nothing', () => {
+  const c = n => SC.carriedScopes(n).size;
+  assert.strictEqual(c({ configured_scope: '*', transported_scopes: ['#a'] }), 0);
+  assert.strictEqual(c({ configured_scope: '', transported_scopes: ['#a'] }), 0);
+  assert.strictEqual(c({ declared_regions: [], transported_scopes: ['#a'] }), 0);
+  assert.strictEqual(c({ configured_scope: null, declared_regions: null, transported_scopes: ['#a'] }), 1, 'null is "never reported"');
+});
+
+test('the click box drops a stale carrying member and tags carrying only for listed scopes', () => {
+  const nodes = [
+    { public_key: 'p1', name: 'Listed', lat: 40.0, lon: -75.3, configured_scope: '*,#metro', transported_scopes: ['#metro', '#east-side'] },
+    { public_key: 'p2', name: 'Unlisted', lat: 40.01, lon: -75.3, transported_scopes: ['#east-side'] },
+  ];
+  const nj = SC.scopePopupHtml(['east-side'], nodes);
+  assert.ok(!/Listed<\/a>/.test(nj.replace(/Unlisted<\/a>/g, '')), 'the listed repeater is not a east-side member: ' + nj);
+  assert.ok(/Unlisted<\/a> <span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(nj), nj);
+  const ph = SC.scopePopupHtml(['metro'], nodes);
+  assert.ok(/Listed<\/a> <span class="mc-scope-tag"[^>]*>allowed<\/span><span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(ph), ph);
+});
+
 test('colorIndex is stable and in 1..8', () => {
   for (const s of ['nyc', 'li', 'be', 'be-bru', '', 'a-very-long-region-name']) {
     const i = SC.colorIndex(s);
@@ -1295,8 +1340,8 @@ test('scopes with the same repeaters, listed the same way, share one popup entry
   // Near Philadelphia a few repeaters each carry many scopes, so a click
   // there was 11 entries, most of them the same list.
   const ns = [
-    { public_key: 'r1', name: 'Treebeard', lat: 40.0, lon: -75.3, transported_scopes: ['#a', '#b', '#c'], default_scope: '#c', declared_regions: ['d'] },
-    { public_key: 'r2', name: 'Amon Sul', lat: 40.0, lon: -75.31, transported_scopes: ['#a', '#b'], declared_regions: ['d'] },
+    { public_key: 'r1', name: 'Treebeard', lat: 40.0, lon: -75.3, transported_scopes: ['#a', '#b', '#c'], default_scope: '#c', declared_regions: ['a', 'b', 'c', 'd'] },
+    { public_key: 'r2', name: 'Amon Sul', lat: 40.0, lon: -75.31, transported_scopes: ['#a', '#b'], declared_regions: ['a', 'b', 'd'] },
   ];
   const html = SC.scopePopupHtml(['a', 'c', 'b', 'd'], ns);
   const sections = html.split('<section class="mc-scope-pop-scope">').slice(1);
