@@ -420,15 +420,9 @@
     return '<span class="mc-scope-tag" title="' + title + '">' + text + '</span>';
   }
 
-  var MAST_TITLE = {
-    set: 'Antenna height set by the operator',
-    links: 'Antenna height raised from its proven links: the lowest mast that gives most of them line of sight over the terrain',
-    default: 'Antenna height assumed (10 m): its links do not show it needs more, or it has none',
-  };
-
   // scopePopupHtml: one section per scope under the click, each listing its
-  // repeaters with why they are listed, and the antenna height the terrain
-  // model used for them (antennaOf(pk) → { antennaM, source }, when known).
+  // repeaters with why they are listed. The terrain model's antenna height
+  // is an estimate, not a fact about the operator's mast, so it is left out.
   // Scopes whose lists are the same (the same repeaters, listed for the same
   // reasons) share one section: a few repeaters that each carry many scopes
   // would otherwise list themselves once per scope. Sorted by name, case
@@ -439,7 +433,7 @@
     if (la !== lb) return la < lb ? -1 : 1;
     return a < b ? -1 : (a > b ? 1 : 0);
   }
-  function scopePopupHtml(scopes, nodes, antennaOf) {
+  function scopePopupHtml(scopes, nodes) {
     var sections = [], byBody = new Map();
     scopes.slice().sort(byScopeName).forEach(function (scope) {
       var members = scopeMembers(scope, nodes);
@@ -453,10 +447,6 @@
         if (m.conf && m.conf.declared) tags += tagHtml('declared', 'It lists this region when asked');
         if (m.carrying) tags += tagHtml('carrying', 'Seen relaying this region\'s traffic');
         if (!m.placed) tags += tagHtml('no position', 'Has no position, so it is not part of the outline');
-        var mast = antennaOf && antennaOf(pk);
-        if (mast && MAST_TITLE[mast.source]) {
-          tags += tagHtml((mast.source === 'links' ? '~' : '') + Math.round(mast.antennaM) + ' m mast' + (mast.source === 'set' ? ' (set)' : ''), MAST_TITLE[mast.source]);
-        }
         return '<li><a href="#/nodes/' + encodeURIComponent(pk) + '">' + escapeHtml(n.name || pk.slice(0, 8)) + '</a> ' + tags + '</li>';
       }).join('');
       var more = members.length > POPUP_ROWS ? '<li class="mc-scope-pop-more">+' + (members.length - POPUP_ROWS) + ' more</li>' : '';
@@ -510,7 +500,7 @@
     var reach = null;       // linkReach(nodes, links), rebuilt when either changes
     var shapes = new Map(); // pubkey → Map(area partners → { shape, key, edge }), rebuilt with reach
     var edgeCache = new Map(); // shape key → sampled edge, kept across rebuilds while used
-    var terrain = new Map(); // pubkey → { key, ext, meta } from the terrain provider
+    var terrain = new Map(); // pubkey → { key, ext } from the terrain provider
     var heights = null;      // operator antenna heights, { key: metres }; null until loaded
     var terrainAsked = new Set(); // pk|key requested and not yet answered
     var renderQueued = false;
@@ -597,8 +587,8 @@
       });
       if (!items.length) return;
       var keyOf = new Map(items.map(function (it) { return [it.pk, it.key]; }));
-      Promise.resolve(opts.terrain.extentsFor(items, function (pk, ext, meta) {
-        terrain.set(pk, { key: keyOf.get(pk), ext: ext, meta: meta || null });
+      Promise.resolve(opts.terrain.extentsFor(items, function (pk, ext) {
+        terrain.set(pk, { key: keyOf.get(pk), ext: ext });
         shapes.delete(pk);
         queueRender();
       })).then(done, done);
@@ -616,9 +606,6 @@
         heights = clean;
       }, function () { heights = {}; }).then(queueRender);
     }
-
-    // The click box's antenna note for a node, once its terrain is known.
-    function antennaOf(pk) { var t = terrain.get(pk); return t && t.meta; }
 
     function queueRender() {
       if (renderQueued) return;
@@ -759,7 +746,7 @@
       if (!scopes.length) return;
       clearHover();
       popup.setLatLng(e.latlng);
-      popup.setContent(scopePopupHtml(scopes, nodes, antennaOf));
+      popup.setContent(scopePopupHtml(scopes, nodes));
       popup.openOn(map);
     }
     map.on('mousemove', onMove);

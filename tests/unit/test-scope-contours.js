@@ -1176,7 +1176,9 @@ test('a new link changes what the height is estimated from, so it is asked again
   });
 });
 
-test('the click box shows the mast height the terrain model used, and where it came from', () => {
+// The terrain model's antenna height is an estimate, not a fact about the
+// operator's mast, and a viewer cannot change it: the click box leaves it out.
+test('the click box does not show the antenna height the terrain model used', () => {
   const { L, map, rec } = fakeLeaflet();
   const t = fakeTerrain();
   const meta = { h0: { antennaM: 23.6, source: 'links' }, e1: { antennaM: 25, source: 'set' } };
@@ -1187,9 +1189,8 @@ test('the click box shows the mast height the terrain model used, and where it c
   return tick().then(() => {
     map.fire('click', { latlng: { lat: HOME.lat, lng: HOME.lon }, sourceTarget: map });
     const html = rec.popup.content;
-    assert.ok(/~24 m mast</.test(html), 'estimated mast: ' + html);
-    assert.ok(/25 m mast \(set\)</.test(html), 'set mast');
-    assert.ok(/>10 m mast</.test(html), 'assumed mast');
+    assert.ok(/#home<\/strong>/.test(html), html);
+    assert.ok(!/mast|antenna/i.test(html), 'antenna height shown: ' + html);
   });
 });
 
