@@ -237,10 +237,28 @@ function tileFetcher(fn, opts) {
   };
   return { fetchTile, calls };
 }
-function memStore(initial) {
+function memStore(initial, quota) {
   const s = Object.assign({}, initial || {});
-  return { s, getItem: k => (k in s ? s[k] : null), setItem: (k, v) => { s[k] = String(v); } };
+  const size = () => Object.keys(s).reduce((n, k) => n + k.length + s[k].length, 0);
+  return {
+    s, size,
+    getItem: k => (k in s ? s[k] : null),
+    // Like a browser: a write that would take the store over its quota throws.
+    setItem: (k, v) => {
+      v = String(v);
+      if (quota && size() - (k in s ? k.length + s[k].length : 0) + k.length + v.length > quota) {
+        const e = new Error('QuotaExceededError'); e.name = 'QuotaExceededError'; throw e;
+      }
+      s[k] = v;
+    },
+    removeItem: k => { delete s[k]; },
+  };
 }
+const STORE = 'meshcore-terrain-reach-v2';
+// A repeater with many partners: the cache key carries the partner list, so
+// an entry is about the size a busy repeater's is (~1 KB).
+const busy = (i) => ({ pk: 'n' + i, lat: O.lat + i * 0.001, lon: O.lon, R: 1000,
+  links: Array.from({ length: 16 }, (_, k) => at(800 + k * 50, 600 + i)) });
 const immediate = () => Promise.resolve();
 
 test('the provider fetches only the tiles around the repeater and reports progress', () => {
@@ -359,6 +377,81 @@ test('the persisted cache is capped, oldest entries dropped first', () => {
   });
 });
 
+test('the persisted cache stays under its size limit, newest entries kept', () => {
+  const store = memStore();
+  const p = TR.createTerrainProvider({ fetchTile: tileFetcher(() => 50).fetchTile, storage: store, yieldFn: immediate, maxChars: 8000 });
+  const list = Array.from({ length: 30 }, (_, i) => busy(i));
+  return p.extentsFor(list).then(() => {
+    const raw = store.s[STORE];
+    assert.ok(raw.length <= 8000, 'persisted ' + raw.length + ' chars');
+    const keys = Object.keys(JSON.parse(raw).data);
+    assert.ok(keys.length >= 3 && keys.length < 30, keys.length + ' entries');
+    assert.ok(keys.some(k => k.startsWith('n29@')), 'newest entry dropped');
+    assert.ok(!keys.some(k => k.startsWith('n0@')), 'oldest entry kept');
+  });
+});
+
+test('the default limits keep the cache well inside a browser\'s localStorage', () => {
+  // ~5 MB per site is shared with every other CoreScope setting.
+  assert.ok(TR.limits.maxEntries <= 500, 'maxEntries ' + TR.limits.maxEntries);
+  assert.ok(TR.limits.maxChars <= 600000, 'maxChars ' + TR.limits.maxChars);
+});
+
+test('a repeater keeps only its newest result: one whose links changed does not pile up', () => {
+  const store = memStore();
+  const p = TR.createTerrainProvider({ fetchTile: tileFetcher(() => 50).fetchTile, storage: store, yieldFn: immediate });
+  const base = { pk: 'a', lat: O.lat, lon: O.lon, R: 2000 };
+  return p.extentsFor([Object.assign({ links: [at(3000, 0)] }, base)])
+    .then(() => p.extentsFor([Object.assign({ links: [at(3000, 0), at(0, 3000)] }, base)]))
+    .then(() => p.extentsFor([Object.assign({}, base, { R: 2500 })]))
+    .then(() => {
+      const keys = Object.keys(JSON.parse(store.s[STORE]).data);
+      assert.deepStrictEqual(keys.map(k => k.split('@')[0]), ['a'], keys.join(' '));
+      assert.ok(keys[0].includes('|2500|'), keys[0]);
+    });
+});
+
+test('a full localStorage: the cache shrinks or steps aside, the provider never throws', () => {
+  // Other settings already take most of the quota.
+  const store = memStore({ 'meshcore-settings': 'x'.repeat(9000) }, 12000);
+  const p = TR.createTerrainProvider({ fetchTile: tileFetcher(() => 50).fetchTile, storage: store, yieldFn: immediate });
+  return p.extentsFor(Array.from({ length: 20 }, (_, i) => busy(i))).then(res => {
+    assert.strictEqual(res.size, 20);
+    assert.ok(store.size() <= 12000, 'store over quota: ' + store.size());
+    assert.strictEqual(store.s['meshcore-settings'].length, 9000, 'another setting was touched');
+  });
+});
+
+test('terrain can be turned off: nothing is fetched, nothing is answered, status says off', () => {
+  const f = tileFetcher(() => 50);
+  const p = TR.createTerrainProvider({ fetchTile: f.fetchTile, storage: memStore(), yieldFn: immediate });
+  p.setSource({ disabled: true });
+  let progress = 0;
+  return p.extentsFor([{ pk: 'a', lat: O.lat, lon: O.lon, R: 3000 }], () => progress++).then(res => {
+    assert.strictEqual(f.calls.length, 0, 'fetched: ' + f.calls.join(' '));
+    assert.strictEqual(res.size, 0);
+    assert.strictEqual(progress, 0);
+    assert.strictEqual(p.status(), 'off');
+  });
+});
+
+test('another tile source: its URL template is filled in, and its results are kept apart', () => {
+  assert.strictEqual(TR.tileUrl(null, 11, 470, 755), 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/11/470/755.png');
+  assert.strictEqual(TR.tileUrl('https://t.example.org/dem/{z}/{x}/{y}.png', 11, 470, 755), 'https://t.example.org/dem/11/470/755.png');
+  const store = memStore();
+  const f = tileFetcher(() => 50);
+  const p = TR.createTerrainProvider({ fetchTile: f.fetchTile, storage: store, yieldFn: immediate });
+  const it = { pk: 'a', lat: O.lat, lon: O.lon, R: 3000 };
+  return p.extentsFor([it]).then(() => {
+    p.setSource({ url: 'https://t.example.org/dem/{z}/{x}/{y}.png' });
+    return p.extentsFor([it]);
+  }).then(() => {
+    assert.strictEqual(p.stats().computed, 2, 'a result from the other source was reused');
+    p.setSource(null);
+    assert.strictEqual(p.status(), 'ok');
+  });
+});
+
 test('broken storage never breaks the provider', () => {
   const bad = { getItem() { throw new Error('denied'); }, setItem() { throw new Error('full'); } };
   const p = TR.createTerrainProvider({ fetchTile: tileFetcher(() => 50).fetchTile, storage: bad, yieldFn: immediate });
@@ -380,7 +473,7 @@ test('the tile cache holds at most 64 tiles', () => {
   const p = TR.createTerrainProvider({ fetchTile: f.fetchTile, storage: memStore(), yieldFn: immediate });
   // 100 repeaters, each on its own tile.
   const list = [];
-  for (let i = 0; i < 100; i++) list.push({ pk: 'r' + i, lat: 40 + Math.floor(i / 10) * 0.2, lon: -75 + (i % 10) * 0.2, R: 1000 });
+  for (let i = 0; i < 100; i++) list.push({ pk: 'r' + i, lat: 45 + Math.floor(i / 10) * 0.2, lon: -100 + (i % 10) * 0.2, R: 1000 });
   return p.extentsFor(list).then(() => assert.ok(p.stats().tiles <= 64, 'tiles held ' + p.stats().tiles));
 });
 

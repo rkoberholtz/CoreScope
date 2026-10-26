@@ -740,7 +740,7 @@
         // Line of sight over elevation tiles trims each repeater's reach;
         // antenna heights the operator set in config replace the estimate.
         terrain: window.TerrainReach ? window.TerrainReach.shared() : null,
-        loadAntennaHeights: () => api('/config/map', { ttl: 3600 }).then(d => (d && d.antennaHeights) || {}),
+        loadMapConfig: () => api('/config/map', { ttl: 3600 }),
       });
       reachOverlay.setOnly(filters.regionScope);
       // Convex hull or detailed (shrink-wrapped) areas; set before the overlay is

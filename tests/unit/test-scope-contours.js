@@ -24,6 +24,7 @@ const escSrc = fs.readFileSync(path.join(REPO_ROOT, 'public', 'app.js'), 'utf8')
 assert.ok(escSrc, 'escapeHtml not found in app.js');
 const sandbox = { window: {}, setTimeout, clearTimeout, URLSearchParams, escapeHtml: vm.runInNewContext('(' + escSrc[0].replace(/^function escapeHtml/, 'function') + ')') };
 vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(path.join(REPO_ROOT, 'public', 'scope-geometry.js'), 'utf8'), sandbox);
 vm.runInContext(fs.readFileSync(path.join(REPO_ROOT, 'public', 'scope-contours.js'), 'utf8'), sandbox);
 const SC = sandbox.window.ScopeContours;
 
@@ -188,6 +189,7 @@ test('writeHashFlag sets and clears the param, keeping the others, without histo
   vm.createContext(us);
   vm.runInContext(fs.readFileSync(path.join(REPO_ROOT, 'public', 'url-state.js'), 'utf8'), us);
   us.window.URLState = us.window.URLState || us.URLState;
+  vm.runInContext(fs.readFileSync(path.join(REPO_ROOT, 'public', 'scope-geometry.js'), 'utf8'), us);
   vm.runInContext(fs.readFileSync(path.join(REPO_ROOT, 'public', 'scope-contours.js'), 'utf8'), us);
   const S = us.window.ScopeContours;
   S.writeHashFlag(true);
@@ -899,6 +901,9 @@ function fakeTerrain(opts) {
   // release() answers the oldest request still waiting.
   t.release = () => t.pending.shift()();
   t.status = () => t.state;
+  t.sources = [];
+  t.setSource = (src) => t.sources.push(src);
+  t.sourceUrl = () => opts.url || null;
   t.extentsFor = (items, onProgress) => {
     t.calls.push(items.map(it => ({ pk: it.pk, R: Math.round(it.R) })));
     const answer = () => items.forEach(it => {
@@ -1003,11 +1008,11 @@ test('an operator height (longest matching prefix) is sent instead, and requests
   const seen = [];
   t.extentsFor = ((orig) => (items, onP) => { items.forEach(it => seen.push(it)); return orig(items, onP); })(t.extentsFor);
   let resolveHeights;
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadAntennaHeights: () => new Promise(r => { resolveHeights = r; }) }, sync));
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadMapConfig: () => new Promise(r => { resolveHeights = r; }) }, sync));
   o.setVisible(true);
   o.setNodes([Object.assign({}, T_NODES[0], { public_key: 'h0aaaaaaaabbbb' })]);
   assert.strictEqual(seen.length, 0, 'asked before the heights were known');
-  resolveHeights({ 'H0AAAAAA': 15, 'h0aaaaaaaa': 25 });
+  resolveHeights({ center: [0, 0], zoom: 9, antennaHeights: { 'H0AAAAAA': 15, 'h0aaaaaaaa': 25 } });
   return tick().then(tick).then(() => {
     const h = seen.pop();
     assert.ok(h, 'never asked');
@@ -1119,19 +1124,40 @@ test('the click box shows the mast height the terrain model used, and where it c
   });
 });
 
-test('the list says when terrain is unavailable, and credits the source when it is used', () => {
-  const run = (state) => {
+test('the list says when terrain is unavailable or off, and credits the source when it is used', () => {
+  const run = (state, url) => {
     const { S } = listSandbox('#/map');
     const { L, map } = fakeLeaflet();
-    const o = S.createOverlay(L, map, Object.assign({ terrain: fakeTerrain({ state }) }, sync));
+    const o = S.createOverlay(L, map, Object.assign({ terrain: fakeTerrain({ state, url }) }, sync));
     const el = fakeListEl();
     S.mountScopeList(el, o);
     o.setNodes(NODES); o.setVisible(true);
     return el.innerHTML;
   };
   assert.ok(/Terrain unavailable/.test(run('unavailable')));
+  const off = run('off');
+  assert.ok(/Terrain is off on this instance/.test(off) && !/AWS Terrain Tiles/.test(off), off);
   const ok = run('ok');
   assert.ok(/AWS Terrain Tiles/.test(ok) && !/Terrain unavailable/.test(ok), ok);
+  const other = run('ok', 'https://dem.example.org/t/{z}/{x}/{y}.png');
+  assert.ok(/Terrain: dem\.example\.org/.test(other) && !/AWS Terrain Tiles/.test(other), other);
+});
+
+test('the map config sets the terrain source before any terrain is asked for', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain();
+  const order = [];
+  t.setSource = (src) => order.push(['source', JSON.parse(JSON.stringify(src))]);
+  t.extentsFor = ((orig) => (items, onP) => { order.push(['ask']); return orig(items, onP); })(t.extentsFor);
+  let resolve;
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadMapConfig: () => new Promise(r => { resolve = r; }) }, sync));
+  o.setVisible(true);
+  o.setNodes([T_NODES[0]]);
+  resolve({ terrainTiles: { disabled: true } });
+  return tick().then(tick).then(() => {
+    assert.deepStrictEqual(order[0], ['source', { disabled: true }]);
+    assert.ok(order.findIndex(x => x[0] === 'ask') > 0, 'asked for terrain before the source was set: ' + JSON.stringify(order));
+  });
 });
 
 console.log('\n=== scope-contours.js: hover ===');
@@ -1339,6 +1365,7 @@ function listSandbox(hash, stored) {
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(REPO_ROOT, 'public', 'url-state.js'), 'utf8'), ctx);
   ctx.window.URLState = ctx.window.URLState || ctx.URLState;
+  vm.runInContext(fs.readFileSync(path.join(REPO_ROOT, 'public', 'scope-geometry.js'), 'utf8'), ctx);
   vm.runInContext(fs.readFileSync(path.join(REPO_ROOT, 'public', 'scope-contours.js'), 'utf8'), ctx);
   return { S: ctx.window.ScopeContours, ctx, store };
 }
@@ -1616,6 +1643,7 @@ function prng(seed) { return () => { seed = (seed * 1664525 + 1013904223) >>> 0;
 // doubles the time. Same file, same code; only the realm differs.
 const SCmain = (() => {
   const win = {};
+  new Function('window', fs.readFileSync(path.join(REPO_ROOT, 'public', 'scope-geometry.js'), 'utf8'))(win);
   new Function('window', 'escapeHtml', fs.readFileSync(path.join(REPO_ROOT, 'public', 'scope-contours.js'), 'utf8'))(win, sandbox.escapeHtml);
   return win.ScopeContours;
 })();
@@ -1686,7 +1714,7 @@ function timeRebuild(view) {
   });
 });
 
-['hull', 'detailed'].forEach((view) => test('a hover hit test over 64 outlines takes under 1 ms, ' + view + ' view', () => {
+['hull', 'detailed'].forEach((view) => test('a hover hit test over 32 outlines takes under 1 ms, ' + view + ' view', () => {
   const rnd = prng(7);
   const nodes = [];
   for (let i = 0; i < 2000; i++) {

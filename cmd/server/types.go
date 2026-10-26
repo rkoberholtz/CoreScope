@@ -1080,6 +1080,16 @@ type MapConfigResponse struct {
 	// AntennaHeights: validated mapDefaults.antennaHeights (see
 	// cleanAntennaHeights); omitted when none are configured.
 	AntennaHeights map[string]float64 `json:"antennaHeights,omitempty"`
+	// TerrainTiles: mapDefaults.terrainTiles when it is not the default
+	// source; omitted otherwise.
+	TerrainTiles *TerrainTilesResponse `json:"terrainTiles,omitempty"`
+}
+
+// TerrainTilesResponse tells the region contours to skip terrain
+// (disabled) or which Terrarium URL template to fetch instead.
+type TerrainTilesResponse struct {
+	Disabled bool   `json:"disabled,omitempty"`
+	URL      string `json:"url,omitempty"`
 }
 
 type ClientConfigResponse struct {
