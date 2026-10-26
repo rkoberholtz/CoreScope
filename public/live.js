@@ -62,6 +62,10 @@
   let matrixMode = localStorage.getItem('live-matrix-mode') === 'true';
   let matrixRain = localStorage.getItem('live-matrix-rain') === 'true';
   let colorByHash = localStorage.getItem('meshcore-color-packets-by-hash') !== 'false';
+  // Region contours (scope-contours.js). The overlay is made once
+  // the map exists; until then the toggle only records the choice.
+  let scopeContoursOn = localStorage.getItem('live-scope-contours') === 'true';
+  let reachOverlay = null;
   /** Current theme string for hash-color functions. */
   function _liveTheme() { return document.documentElement.dataset.theme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
   let nodeFilterKeys = (localStorage.getItem('live-node-filter') || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -1176,6 +1180,14 @@
           localStorage.setItem('live-favorites-only', showOnlyFavorites);
           applyFavoritesFilter();
         } },
+      { id: 'liveScopeContoursToggle',
+        restore: () => scopeContoursOn,
+        onChange: (v) => {
+          scopeContoursOn = v;
+          localStorage.setItem('live-scope-contours', scopeContoursOn);
+          if (window.ScopeContours) window.ScopeContours.writeHashFlag(scopeContoursOn);
+          if (reachOverlay) reachOverlay.setVisible(scopeContoursOn);
+        } },
       { id: 'liveMultibyteToggle',
         restore: () => multibyteOnly,
         onChange: (v) => {
@@ -1295,6 +1307,8 @@
             <span id="favDesc" class="sr-only">Show only favorited and claimed nodes</span>
             <label><input type="checkbox" id="liveMultibyteToggle" aria-describedby="multibyteDesc"> Multibyte only</label>
             <span id="multibyteDesc" class="sr-only">Show only multibyte (≥2-byte path-hash) packets; hide unreliable single-byte traffic</span>
+            <label><input type="checkbox" id="liveScopeContoursToggle" aria-describedby="scopeContoursDesc"> Region contours</label>
+            <span id="scopeContoursDesc" class="sr-only">Outline the reach of each region scope; an outline flashes when one of its packets arrives</span>
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Mesh live area</label>
             </div>
             <div class="live-toggles">
@@ -1352,6 +1366,8 @@
             <li><span class="live-ring live-ring--repeater" aria-hidden="true"></span> Bright white ring — repeater</li>
             <li><span class="live-ring live-ring--other" aria-hidden="true"></span> Faded ring — companion / sensor / room</li>
           </ul>
+          <div id="liveScopeView" class="mc-scope-view" hidden></div>
+          <div id="liveScopeList" class="mc-scope-list" hidden></div>
           </div>
         </div>
 
@@ -1393,6 +1409,10 @@
         </div>
       </div>`;
 
+    // ?contours=1|0 overrides the stored toggle, so a shared link opens with
+    // the region contours as the sender had them.
+    const contoursFlag = window.ScopeContours ? window.ScopeContours.hashFlag(location.hash) : null;
+    if (contoursFlag !== null) scopeContoursOn = contoursFlag;
     // Controls are wired BEFORE any await below -- see wireLiveControls().
     wireLiveControls();
 
@@ -1683,6 +1703,21 @@
     pathsLayer = L.layerGroup({ pane: 'liveAnimPane' }).addTo(map);
     animLayer = L.layerGroup({ pane: 'liveAnimPane' }).addTo(map);
     clickablePathsLayer = L.layerGroup().addTo(map);
+    if (window.ScopeContours) {
+      // Same link-based reach as the map page, through the same cached call.
+      reachOverlay = window.ScopeContours.createOverlay(L, map, {
+        loadLinks: () => api('/analytics/neighbor-graph', { ttl: CLIENT_TTL.analyticsRF }).then(d => (d && d.edges) || []),
+        terrain: window.TerrainReach ? window.TerrainReach.shared() : null,
+        loadAntennaHeights: () => api('/config/map', { ttl: 3600 }).then(d => (d && d.antennaHeights) || {}),
+      });
+      // Area shape above the list, under one heading; the choice is shared
+      // with the map page.
+      window.ScopeContours.mountViewPicker(document.getElementById('liveScopeView'), reachOverlay, {
+        titleHtml: '<h3 class="legend-title" style="margin-top:8px">REGION SCOPES</h3>',
+      });
+      window.ScopeContours.mountScopeList(document.getElementById('liveScopeList'), reachOverlay);
+      reachOverlay.setVisible(scopeContoursOn);
+    }
 
     injectSVGFilters();
     AreaFilter.init(document.getElementById('liveAreaFilter'));
@@ -2804,6 +2839,7 @@
         }
       });
       const _el2 = document.getElementById('liveNodeCount'); if (_el2) _el2.textContent = Object.keys(nodeMarkers).length;
+      if (reachOverlay) reachOverlay.setNodes(list);
       // Initialize shared HopResolver with loaded nodes
       if (window.HopResolver) HopResolver.init(list);
       // Fetch affinity data for hop disambiguation
@@ -3374,6 +3410,9 @@
     // above the counter so livePktCount reflects multibyte-only traffic.
     if (multibyteOnly && !groupIsMultibyte(packets)) return;
     const first = packets[0];
+    // Flash the scope's reach outline. Coalesced per scope in the overlay, so
+    // a burst costs one class toggle; a no-op while the overlay is off.
+    if (reachOverlay && first.scope_name) reachOverlay.pulse(first.scope_name);
     const decoded = first.decoded || {};
     const header = decoded.header || {};
     const payload = decoded.payload || {};
@@ -4650,6 +4689,7 @@
       RegionFilter.offChange(regionFilterChangeHandler);
       regionFilterChangeHandler = null;
     }
+    if (reachOverlay) { reachOverlay.destroy(); reachOverlay = null; }
     if (map) { map.remove(); map = null; }
     if (_onResize) {
       window.removeEventListener('resize', _onResize);

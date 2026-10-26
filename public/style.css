@@ -5878,6 +5878,65 @@ body.embed #app.app-fixed {
 .mc-est-facts dt { color: var(--text-muted); }
 .mc-est-facts dd { margin: 0; }
 
+/* Region contours (scope-contours.js): one area per region scope. Each scope takes
+ * one of eight colours, picked from its name so it keeps it everywhere. Paul
+ * Tol's "muted" palette: told apart under the common colour-vision
+ * deficiencies, and none of them is a role colour. The live page pulses a
+ * scope's outline (.is-pulsing) when one of its packets arrives. */
+:root {
+  --mc-reach-1: #88CCEE;
+  --mc-reach-2: #CC6677;
+  --mc-reach-3: #DDCC77;
+  --mc-reach-4: #117733;
+  --mc-reach-5: #AA4499;
+  --mc-reach-6: #44AA99;
+  --mc-reach-7: #999933;
+  --mc-reach-8: #882255;
+}
+path.mc-scope-area { stroke: var(--mc-reach-colour); fill: var(--mc-reach-colour); stroke-width: 2; stroke-opacity: .85; fill-opacity: .12; transition: fill-opacity .25s ease-out, stroke-width .25s ease-out; }
+path.mc-scope-area.is-pulsing { stroke-width: 3.5; stroke-opacity: 1; fill-opacity: .3; }
+path.mc-scope-area.is-hovered { stroke-width: 3; stroke-opacity: 1; fill-opacity: .2; }
+/* One tooltip for every scope under the cursor (hit-tested in JS, since the
+ * outlines take no pointer events). */
+.leaflet-tooltip.mc-scope-tip { font-size: 12px; line-height: 1.45; }
+/* Show/hide list: under Region contours on the map, in the legend on live. */
+.mc-scope-list { margin: 4px 0 0 20px; font-size: 12px; }
+.mc-scope-list[hidden] { display: none; }
+/* Area shape picker: Convex Hull, Detailed. Under Region contours on the
+ * map, under REGION SCOPES in the legend on live. */
+.mc-scope-view { margin: 4px 0 0 20px; font-size: 12px; }
+.live-legend .mc-scope-list, .live-legend .mc-scope-view { margin-left: 0; }
+/* The live legend takes no pointer events (#1616); these two are controls. */
+.live-legend .mc-scope-list, .live-legend .mc-scope-view { pointer-events: auto; }
+.mc-scope-view[hidden] { display: none; }
+.mc-scope-view .btn { white-space: nowrap; }
+.mc-scope-view-label { display: block; font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
+.mc-scope-list-actions { margin: 2px 0 4px; }
+.mc-scope-row { display: flex; align-items: center; gap: 6px; padding: 1px 0; cursor: pointer; }
+.mc-scope-swatch { display: inline-block; flex: none; width: 12px; height: 12px; border-radius: 3px; border: 2px solid var(--mc-reach-colour); background: color-mix(in srgb, var(--mc-reach-colour) 35%, transparent); }
+.mc-scope-count { margin-left: auto; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.mc-scope-hint { margin-top: 4px; font-size: 11px; color: var(--text-muted); }
+/* Click popup: the repeaters of each scope under the click. */
+.mc-scope-pop { font-size: 12px; max-height: 320px; overflow-y: auto; }
+.mc-scope-pop-scope + .mc-scope-pop-scope { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.mc-scope-pop-head { display: flex; align-items: flex-start; gap: 6px; margin-bottom: 4px; }
+.mc-scope-pop-names { display: flex; flex-wrap: wrap; gap: 2px 10px; }
+.mc-scope-pop-name { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.mc-scope-pop-sum { margin-left: auto; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.mc-scope-pop-list { list-style: none; margin: 0; padding: 0; }
+.mc-scope-pop-list li { padding: 2px 0; }
+.mc-scope-pop-more { color: var(--text-muted); }
+.mc-scope-tag { display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 8px; font-size: 10px; line-height: 16px; border: 1px solid var(--border); color: var(--text-muted); }
+.mc-reach-c1 { --mc-reach-colour: var(--mc-reach-1); }
+.mc-reach-c2 { --mc-reach-colour: var(--mc-reach-2); }
+.mc-reach-c3 { --mc-reach-colour: var(--mc-reach-3); }
+.mc-reach-c4 { --mc-reach-colour: var(--mc-reach-4); }
+.mc-reach-c5 { --mc-reach-colour: var(--mc-reach-5); }
+.mc-reach-c6 { --mc-reach-colour: var(--mc-reach-6); }
+.mc-reach-c7 { --mc-reach-colour: var(--mc-reach-7); }
+.mc-reach-c8 { --mc-reach-colour: var(--mc-reach-8); }
+@media (prefers-reduced-motion: reduce) { path.mc-scope-area { transition: none; } }
+
 /* Self-reported repeaters (reported-nodes.js): no advert, name only. */
 .reported-section { margin-top: 16px; padding: 12px; border: 1px dashed var(--mc-role-repeater); border-radius: 6px; }
 .reported-section h3 { margin: 0 0 4px; font-size: 14px; }

@@ -51,6 +51,9 @@ function makeSandbox(stored) {
   ctx.window.L = ctx.L;
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync('public/roles.js', 'utf8'), ctx);
+  // The region helpers live in scope-contours.js, shared with the reach
+  // contours; index.html loads it before map.js.
+  vm.runInContext(fs.readFileSync('public/scope-contours.js', 'utf8'), ctx);
   for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
   vm.runInContext(fs.readFileSync('public/map.js', 'utf8'), ctx);
   for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
@@ -313,10 +316,20 @@ async function makePage(opts) {
   L.layerGroup = group;
   L.markerClusterGroup = group;
   L.tileLayer = () => ({ addTo() { return this; }, setUrl() {}, options: {} });
-  L.map = () => ({
-    setView() { return this; }, on() {}, invalidateSize() {}, getCenter() { return { lat: 0, lng: 0 }; }, getZoom() { return 9; },
-    hasLayer() { return false; }, addLayer() {}, removeLayer() {}, fitBounds() {}, remove() {},
-  });
+  // The reach-contour overlay (scope-contours.js) makes its own pane, SVG
+  // renderer and hover tooltip at init.
+  L.svg = () => ({});
+  L.tooltip = () => ({ setLatLng() { return this; }, setContent() { return this; } });
+  L.popup = () => ({ setLatLng() { return this; }, setContent() { return this; }, openOn() { return this; } });
+  L.map = () => {
+    const panes = {};
+    return {
+      setView() { return this; }, on() {}, off() {}, invalidateSize() {}, getCenter() { return { lat: 0, lng: 0 }; }, getZoom() { return 9; },
+      hasLayer() { return false; }, addLayer() {}, removeLayer() {}, fitBounds() {}, remove() {},
+      openTooltip() {}, closeTooltip() {}, closePopup() {},
+      createPane(n) { panes[n] = { style: {} }; return panes[n]; }, getPane(n) { return panes[n]; },
+    };
+  };
   L.marker = (latlng, o) => {
     const mk = { _latlng: latlng, options: o || {}, popup: null, bindPopup(html) { this.popup = html; return this; }, bindTooltip() { return this; } };
     markers.push(mk);
@@ -354,6 +367,9 @@ async function makePage(opts) {
   ctx.window.L = L;
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync('public/roles.js', 'utf8'), ctx);
+  // The region helpers live in scope-contours.js, shared with the reach
+  // contours; index.html loads it before map.js.
+  vm.runInContext(fs.readFileSync('public/scope-contours.js', 'utf8'), ctx);
   for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
   vm.runInContext(fs.readFileSync('public/map.js', 'utf8'), ctx);
   for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
