@@ -5879,7 +5879,8 @@ body.embed #app.app-fixed {
 .mc-est-facts dd { margin: 0; }
 
 /* Region contours (scope-contours.js): one area per region scope. Each scope takes
- * one of eight colours, picked from its name so it keeps it everywhere. Paul
+ * one of eight colours, handed out in name order (colorsFor), so up to eight
+ * scopes all differ. Paul
  * Tol's "muted" palette: told apart under the common colour-vision
  * deficiencies, and none of them is a role colour. The live page pulses a
  * scope's outline (.is-pulsing) when one of its packets arrives. */
