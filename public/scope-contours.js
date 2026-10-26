@@ -1,10 +1,13 @@
 /* Region contours for the map and live pages: where each region scope reaches.
 
-   For each MeshCore region scope, outline the general area its nodes reach:
-   one area per scope, from every node that is configured for it
-   (configuredScopes: its default scope, the regions an observer reported
-   it allows, or its own declared list) or whose full pubkey appears in the
-   path of traffic for it (transported_scopes, #1751/#1902). A repeater
+   For each MeshCore region scope, outline the general area its nodes reach,
+   from every node that is configured for it (configuredScopes: its default
+   scope, the regions an observer reported it allows, or its own declared
+   list) or whose full pubkey appears in the path of traffic for it
+   (transported_scopes, #1751/#1902): one area per group of those members
+   joined by two-way links (linkedGroups). A scoped flood crosses from one
+   group to another only through a repeater that forwards the scope, so an
+   area never spans a gap no such link is known to bridge. A repeater
    forwards a scoped flood when the scope is in its region map without the
    deny-flood flag (firmware simple_repeater: onRecvPacket's
    region_map.findMatch(pkt, REGION_DENY_FLOOD), allowPacketForward). Its
@@ -13,11 +16,12 @@
    reach wherever it hears it, whether or not an observer has happened to
    see it do so. The default scope is weaker evidence: it is the scope the
    repeater's own adverts go out under, and the firmware does not require
-   it to allow floods (the auto-created default does). Being seen carrying
-   a scope is the only way in for a repeater whose configuration is
-   unknown; once a repeater has reported its list, carrying counts only for
-   regions on it (carriedScopes). The click box says which evidence each
-   member has.
+   it to allow floods (the auto-created default does), so it counts only
+   for a repeater, and only while its reported list, if any, names it.
+   Being seen carrying a scope is the only way in for a repeater whose
+   configuration is unknown; once a repeater has reported its list,
+   carrying counts only for regions on it (carriedScopes). The click box
+   says which evidence each member has.
 
    A node's reach, in 72 directions (reachFor):
      max( min(R, terrain cut), link lobe, 1 km floor )
@@ -35,8 +39,8 @@
      ends hear each other, not that the ground between them is covered.
    Interpolating between the 72 directions keeps the shape smooth.
 
-   A scope's outline is drawn in one of two views (setView), each built from
-   its members' reach shapes and each containing every member's whole shape,
+   Each group's outline is drawn in one of two views (setView), each built
+   from its members' reach shapes and each containing every member's whole shape,
    then grown by a 2 km margin with rounded corners, so no member is closer
    to the border than 3 km (the 1 km floor and the margin), and a linked
    repeater at a corner is never on the line:
@@ -47,13 +51,15 @@
      between one repeater's spokes alike; groups further apart stay separate
      areas.
    Outlines are cached per view and scope, and recomputed only when its
-   members, their positions or their reach change.
+   members, their positions, their reach or their links change; a group's
+   outline is shared by every scope with the same group.
 
    Hover and click are hit-tested from the map's own events, not from the
    outlines: the live map draws canvases above them, and overlapping scopes
    should all be named. Hover names the scopes under the cursor; a click
-   lists the repeaters configured for or carrying each of them. The outlines
-   take no pointer events, so they never block a click on anything else.
+   lists the repeaters configured for or carrying each of them, and how many
+   separate groups a split scope has. The outlines take no pointer events,
+   so they never block a click on anything else.
 
    The radius rule, floor, margin, terrain model, wrap gap, default view and
    pulse duration are fixed for now; exposing them in the customizer is a
@@ -138,7 +144,13 @@
   // region scopes a node is configured for, from the three sources the API
   // carries, and which of them say so.
   //   default_scope     the scope its own adverts go out under (its
-  //                     firmware default, "region default")
+  //                     firmware default, "region default"). Counted only
+  //                     for a repeater (or a node of unknown role) and, once
+  //                     it has reported a list, only if the list names it:
+  //                     only simple_repeater checks a scoped flood against
+  //                     its regions (allowPacketForward). A companion
+  //                     (isRepeatEn) or a room server (disable_fwd) forwards
+  //                     regardless, so its default says nothing about that.
   //   configured_scope  the comma-separated regions an observer reported it
   //                     allows (#1865); '*' is the flood wildcard, not a region
   //   declared_regions  its own answer to a companion's regions query (#1862)
@@ -152,7 +164,11 @@
       e[key] = true;
     }
     if (!n) return out;
-    if (n.default_scope) add(n.default_scope, 'default');
+    var def = n.default_scope ? normRegion(String(n.default_scope).trim()) : '';
+    if (def && (!n.role || String(n.role).toLowerCase() === 'repeater')) {
+      var list = reportedList(n);
+      if (!list || list.has(def)) add(def, 'default');
+    }
     if (n.configured_scope) String(n.configured_scope).split(',').forEach(function (r) { add(r, 'allowed'); });
     (Array.isArray(n.declared_regions) ? n.declared_regions : []).forEach(function (r) { add(r, 'declared'); });
     return out;
@@ -244,10 +260,13 @@
   //           bearing and its distance × 1.1, for lobeOf.
   //   partners: Map pk → [{ lat, lon }] of the other ends, from which the
   //           terrain provider estimates the node's antenna height.
+  //   peers:  Map pk → [pk] of the other ends, co-located ones included,
+  //           for linkedGroups.
   function linkReach(nodes, edges) {
     var pos = new Map();
     (nodes || []).forEach(function (n) { var p = position(n); if (p && n.public_key) pos.set(n.public_key, p); });
-    var dists = new Map(), links = new Map(), partners = new Map();
+    var dists = new Map(), links = new Map(), partners = new Map(), peers = new Map();
+    function peer(pk, other) { var l = peers.get(pk); if (l) l.push(other); else peers.set(pk, [other]); }
     function partner(pk, p) { var l = partners.get(pk); if (l) l.push({ lat: p[0], lon: p[1] }); else partners.set(pk, [{ lat: p[0], lon: p[1] }]); }
     function link(pk, other, bearing, len) {
       var l = links.get(pk), k = { pk: other, bearing: bearing, len: len };
@@ -263,6 +282,7 @@
       var d = Math.sqrt(dx * dx + dy * dy);
       dist(e.source, d); dist(e.target, d);
       partner(e.source, b); partner(e.target, a);
+      peer(e.source, e.target); peer(e.target, e.source);
       if (!(d > 0)) return;
       var fwd = Math.atan2(dx, dy);
       link(e.source, e.target, fwd, d * LINK_MARGIN);
@@ -274,7 +294,38 @@
       var r = percentile(l, RADIUS_PCT) * LINK_MARGIN;
       radius.set(pk, Math.min(MAX_RADIUS_M, Math.max(MIN_RADIUS_M, r)));
     });
-    return { radius: radius, links: links, partners: partners };
+    return { radius: radius, links: links, partners: partners, peers: peers };
+  }
+
+  // linkedGroups splits a scope's members into groups joined by two-way
+  // links between members (peers, from linkReach; null: no links yet), in
+  // member order. A scoped flood crosses from one group to another only
+  // through a repeater that forwards the scope, so a link through a
+  // non-member joins nothing, and each group gets an area of its own: one
+  // hull over all of them would paint the gap between as reached.
+  // Union-find, O(members + their links).
+  function linkedGroups(members, peers) {
+    var idx = new Map();
+    (members || []).forEach(function (n, i) { idx.set(n.public_key, i); });
+    var parent = (members || []).map(function (_, i) { return i; });
+    function root(i) { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; }
+    if (peers) {
+      (members || []).forEach(function (n, i) {
+        (peers.get(n.public_key) || []).forEach(function (pk) {
+          var j = idx.get(pk);
+          if (j == null) return;
+          var a = root(i), b = root(j);
+          if (a !== b) parent[Math.max(a, b)] = Math.min(a, b);
+        });
+      });
+    }
+    var byRoot = new Map(), out = [];
+    (members || []).forEach(function (n, i) {
+      var r = root(i), g = byRoot.get(r);
+      if (!g) { g = []; byRoot.set(r, g); out.push(g); }
+      g.push(n);
+    });
+    return out;
   }
 
   // lobeOf stretches each of a node's links (from linkReach) along its own
@@ -408,16 +459,16 @@
   function tagHtml(text, title) {
     return '<span class="mc-scope-tag" title="' + title + '">' + text + '</span>';
   }
-
-  var MAST_TITLE = {
-    set: 'Antenna height set by the operator',
-    links: 'Antenna height raised from its proven links: the lowest mast that gives most of them line of sight over the terrain',
-    default: 'Antenna height assumed (10 m): its links do not show it needs more, or it has none',
-  };
+  function tagTitled(text, title) {
+    return '<span title="' + title + '">' + text + '</span>';
+  }
+  var GROUPS_TITLE = 'No two-way link joins these groups of its repeaters, so each has its own area and the gap between them is not shown as reached';
 
   // scopePopupHtml: one section per scope under the click, each listing its
-  // repeaters with why they are listed, and the antenna height the terrain
-  // model used for them (antennaOf(pk) → { antennaM, source }, when known).
+  // repeaters with why they are listed, and how many separate areas the
+  // scope is drawn as when more than one (groupsOf(scope), when given). The
+  // terrain model's antenna height is an estimate, not a fact about the
+  // operator's mast, so it is left out.
   // Scopes whose lists are the same (the same repeaters, listed for the same
   // reasons) share one section: a few repeaters that each carry many scopes
   // would otherwise list themselves once per scope. Sorted by name, case
@@ -428,7 +479,7 @@
     if (la !== lb) return la < lb ? -1 : 1;
     return a < b ? -1 : (a > b ? 1 : 0);
   }
-  function scopePopupHtml(scopes, nodes, antennaOf) {
+  function scopePopupHtml(scopes, nodes, groupsOf) {
     var sections = [], byBody = new Map();
     scopes.slice().sort(byScopeName).forEach(function (scope) {
       var members = scopeMembers(scope, nodes);
@@ -442,14 +493,12 @@
         if (m.conf && m.conf.declared) tags += tagHtml('declared', 'It lists this region when asked');
         if (m.carrying) tags += tagHtml('carrying', 'Seen relaying this region\'s traffic');
         if (!m.placed) tags += tagHtml('no position', 'Has no position, so it is not part of the outline');
-        var mast = antennaOf && antennaOf(pk);
-        if (mast && MAST_TITLE[mast.source]) {
-          tags += tagHtml((mast.source === 'links' ? '~' : '') + Math.round(mast.antennaM) + ' m mast' + (mast.source === 'set' ? ' (set)' : ''), MAST_TITLE[mast.source]);
-        }
         return '<li><a href="#/nodes/' + encodeURIComponent(pk) + '">' + escapeHtml(n.name || pk.slice(0, 8)) + '</a> ' + tags + '</li>';
       }).join('');
       var more = members.length > POPUP_ROWS ? '<li class="mc-scope-pop-more">+' + (members.length - POPUP_ROWS) + ' more</li>' : '';
-      var body = '<span class="mc-scope-pop-sum">' + nConf + ' configured · ' + nCarry + ' carrying</span></div>' +
+      var nGroups = groupsOf ? groupsOf(scope) : 0;
+      var split = nGroups > 1 ? ' · ' + tagTitled(nGroups + ' separate groups', GROUPS_TITLE) : '';
+      var body = '<span class="mc-scope-pop-sum">' + nConf + ' configured · ' + nCarry + ' carrying' + split + '</span></div>' +
         '<ul class="mc-scope-pop-list">' + rows + more + '</ul></section>';
       var sec = byBody.get(body);
       if (!sec) { sec = { scopes: [], body: body }; byBody.set(body, sec); sections.push(sec); }
@@ -499,7 +548,7 @@
     var reach = null;       // linkReach(nodes, links), rebuilt when either changes
     var shapes = new Map(); // pubkey → Map(area partners → { shape, key, edge }), rebuilt with reach
     var edgeCache = new Map(); // shape key → sampled edge, kept across rebuilds while used
-    var terrain = new Map(); // pubkey → { key, ext, meta } from the terrain provider
+    var terrain = new Map(); // pubkey → { key, ext } from the terrain provider
     var heights = null;      // operator antenna heights, { key: metres }; null until loaded
     var terrainAsked = new Set(); // pk|key requested and not yet answered
     var renderQueued = false;
@@ -507,7 +556,11 @@
     var only = '';
     var hidden = new Set();
     var view = VIEWS.indexOf(opts.view) >= 0 ? opts.view : VIEWS[0];
-    var cache = new Map(); // view|scope → { sig, rings }; every view kept, so switching back is free
+    var cache = new Map(); // view|scope → { sig, parts, gkeys }; every view kept, so switching back is free
+    // view|member shape keys → rings of one linked group, shared between
+    // scopes: a repeater in ten scopes with no member links is outlined
+    // once, not ten times. Kept while a drawn scope uses it.
+    var groupCache = new Map();
     var drawn = new Map(); // scope → [polygon]
     var hits = [];         // [{ scope, polys, rings, boxes, bounds, text }] for hover
     var list = [];
@@ -586,8 +639,8 @@
       });
       if (!items.length) return;
       var keyOf = new Map(items.map(function (it) { return [it.pk, it.key]; }));
-      Promise.resolve(opts.terrain.extentsFor(items, function (pk, ext, meta) {
-        terrain.set(pk, { key: keyOf.get(pk), ext: ext, meta: meta || null });
+      Promise.resolve(opts.terrain.extentsFor(items, function (pk, ext) {
+        terrain.set(pk, { key: keyOf.get(pk), ext: ext });
         shapes.delete(pk);
         queueRender();
       })).then(done, done);
@@ -606,8 +659,8 @@
       }, function () { heights = {}; }).then(queueRender);
     }
 
-    // The click box's antenna note for a node, once its terrain is known.
-    function antennaOf(pk) { var t = terrain.get(pk); return t && t.meta; }
+    // How many separate areas a scope is drawn as, for the click box.
+    function groupsOf(scope) { return (drawn.get(scope) || []).length; }
 
     function queueRender() {
       if (renderQueued) return;
@@ -615,43 +668,64 @@
       raf(function () { renderQueued = false; if (visible) render(); });
     }
 
-    function rings(scope, members) {
+    // A scope's areas: one ring list per linked group of its members
+    // (linkedGroups), each its own polygon, so groups that overlap are not
+    // cut out of each other by the even-odd fill.
+    function areas(scope, members) {
       var area = new Set(members.map(function (n) { return n.public_key; }));
-      var entries = members.map(function (n) { return shaped(n, area); });
+      var groups = linkedGroups(members, reach ? reach.peers : null);
+      var entries = groups.map(function (g) { return g.map(function (n) { return shaped(n, area); }); });
       var key = view + '|' + scope;
       // Order-free and cheap: how many members, and the sum and xor of a hash
-      // of each member's key.
-      var sum = 0, xor = 0;
-      entries.forEach(function (e) {
-        var h = 2166136261, k = e.key;
-        for (var i = 0; i < k.length; i++) h = Math.imul(h ^ k.charCodeAt(i), 16777619);
-        sum = (sum + (h >>> 0)) % 4294967296; xor ^= h;
+      // of each member's key and its group.
+      var sum = 0, xor = 0, count = 0;
+      entries.forEach(function (g, gi) {
+        g.forEach(function (e) {
+          var h = 2166136261, k = e.key + '|' + gi;
+          for (var i = 0; i < k.length; i++) h = Math.imul(h ^ k.charCodeAt(i), 16777619);
+          sum = (sum + (h >>> 0)) % 4294967296; xor ^= h; count++;
+        });
       });
-      var sig = entries.length + '|' + sum + '|' + (xor >>> 0);
+      var sig = count + '|' + groups.length + '|' + sum + '|' + (xor >>> 0);
       var hit = cache.get(key);
-      if (hit && hit.sig === sig) return hit.rings;
+      if (hit && hit.sig === sig) { hit.gkeys.forEach(function (k) { groupsUsed.add(k); }); return hit.parts; }
       computed++;
-      var r;
-      if (view === 'detailed') r = wrapShapes(entries.map(function (e) { return e.shape; }), WRAP_GAP_M, marginM);
-      else {
-        var ring = roundOut(hullOfEdges(entries.map(function (e) { return e.edge; })), marginM);
-        r = ring.length ? [ring] : [];
-      }
-      cache.set(key, { sig: sig, rings: r });
-      return r;
+      var gkeys = [];
+      var parts = entries.map(function (g) {
+        var gk = view + '|' + g.map(function (e) { return e.key; }).sort().join(',');
+        gkeys.push(gk); groupsUsed.add(gk);
+        var r = groupCache.get(gk);
+        if (r) return r;
+        if (view === 'detailed') r = wrapShapes(g.map(function (e) { return e.shape; }), WRAP_GAP_M, marginM);
+        else {
+          var ring = roundOut(hullOfEdges(g.map(function (e) { return e.edge; })), marginM);
+          r = ring.length ? [ring] : [];
+        }
+        groupCache.set(gk, r);
+        return r;
+      }).filter(function (r) { return r.length; });
+      cache.set(key, { sig: sig, parts: parts, gkeys: gkeys });
+      return parts;
     }
+    var groupsUsed = new Set();
 
+    // draw adds a scope's polygons, one per group, and returns them. Hover
+    // and pulse light them all.
     function draw(scope, members, text) {
-      var r = rings(scope, members);
-      if (!r.length) return null;
-      var poly = L.polygon(r, { pane: PANE, renderer: renderer, interactive: false,
-        className: 'mc-scope-area mc-reach-c' + colorIndex(scope) });
-      layer.addLayer(poly);
-      var el = poly.getElement && poly.getElement();
-      if (el && el.setAttribute) el.setAttribute('data-scope', scope);
-      var boxes = r.map(function (ring) { return ringsBounds([ring]); });
-      hits.push({ scope: scope, polys: [poly], rings: r, boxes: boxes, bounds: ringsBounds(r), text: text });
-      return poly;
+      var parts = areas(scope, members);
+      var polys = [];
+      if (parts.length > 1) text += ' · ' + parts.length + ' separate groups';
+      parts.forEach(function (r) {
+        var poly = L.polygon(r, { pane: PANE, renderer: renderer, interactive: false,
+          className: 'mc-scope-area mc-reach-c' + colorIndex(scope) });
+        layer.addLayer(poly);
+        var el = poly.getElement && poly.getElement();
+        if (el && el.setAttribute) el.setAttribute('data-scope', scope);
+        var boxes = r.map(function (ring) { return ringsBounds([ring]); });
+        hits.push({ scope: scope, polys: polys, rings: r, boxes: boxes, bounds: ringsBounds(r), text: text });
+        polys.push(poly);
+      });
+      return polys;
     }
 
     function render() {
@@ -659,6 +733,7 @@
       layer.clearLayers();
       drawn = new Map();
       hits = [];
+      groupsUsed = new Set();
       var groups = visible ? groupNodesByScope(nodes) : new Map();
       if (visible && !reach) { reach = linkReach(nodes, links); shapes = new Map(); }
       var members = new Set();
@@ -671,13 +746,15 @@
         VIEWS.forEach(function (v) { live.add(v + '|' + scope); });
         if ((want && scope !== want) || hidden.has(scope)) return;
         all.forEach(function (n) { members.add(n); });
-        var poly = draw(scope, all, '#' + escapeHtml(scope) + ' · ' + plural(all.length));
-        if (poly) drawn.set(scope, [poly]);
+        var polys = draw(scope, all, '#' + escapeHtml(scope) + ' · ' + plural(all.length));
+        if (polys.length) drawn.set(scope, polys);
       });
       list.sort(function (a, b) { return a.scope < b.scope ? -1 : (a.scope > b.scope ? 1 : 0); });
       // Bounded by the scopes in the current node list: a scope that left it
       // leaves the cache too.
       if (visible) Array.from(cache.keys()).forEach(function (k) { if (!live.has(k)) cache.delete(k); });
+      // Groups of the scopes drawn now (hidden scopes recompute theirs).
+      if (visible) Array.from(groupCache.keys()).forEach(function (k) { if (!groupsUsed.has(k)) groupCache.delete(k); });
       // Bounded the same way: only the edges this render used survive.
       if (visible) {
         var used = new Set();
@@ -718,7 +795,8 @@
       if (map.hasLayer && map.hasLayer(tip)) map.closeTooltip(tip);
     }
     function hoverAt(ll) {
-      var found = hitsAt(ll);
+      var seen = new Set();
+      var found = hitsAt(ll).filter(function (h) { if (seen.has(h.scope)) return false; seen.add(h.scope); return true; });
       clearHover();
       if (!found.length) return;
       found.forEach(function (h) { hovered = hovered.concat(h.polys); });
@@ -748,7 +826,7 @@
       if (!scopes.length) return;
       clearHover();
       popup.setLatLng(e.latlng);
-      popup.setContent(scopePopupHtml(scopes, nodes, antennaOf));
+      popup.setContent(scopePopupHtml(scopes, nodes, groupsOf));
       popup.openOn(map);
     }
     map.on('mousemove', onMove);
@@ -985,6 +1063,7 @@
     carriedScopes: carriedScopes,
     scopePopupHtml: scopePopupHtml,
     linkReach: linkReach,
+    linkedGroups: linkedGroups,
     lobeOf: lobeOf,
     reachFor: reachFor,
     noLinkRadius: NO_LINK_RADIUS_M,

@@ -74,6 +74,36 @@ test('scopeHull of one circle, grown by a margin, is a circle that much wider', 
   });
 });
 
+// One shape's hull takes the path without a sort (its edge goes round the
+// node in bearing order); it must be the ring the general path gives.
+test('the hull of one shape is the same ring without the sort, on uneven shapes too', () => {
+  let seed = 9;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const key = r => r.map(p => p[0].toFixed(9) + ',' + p[1].toFixed(9)).sort().join(';');
+  for (let t = 0; t < 300; t++) {
+    const ext = new Float64Array(G.sectors);
+    for (let i = 0; i < G.sectors; i++) ext[i] = 1000 + rnd() * (rnd() < 0.3 ? 30000 : 5000);
+    const shape = { lat: -60 + rnd() * 120, lon: -170 + rnd() * 340, ext, maxExt: Math.max(...ext), minExt: Math.min(...ext), uniform: false };
+    const e = G.shapeEdge(shape);
+    assert.ok(e.star, 'shapeEdge marks its edge');
+    // A second, empty edge forces the general path over the same points.
+    const general = G.hullOfEdges([e, { pts: new Float64Array(0), box: e.box }]);
+    assert.strictEqual(key(G.hullOfEdges([e])), key(general), 'shape ' + t);
+  }
+  // Plain points are not in bearing order: convexHull keeps the general path.
+  assert.strictEqual(G.convexHull([[0, 0], [1, 1], [0, 1], [1, 0], [0.5, 0.5]]).length, 4);
+});
+
+test('a margin round a smooth hull adds no points at shallow corners, and stays 2 km out', () => {
+  const ring = G.hullOfEdges([G.shapeEdge(circle(O, 5000))]);
+  const grown = G.roundOut(ring, 2000);
+  assert.strictEqual(grown.length, ring.length, 'one mitred point a corner');
+  for (const p of grown) {
+    const d = metres([O.lat, O.lon], p);
+    assert.ok(d > 6990 && d < 7010, 'at ' + d.toFixed(1) + ' m');
+  }
+});
+
 test('wrapShapes joins circles closer than the gap and leaves farther ones apart', () => {
   const near = [circle(O, 1000), circle(offset(O.lat, O.lon, 8000, 0), 1000)];
   assert.strictEqual(G.wrapShapes(near, 15000).length, 1, 'two circles 8 km apart should be one area');
