@@ -45,7 +45,7 @@ console.log('\n=== scope-contours.js: hull geometry ===');
 
 test('exposes its API', () => {
   assert.ok(SC, 'window.ScopeContours not defined');
-  for (const fn of ['normRegion', 'nodeRegionEvidence', 'groupNodesByScope', 'convexHull', 'scopeHull', 'contourShapes', 'wrapShapes', 'shapeFor', 'reachFor', 'linkReach', 'inRings', 'colorIndex', 'createPulser', 'createOverlay', 'mountViewPicker', 'viewFromHash']) {
+  for (const fn of ['normRegion', 'nodeRegionEvidence', 'groupNodesByScope', 'convexHull', 'scopeHull', 'contourShapes', 'wrapShapes', 'shapeFor', 'reachFor', 'linkReach', 'inRings', 'colorsFor', 'createPulser', 'createOverlay', 'mountViewPicker', 'viewFromHash']) {
     assert.strictEqual(typeof SC[fn], 'function', fn + ' not exported');
   }
 });
@@ -255,13 +255,29 @@ test('the click box drops a stale carrying member and tags carrying only for lis
   assert.ok(/Listed<\/a> <span class="mc-scope-tag"[^>]*>allowed<\/span><span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(ph), ph);
 });
 
-test('colorIndex is stable and in 1..8', () => {
-  for (const s of ['nyc', 'li', 'be', 'be-bru', '', 'a-very-long-region-name']) {
-    const i = SC.colorIndex(s);
-    assert.ok(i >= 1 && i <= 8, s + ' → ' + i);
-    assert.strictEqual(SC.colorIndex(s), i);
-    assert.strictEqual(SC.colorIndex('#' + s), i, '# spelling must not change the colour');
-  }
+test('colorsFor hands out colours in name order, whatever order the scopes come in', () => {
+  const plain = (m) => Object.fromEntries(Array.from(m));
+  assert.deepStrictEqual(plain(SC.colorsFor(['nyc', 'li', 'ct', 'ny', 'li'])), { ct: 1, li: 2, ny: 3, nyc: 4 });
+  assert.deepStrictEqual(plain(SC.colorsFor(['PHL', 'northeast', 'philly'])), { northeast: 1, philly: 2, PHL: 3 }, 'case aside');
+  assert.strictEqual(SC.colorsFor([]).size, 0);
+});
+
+test('colorsFor: up to eight scopes all differ; more share each colour as evenly as they can', () => {
+  const eight = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+  assert.strictEqual(new Set(SC.colorsFor(eight).values()).size, 8);
+  // The twelve scopes of one live instance, all overlapping. A hash of the
+  // name put them on 6 colours, with 8 pairs alike; 4 is the least possible.
+  const live = ['philly', 'PHL', 'northeast', 'philly-mainline', 'us-east', 'us-midatlantic',
+    'us-northeast', 'prm', 'us', 'us-pa', 'us-nj', 'us-de'];
+  const uses = new Map();
+  SC.colorsFor(live).forEach((c) => {
+    assert.ok(c >= 1 && c <= 8, String(c));
+    uses.set(c, (uses.get(c) || 0) + 1);
+  });
+  assert.strictEqual(uses.size, 8, 'every colour used');
+  let alike = 0;
+  uses.forEach((n) => { alike += n * (n - 1) / 2; });
+  assert.strictEqual(alike, 4);
 });
 
 console.log('\n=== scope-contours.js: deep link ===');
@@ -887,7 +903,8 @@ test('visible overlay draws one non-interactive outline per scope (members linke
     assert.strictEqual(p.options.pane, 'mcScopeContoursPane');
     assert.ok(p.options.renderer && p.options.renderer._svg);
   }
-  assert.ok(rec.polygons.some(p => new RegExp('mc-reach-c' + SC.colorIndex('nyc') + '\\b').test(p.options.className)));
+  // ct<script>, li, ny, nyc in name order: nyc is the fourth colour.
+  assert.ok(rec.polygons.some(p => /mc-reach-c4\b/.test(p.options.className)));
 });
 
 test('scopes() lists every scope with its counts, sorted, and onChange reports it', () => {
@@ -928,7 +945,7 @@ test('setOnly narrows to one scope, regardless of # spelling', () => {
   rec.polygons.length = 0;
   o.setOnly('#li');
   assert.strictEqual(rec.polygons.length, 1);
-  assert.ok(new RegExp('mc-reach-c' + SC.colorIndex('li') + '\\b').test(rec.polygons[0].options.className));
+  assert.ok(/mc-reach-c2\b/.test(rec.polygons[0].options.className), 'narrowing must not recolour: li stays second of four');
   o.setOnly('');
   assert.strictEqual(rec.polygons.length, 1 + 4);
 });
@@ -943,6 +960,8 @@ test('setHidden leaves hidden scopes out of the map but in the list', () => {
   const list = JSON.parse(JSON.stringify(o.scopes()));
   assert.deepStrictEqual(list.filter(s => s.hidden).map(s => s.scope), ['li', 'nyc']);
   assert.deepStrictEqual(JSON.parse(JSON.stringify(o.hidden())).sort(), ['li', 'nyc']);
+  assert.deepStrictEqual(list.map(s => s.scope + ':' + s.colour), ['ct<script>:1', 'li:2', 'ny:3', 'nyc:4'], 'hiding must not recolour');
+  assert.ok(rec.polygons.some(p => /mc-reach-c3\b/.test(p.options.className)), 'ny keeps its colour');
 });
 
 test('unchanged members and links reuse the cache; a moved node recomputes only its scope', () => {
@@ -1398,6 +1417,10 @@ test('clicking inside outlines lists each scope\'s repeaters with why they are t
   assert.ok(/#phl<\/strong>(<\/span>)* <span class="mc-scope-pop-sum">3 configured · 2 carrying/.test(html), html);
   assert.ok(/#philly<\/strong>/.test(html), 'overlapping #philly not listed');
   assert.ok(!/#nj/.test(html), 'a scope not under the click is listed');
+  // nj, philly, phl in name order: the swatches match the areas, not just
+  // the two scopes under the click.
+  assert.ok(/mc-reach-c3" aria-hidden="true"><\/span> <strong>#phl</.test(html), html);
+  assert.ok(/mc-reach-c2" aria-hidden="true"><\/span> <strong>#philly</.test(html), html);
   const phl = html.split('<section').find(sec => sec.includes('#phl</strong>'));
   // Configured first (by name), then carrying-only.
   const order = ['Amon', 'Nowhere', 'Treebeard', 'Carrier'].map(n => phl.indexOf(n));
@@ -1542,7 +1565,7 @@ test('the list shows a row per scope with its colour, escaped, only while visibl
   assert.strictEqual(el.hidden, false);
   assert.ok(el.innerHTML.startsWith('<h3>REGION SCOPES</h3>'));
   assert.strictEqual((el.innerHTML.match(/class="mc-scope-row"/g) || []).length, 4);
-  assert.ok(el.innerHTML.includes('mc-reach-c' + SC.colorIndex('nyc')));
+  assert.ok(/data-scope="nyc" checked> <span class="mc-scope-swatch mc-reach-c4"/.test(el.innerHTML), el.innerHTML);
   assert.ok(el.innerHTML.includes('data-scope="ct&lt;script&gt;"') && !el.innerHTML.includes('<script>'), 'scope name not escaped');
   assert.ok(!/--configured/.test(el.innerHTML), 'a configured-only scope looks like any other');
   assert.ok(/title="#nyc: 3 nodes, 2 seen carrying it"/.test(el.innerHTML), el.innerHTML);

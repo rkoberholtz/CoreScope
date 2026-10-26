@@ -132,7 +132,12 @@ const EDGES = [
     els.forEach((el) => { const s = el.getAttribute('data-scope'); out[s] = (out[s] || 0) + 1; });
     return out;
   });
-  const colourOf = (scope) => page.evaluate((s) => 'mc-reach-c' + window.ScopeContours.colorIndex(s), scope);
+  // A scope's colour, from its swatch in the scope list of the page in view.
+  const colourOf = (scope) => page.evaluate((s) => {
+    const box = Array.from(document.querySelectorAll('.mc-scope-row input')).find((el) => el.getAttribute('data-scope') === s && el.offsetParent);
+    const sw = box && box.nextElementSibling;
+    return sw ? (sw.className.match(/mc-reach-c\d/) || [''])[0] : 'no swatch for ' + s;
+  }, scope);
   const outline = (scope) => 'path.mc-scope-area[data-scope="' + scope + '"]';
   // A screen point well inside every listed scope's outline (and outside
   // their holes): it and the points 4 px around it pass the SVG path's own
