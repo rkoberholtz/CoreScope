@@ -1,5 +1,9 @@
 # Mesh Audio — Sonification Plan
 
+> **Archived plan.** Historical planning material; proposals, status claims, and
+> instructions below may be outdated or unimplemented. For current guidance, see
+> the [README](../../README.md) and [deployment guide](../../DEPLOY.md).
+
 *Turn raw packet bytes into generative music.*
 
 > Writing a new voice? See [docs/audio-voices.md](docs/audio-voices.md).
