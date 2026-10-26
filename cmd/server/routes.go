@@ -778,7 +778,41 @@ func (s *Server) handleConfigMap(w http.ResponseWriter, r *http.Request) {
 	if zoom == 0 {
 		zoom = 9
 	}
-	writeJSON(w, MapConfigResponse{Center: center, Zoom: zoom})
+	resp := MapConfigResponse{Center: center, Zoom: zoom, AntennaHeights: cleanAntennaHeights(s.cfg.MapDefaults.AntennaHeights)}
+	if tt := s.cfg.MapDefaults.TerrainTiles; tt.Disabled || tt.URL != "" {
+		resp.TerrainTiles = &TerrainTilesResponse{Disabled: tt.Disabled, URL: tt.URL}
+	}
+	writeJSON(w, resp)
+}
+
+// Antenna heights outside this range are not heights above ground anyone
+// configures on purpose: a typo, or an altitude above sea level.
+const (
+	minAntennaHeightM = 1
+	maxAntennaHeightM = 200
+	minAntennaKeyLen  = 8
+)
+
+// cleanAntennaHeights keeps the entries the region contours can use: keys
+// that are hex pubkeys or prefixes long enough to identify a node,
+// lowercased; heights in a plausible range. nil when nothing is left, so the
+// response omits the field.
+func cleanAntennaHeights(in map[string]float64) map[string]float64 {
+	var out map[string]float64
+	for k, v := range in {
+		key := strings.ToLower(strings.TrimSpace(k))
+		if len(key) < minAntennaKeyLen || !hexPrefixRe.MatchString(key) {
+			continue
+		}
+		if !(v >= minAntennaHeightM && v <= maxAntennaHeightM) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]float64)
+		}
+		out[key] = v
+	}
+	return out
 }
 
 func (s *Server) handleConfigGeoFilter(w http.ResponseWriter, r *http.Request) {
