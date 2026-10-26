@@ -8,12 +8,15 @@
   // Estimated positions of repeaters known only from their reported name
   // (map-estimated.js). A layer of its own: never clustered with real markers.
   let estimatedLayer = null;
+  // Region contours (scope-contours.js): owns its own layer,
+  // pane and cache. Computes nothing while the toggle is off.
+  let reachOverlay = null;
   let reported = { nodes: [], method: null };
   let clusterGroup = null;
   let nodes = [];
   let targetNodeKey = null;
   let observers = [];
-  let filters = { repeater: true, companion: true, room: true, sensor: true, observer: true, lastHeard: '30d', neighbors: false, clustering: localStorage.getItem('meshcore-map-clustering') !== 'false', hashLabels: localStorage.getItem('meshcore-map-hash-labels') !== 'false', statusFilter: localStorage.getItem('meshcore-map-status-filter') || 'all', byteSize: localStorage.getItem('meshcore-map-byte-filter') || 'all', multiByteOverlay: localStorage.getItem('meshcore-map-multibyte-overlay') === 'true', scopeState: localStorage.getItem('meshcore-map-scope-filter') || 'all', scopeOverlay: localStorage.getItem('meshcore-map-scope-overlay') === 'true', estimated: localStorage.getItem('meshcore-map-estimated') !== 'false', regionScope: localStorage.getItem('meshcore-map-region-filter') || '' };
+  let filters = { repeater: true, companion: true, room: true, sensor: true, observer: true, lastHeard: '30d', neighbors: false, clustering: localStorage.getItem('meshcore-map-clustering') !== 'false', hashLabels: localStorage.getItem('meshcore-map-hash-labels') !== 'false', statusFilter: localStorage.getItem('meshcore-map-status-filter') || 'all', byteSize: localStorage.getItem('meshcore-map-byte-filter') || 'all', multiByteOverlay: localStorage.getItem('meshcore-map-multibyte-overlay') === 'true', scopeState: localStorage.getItem('meshcore-map-scope-filter') || 'all', scopeOverlay: localStorage.getItem('meshcore-map-scope-overlay') === 'true', estimated: localStorage.getItem('meshcore-map-estimated') !== 'false', regionScope: localStorage.getItem('meshcore-map-region-filter') || '', scopeContours: localStorage.getItem('meshcore-map-scope-contours') === 'true' };
   let selectedReferenceNode = null;  // pubkey of the reference node for neighbor filtering
   let neighborPubkeys = null;        // Set of pubkeys that are direct neighbors of selected node
   let wsHandler = null;
@@ -174,23 +177,11 @@
   // repeater that holds a region shows no traffic for it until some passes
   // its way. The hint under the picker says so.
 
-  // normRegion mirrors the server's normScope (scope_audit.go): strip one
-  // leading '#', nothing else, so the map and the audit spell a region alike.
-  function normRegion(s) {
-    s = s == null ? '' : String(s);
-    return s.charAt(0) === '#' ? s.slice(1) : s;
-  }
-
-  function nodeRegionEvidence(n, region) {
-    var want = normRegion(region);
-    var ev = { declared: false, observed: false };
-    if (!want || !n) return ev;
-    var d = Array.isArray(n.declared_regions) ? n.declared_regions : [];
-    for (var i = 0; i < d.length; i++) { if (normRegion(d[i]) === want) { ev.declared = true; break; } }
-    var t = Array.isArray(n.transported_scopes) ? n.transported_scopes : [];
-    for (var j = 0; j < t.length; j++) { if (normRegion(t[j]) === want) { ev.observed = true; break; } }
-    return ev;
-  }
+  // normRegion and nodeRegionEvidence are shared with the region contours
+  // (scope-contours.js), so the filter and the outlines agree on which nodes
+  // belong to a region. Looked up at call time.
+  function normRegion(s) { return window.ScopeContours.normRegion(s); }
+  function nodeRegionEvidence(n, region) { return window.ScopeContours.nodeRegionEvidence(n, region); }
 
   function regionFilterAccepts(n, region) {
     if (!region) return true;
@@ -540,6 +531,9 @@
             <label for="mcRegionFilter" class="sr-only">Show nodes with evidence for a region scope</label>
             <select id="mcRegionFilter" title="Show nodes that declare a region scope or were seen carrying its traffic">${regionFilterOptionsHtml([], filters.regionScope)}</select>
             <div id="mcRegionHint" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+            <label for="mcScopeContours" title="Outline where each region scope reaches: each repeater's range from its two-way links, trimmed by line of sight over terrain and stretched to proven links within its area. Each area covers the repeaters configured for the scope or seen carrying its traffic. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Region contours</label>
+            <div id="mcScopeView" class="mc-scope-view" hidden></div>
+            <div id="mcScopeList" class="mc-scope-list" hidden></div>
           </fieldset>
           <fieldset class="mc-section">
             <legend class="mc-label">Filters</legend>
@@ -612,6 +606,10 @@
 
     // If navigated with ?node=PUBKEY, highlight that node after markers load
     targetNodeKey = urlParams.get('node') || null;
+    // ?contours=1|0 overrides the stored toggle, so a shared link opens with
+    // the region contours as the sender had them.
+    const contoursFlag = window.ScopeContours ? window.ScopeContours.hashFlag(location.hash) : null;
+    if (contoursFlag !== null) filters.scopeContours = contoursFlag;
 
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
       (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
@@ -734,6 +732,23 @@
     clusterGroup = createClusterGroup();
     if (filters.clustering && clusterGroup) clusterGroup.addTo(map);
     routeLayer = L.layerGroup().addTo(map);
+    if (window.ScopeContours) {
+      // Reach follows the neighbor graph: one bulk call, shared through
+      // api()'s cache, fetched only while the contours are on.
+      reachOverlay = window.ScopeContours.createOverlay(L, map, {
+        loadLinks: () => api('/analytics/neighbor-graph', { ttl: CLIENT_TTL.analyticsRF }).then(d => (d && d.edges) || []),
+        // Line of sight over elevation tiles trims each repeater's reach;
+        // antenna heights the operator set in config replace the estimate.
+        terrain: window.TerrainReach ? window.TerrainReach.shared() : null,
+        loadMapConfig: () => api('/config/map', { ttl: 3600 }),
+      });
+      reachOverlay.setOnly(filters.regionScope);
+      // Convex hull or detailed (shrink-wrapped) areas; set before the overlay is
+      // shown, so only the chosen view is computed.
+      window.ScopeContours.mountViewPicker(document.getElementById('mcScopeView'), reachOverlay);
+      window.ScopeContours.mountScopeList(document.getElementById('mcScopeList'), reachOverlay);
+      reachOverlay.setVisible(filters.scopeContours);
+    }
     // Exposed for the #1374 route renderer (window.MeshRoute) and its E2E tests.
     if (typeof window !== 'undefined') {
       window.__mc_map = map;
@@ -903,6 +918,16 @@
     if (scopeOverlayEl) {
       scopeOverlayEl.checked = filters.scopeOverlay;
       scopeOverlayEl.addEventListener('change', e => { filters.scopeOverlay = e.target.checked; localStorage.setItem('meshcore-map-scope-overlay', e.target.checked); renderMarkers(); });
+    }
+    const scopeContoursEl = document.getElementById('mcScopeContours');
+    if (scopeContoursEl) {
+      scopeContoursEl.checked = filters.scopeContours;
+      scopeContoursEl.addEventListener('change', e => {
+        filters.scopeContours = e.target.checked;
+        localStorage.setItem('meshcore-map-scope-contours', filters.scopeContours);
+        window.ScopeContours.writeHashFlag(filters.scopeContours);
+        if (reachOverlay) reachOverlay.setVisible(filters.scopeContours);
+      });
     }
     const estimatedEl = document.getElementById('mcEstimated');
     if (estimatedEl) {
@@ -1754,6 +1779,7 @@
       buildRoleChecks(data.counts || {});
       buildRegionFilter();
       buildJumpButtons();
+      if (reachOverlay) reachOverlay.setNodes(nodes);
 
       renderMarkers();
       // Optional and not awaited: the real markers never wait for it. The same
@@ -1899,6 +1925,7 @@
     const sel = document.getElementById('mcRegionFilter');
     if (sel && sel.value !== region) sel.value = region;
     updateRegionHint();
+    if (reachOverlay) reachOverlay.setOnly(filters.regionScope);
     renderMarkers();
   }
 
@@ -2484,6 +2511,7 @@
     }
     markerLayer = null;
     estimatedLayer = null;
+    if (reachOverlay) { reachOverlay.destroy(); reachOverlay = null; }
     reported = { nodes: [], method: null };
     clusterGroup = null;
     _currentMarkerData = [];
