@@ -1287,7 +1287,7 @@ test('a split scope is hovered, pulsed and listed once, and the click box says h
   map.fire('click', { latlng: { lat: 40, lng: -75.27 }, sourceTarget: map });
   const html = rec.popup.content;
   assert.strictEqual(html.split('#us</strong>').length - 1, 1, 'listed once: ' + html);
-  assert.ok(/0 configured · 4 carrying · <span[^>]*title="[^"]*">2 separate groups<\/span>/.test(html), html);
+  assert.ok(/>0 with known config<\/span> · <span[^>]*>4 seen carrying<\/span> · <span[^>]*title="[^"]*">2 separate groups<\/span>/.test(html), html);
 });
 
 test('the click box mentions groups only when a scope is split', () => {
@@ -1414,7 +1414,12 @@ test('clicking inside outlines lists each scope\'s repeaters with why they are t
   map.fire('click', { latlng: { lat: 40.001, lng: -75.300 }, sourceTarget: map });
   assert.ok(rec.popup && rec.popup._onMap, 'popup not opened');
   const html = rec.popup.content;
-  assert.ok(/#phl<\/strong>(<\/span>)* <span class="mc-scope-pop-sum">3 configured · 2 carrying/.test(html), html);
+  assert.ok(/#phl<\/strong>(<\/span>)* <span class="mc-scope-pop-sum"><span title="[^"]*">3 with known config<\/span> · <span title="[^"]*">2 seen carrying<\/span>/.test(html), html);
+  // A carrying repeater is configured too: the first count says what is
+  // known, and each count says so on hover.
+  assert.ok(html.includes('title="Its region list or default scope has been reported">3 with known config'), html);
+  assert.ok(html.includes('title="Seen relaying this scope\'s traffic, so it forwards it">2 seen carrying'), html);
+  assert.ok(!/\d configured ·/.test(html), 'the old wording');
   assert.ok(/#philly<\/strong>/.test(html), 'overlapping #philly not listed');
   assert.ok(!/#nj/.test(html), 'a scope not under the click is listed');
   // nj, philly, phl in name order: the swatches match the areas, not just

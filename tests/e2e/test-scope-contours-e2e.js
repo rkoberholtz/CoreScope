@@ -280,7 +280,7 @@ const EDGES = [
     await page.mouse.click(pt.x, pt.y);
     await page.waitForSelector('.leaflet-popup.mc-scope-popup', { timeout: 3000 });
     const text = await page.$eval('.mc-scope-popup', (el) => el.textContent.replace(/\s+/g, ' '));
-    assert(/#sf 1 configured · 3 carrying · 2 separate groups/.test(text) && /#bay 0 configured · 2 carrying(?! ·)/.test(text), 'popup: ' + text);
+    assert(/#sf 1 with known config · 3 seen carrying · 2 separate groups/.test(text) && /#bay 0 with known config · 2 seen carrying(?! ·)/.test(text), 'popup: ' + text);
     // Different lists, so a section each (scopes with the same list share one).
     const heads = await page.$$eval('.mc-scope-popup .mc-scope-pop-scope', (els) => els.map((el) => el.querySelectorAll('.mc-scope-pop-name').length));
     assert(heads.length === 2 && heads.every((n) => n === 1), 'sections: ' + JSON.stringify(heads));
@@ -401,7 +401,7 @@ const EDGES = [
     assert(/#sf · 3 nodes · 2 separate groups/.test(await page.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent)), 'tooltip');
     await page.mouse.click(pt.x, pt.y);
     await page.waitForSelector('.leaflet-popup.mc-scope-popup', { timeout: 3000 });
-    assert(/#sf 1 configured · 3 carrying · 2 separate groups/.test(await page.$eval('.mc-scope-popup', (el) => el.textContent.replace(/\s+/g, ' '))), 'popup');
+    assert(/#sf 1 with known config · 3 seen carrying · 2 separate groups/.test(await page.$eval('.mc-scope-popup', (el) => el.textContent.replace(/\s+/g, ' '))), 'popup');
     await page.keyboard.press('Escape');
     await page.mouse.move(5, 450);
   });
