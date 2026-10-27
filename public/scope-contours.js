@@ -468,6 +468,11 @@
   function tagTitled(text, title) {
     return '<span title="' + title + '">' + text + '</span>';
   }
+  // The summary counts: a carrying member is configured for the scope too
+  // (the firmware forwards only what its list allows), so the first count is
+  // about what CoreScope knows, not what the repeater is.
+  var KNOWN_TITLE = 'Its region list or default scope has been reported';
+  var CARRY_TITLE = 'Seen relaying this scope\'s traffic, so it forwards it';
   var GROUPS_TITLE = 'No two-way link joins these groups of its repeaters, so each has its own area and the gap between them is not shown as reached';
 
   // scopePopupHtml: one section per scope under the click, each listing its
@@ -507,7 +512,8 @@
       var more = members.length > POPUP_ROWS ? '<li class="mc-scope-pop-more">+' + (members.length - POPUP_ROWS) + ' more</li>' : '';
       var nGroups = groupsOf ? groupsOf(scope) : 0;
       var split = nGroups > 1 ? ' · ' + tagTitled(nGroups + ' separate groups', GROUPS_TITLE) : '';
-      var body = '<span class="mc-scope-pop-sum">' + nConf + ' configured · ' + nCarry + ' carrying' + split + '</span></div>' +
+      var body = '<span class="mc-scope-pop-sum">' + tagTitled(nConf + ' with known config', KNOWN_TITLE) + ' · ' +
+        tagTitled(nCarry + ' seen carrying', CARRY_TITLE) + split + '</span></div>' +
         '<ul class="mc-scope-pop-list">' + rows + more + '</ul></section>';
       var sec = byBody.get(body);
       if (!sec) { sec = { scopes: [], body: body }; byBody.set(body, sec); sections.push(sec); }
