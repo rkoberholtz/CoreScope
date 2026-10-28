@@ -1,0 +1,271 @@
+name: Nightly fork image
+
+# Fork-only. Each night: merge upstream/master and the feature branches into
+# deploy, run upstream's own test jobs (read from deploy.yml by
+# .github/fork/run-upstream-job.py) on the result, build the amd64 image, and
+# only when everything passed move deploy forward and publish :<sha> + :latest.
+#
+# Nothing is pushed to deploy or the registry on a merge conflict or a failed
+# test; :latest stays on the last good image. GitHub emails a failed scheduled
+# run to whoever last edited this file's schedule.
+#
+# Needs: secret FORK_PUSH_TOKEN (fine-grained PAT, this repo, Contents + Workflows
+# read/write; GITHUB_TOKEN may not push commits that touch .github/workflows/,
+# and upstream's often do), Actions write access on the ghcr package, and this
+# file on the default branch (schedules only run from there).
+on:
+  schedule:
+    - cron: '0 8 * * *' # 08:00 UTC: 04:00 EDT / 03:00 EST, ahead of the 06:05 stack update
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild even when nothing new was merged and the image exists'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-nightly
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/rkoberholtz/corescope
+  UPSTREAM_URL: https://github.com/Kpa-clawbot/CoreScope.git
+  FEATURE_BRANCHES: feat/region-scope-contours feat/audio-voices
+  VERSION_SUFFIX: rkoberholtz
+
+jobs:
+  merge:
+    name: Merge upstream + feature branches
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.merge.outputs.build }}
+      sha: ${{ steps.merge.outputs.sha }}
+      short: ${{ steps.merge.outputs.short }}
+      app_version: ${{ steps.merge.outputs.app_version }}
+      go_version: ${{ steps.versions.outputs.go_version }}
+      node_version: ${{ steps.versions.outputs.node_version }}
+      shards: ${{ steps.versions.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: deploy
+          fetch-depth: 0
+          token: ${{ secrets.FORK_PUSH_TOKEN }}
+
+      - name: Merge
+        id: merge
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream master
+          git fetch upstream '+refs/tags/v*:refs/tags/v*'
+          before=$(git rev-parse HEAD)
+          for ref in upstream/master $(printf 'origin/%s ' $FEATURE_BRANCHES); do
+            if ! git merge --no-edit "$ref"; then
+              echo "::error::Merging $ref into deploy conflicts in: $(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+              {
+                echo "### Merge conflict"
+                echo "Merging \`$ref\` into \`deploy\` conflicts. Nothing was pushed; \`:latest\` is unchanged."
+                echo "Resolve it by hand in the deploy worktree and push deploy, then re-run this workflow."
+                echo '```'; git diff --name-only --diff-filter=U; echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              git merge --abort
+              exit 1
+            fi
+          done
+          sha=$(git rev-parse HEAD)
+          short=$(git rev-parse --short=8 HEAD)
+          release=$(git describe --tags --abbrev=0 --match 'v*' upstream/master)
+          app_version="$release-$(git rev-parse --short=8 upstream/master)-$VERSION_SUFFIX"
+          build=true
+          if [ "$sha" = "$before" ] && [ "$FORCE" != "true" ] \
+             && docker manifest inspect "$IMAGE:$short" > /dev/null 2>&1; then
+            build=false
+            echo "Nothing new: deploy is $short and $IMAGE:$short exists." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$build" = true ]; then
+            # Scratch branch so the test jobs can check the merge out. Only
+            # deploy itself is protected from force pushes; this one is not.
+            git push --force origin "HEAD:refs/heads/deploy-candidate"
+            echo "Building $short ($app_version): $(git log --oneline "$before..HEAD" | wc -l) new commits." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          {
+            echo "build=$build"
+            echo "sha=$sha"
+            echo "short=$short"
+            echo "app_version=$app_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test the job runner and read versions from deploy.yml
+        id: versions
+        run: |
+          pip install --quiet pyyaml
+          python .github/fork/test_run_upstream_job.py
+          python .github/fork/run-upstream-job.py --versions | tee -a "$GITHUB_OUTPUT"
+
+  go-test:
+    name: Upstream go-test
+    needs: merge
+    if: needs.merge.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.merge.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ needs.merge.outputs.go_version }}
+          cache-dependency-path: "**/go.sum"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ needs.merge.outputs.node_version }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet pyyaml
+      - run: python .github/fork/run-upstream-job.py go-test
+
+  race-test:
+    name: Upstream race-test
+    needs: merge
+    if: needs.merge.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.merge.outputs.sha }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ needs.merge.outputs.go_version }}
+          cache-dependency-path: "**/go.sum"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet pyyaml
+      - run: python .github/fork/run-upstream-job.py race-test
+
+  e2e:
+    name: Upstream E2E shard ${{ matrix.shard }}
+    needs: merge
+    if: needs.merge.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: ${{ fromJSON(needs.merge.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.merge.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ needs.merge.outputs.node_version }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ needs.merge.outputs.go_version }}
+          cache-dependency-path: "**/go.sum"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet pyyaml
+      - run: python .github/fork/run-upstream-job.py e2e-shard --shard ${{ matrix.shard }}
+
+  publish:
+    name: Build, smoke-test and publish amd64 image
+    needs: [merge, go-test, race-test, e2e]
+    if: needs.merge.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      SHA: ${{ needs.merge.outputs.sha }}
+      SHORT: ${{ needs.merge.outputs.short }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.merge.outputs.sha }}
+          fetch-depth: 0
+          token: ${{ secrets.FORK_PUSH_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build time
+        run: echo "BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.merge.outputs.short }}
+            ${{ env.IMAGE }}:latest
+          build-args: |
+            APP_VERSION=${{ needs.merge.outputs.app_version }}
+            GIT_COMMIT=${{ needs.merge.outputs.short }}
+            BUILD_TIME=${{ env.BUILD_TIME }}
+          cache-from: type=gha,scope=fork-amd64
+          cache-to: type=gha,mode=max,scope=fork-amd64
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          # No MQTT sources: the container must not connect to real brokers.
+          mkdir -p "$RUNNER_TEMP/smoke"
+          echo '{"port": 3000, "mqttSources": []}' > "$RUNNER_TEMP/smoke/config.json"
+          docker run -d --name smoke -p 3000:3000 \
+            -e DISABLE_MOSQUITTO=true -e DISABLE_CADDY=true \
+            -v "$RUNNER_TEMP/smoke:/app/data" "$IMAGE:$SHORT"
+          ok=false
+          for i in $(seq 1 90); do
+            if curl -sf http://localhost:3000/api/healthz > /dev/null; then ok=true; break; fi
+            sleep 1
+          done
+          if [ "$ok" != true ]; then docker logs smoke; exit 1; fi
+          curl -sf http://localhost:3000/api/stats > stats.json
+          jq '{version, commit, buildTime}' stats.json
+          test "$(jq -r .commit stats.json)" = "$SHORT"
+          curl -sf http://localhost:3000/api/config/map > /dev/null
+          curl -sf http://localhost:3000/ > index.html
+          for script in scope-contours.js audio.js audio-v8-lofi.js; do
+            grep -q "src=\"$script" index.html || { echo "::error::index.html is missing $script"; exit 1; }
+          done
+          docker rm -f smoke
+
+      - name: Move deploy forward
+        # Plain push: if someone pushed deploy since the merge, this fails
+        # instead of overwriting it, and tonight's image is not published.
+        run: git push origin "$SHA:refs/heads/deploy"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push :${{ needs.merge.outputs.short }} and :latest
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$SHORT"
+          docker push "$IMAGE:latest"
+          echo "Published $IMAGE:$SHORT and :latest ($(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$SHORT"))" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete deploy-candidate
+        if: always()
+        run: git push origin --delete deploy-candidate || true
