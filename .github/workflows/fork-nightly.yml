@@ -46,6 +46,7 @@ jobs:
       sha: ${{ steps.merge.outputs.sha }}
       short: ${{ steps.merge.outputs.short }}
       app_version: ${{ steps.merge.outputs.app_version }}
+      version_tag: ${{ steps.merge.outputs.version_tag }}
       go_version: ${{ steps.versions.outputs.go_version }}
       node_version: ${{ steps.versions.outputs.node_version }}
       shards: ${{ steps.versions.outputs.shards }}
@@ -107,6 +108,8 @@ jobs:
             echo "sha=$sha"
             echo "short=$short"
             echo "app_version=$app_version"
+            # Image tags allow [A-Za-z0-9_.-] only, so the + becomes a -.
+            echo "version_tag=${app_version//+/-}"
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
@@ -206,6 +209,8 @@ jobs:
     env:
       SHA: ${{ needs.merge.outputs.sha }}
       SHORT: ${{ needs.merge.outputs.short }}
+      APP_VERSION: ${{ needs.merge.outputs.app_version }}
+      VERSION_TAG: ${{ needs.merge.outputs.version_tag }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -227,6 +232,7 @@ jobs:
           push: false
           tags: |
             ${{ env.IMAGE }}:${{ needs.merge.outputs.short }}
+            ${{ env.IMAGE }}:${{ needs.merge.outputs.version_tag }}
             ${{ env.IMAGE }}:latest
           build-args: |
             APP_VERSION=${{ needs.merge.outputs.app_version }}
@@ -253,6 +259,7 @@ jobs:
           curl -sf http://localhost:3000/api/stats > stats.json
           jq '{version, commit, buildTime}' stats.json
           test "$(jq -r .commit stats.json)" = "$SHORT"
+          test "$(jq -r .version stats.json)" = "$APP_VERSION"
           curl -sf http://localhost:3000/api/config/map > /dev/null
           curl -sf http://localhost:3000/ > index.html
           for script in scope-contours.js audio.js audio-v8-lofi.js; do
@@ -271,12 +278,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push :${{ needs.merge.outputs.short }} and :latest
+      - name: Push :${{ needs.merge.outputs.short }}, :${{ needs.merge.outputs.version_tag }} and :latest
         run: |
           set -euo pipefail
+          # A later build on the same upstream base takes the version tag over;
+          # the commit tag always pins this exact build.
           docker push "$IMAGE:$SHORT"
+          docker push "$IMAGE:$VERSION_TAG"
           docker push "$IMAGE:latest"
-          echo "Published $IMAGE:$SHORT and :latest ($(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$SHORT"))" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Published $IMAGE:$SHORT, :$VERSION_TAG and :latest ($(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$SHORT"))" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Delete deploy-candidate
         if: always()
