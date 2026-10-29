@@ -20,6 +20,7 @@ Usage:
   run-upstream-job.py --versions [--workflow PATH]
 """
 import argparse
+import collections
 import json
 import os
 import re
@@ -42,6 +43,7 @@ SKIPPED_ACTIONS = {
 }
 
 RUN, SKIP, ALWAYS = "run", "skip", "always"
+FAILURE_TAIL_LINES = 40
 
 
 class Unsupported(Exception):
@@ -180,9 +182,20 @@ def execute(steps):
         print(f"::group::{step['name']}", flush=True)
         with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
             f.write(step["script"])
-        rc = subprocess.run(step["shell"] + [f.name], env={**os.environ, **step["env"]}, cwd=step["cwd"]).returncode
+        # Stream the output, keeping its tail: GitHub shows a group folded, so
+        # a failure's last lines are printed again outside it.
+        tail = collections.deque(maxlen=FAILURE_TAIL_LINES)
+        proc = subprocess.Popen(step["shell"] + [f.name], env={**os.environ, **step["env"]}, cwd=step["cwd"],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            tail.append(line)
+        rc = proc.wait()
         os.unlink(f.name)
         print("::endgroup::", flush=True)
+        if rc != 0 and not step["coe"]:
+            print(f"--- last {len(tail)} lines of {step['name']}:", flush=True)
+            sys.stdout.write("".join(tail))
         if rc != 0:
             if step["coe"]:
                 print(f"::warning::{step['name']} failed (exit {rc}), continue-on-error", flush=True)

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Tests for run-upstream-job.py. Run: python3 .github/fork/test_run_upstream_job.py"""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -97,6 +99,15 @@ class Execute(unittest.TestCase):
         ])
         self.assertEqual(rc, 1)
         self.assertEqual(ran, ["one", "cleanup"])
+
+    def test_failure_tail_is_repeated_outside_the_group(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc, _ = self.run_steps([{"name": "t", "run": "echo 'X failing case'; exit 1"}])
+        out = buf.getvalue()
+        self.assertEqual(rc, 1)
+        after = out.split("::endgroup::", 1)[1]
+        self.assertIn("X failing case", after)
 
     def test_pipefail_with_bash_and_continue_on_error(self):
         rc, _ = self.run_steps([{"run": "false | true", "shell": "bash"}])
