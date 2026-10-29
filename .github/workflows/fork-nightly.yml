@@ -33,7 +33,8 @@ concurrency:
 env:
   IMAGE: ghcr.io/rkoberholtz/corescope
   UPSTREAM_URL: https://github.com/Kpa-clawbot/CoreScope.git
-  FEATURE_BRANCHES: feat/region-scope-contours feat/audio-voices
+  FEATURE_BRANCHES: feat/region-scope-contours feat/audio-voices feat/fork-version-links
+  # The fork owner: perf.js links a +owner build's commits to github.com/<owner>/CoreScope.
   VERSION_SUFFIX: rkoberholtz
 
 jobs:
@@ -85,8 +86,10 @@ jobs:
           done
           sha=$(git rev-parse HEAD)
           short=$(git rev-parse --short=8 HEAD)
-          release=$(git describe --tags --abbrev=0 --match 'v*' upstream/master)
-          app_version="$release-$(git rev-parse --short=8 upstream/master)-$VERSION_SUFFIX"
+          # Upstream's own describe string for the upstream commit (v3.15.0, or
+          # v3.15.0-38-g15e2d2a4 past it), plus the fork as semver build
+          # metadata. perf.js reads the +owner to link commits to this fork.
+          app_version="$(git describe --tags --abbrev=8 --match 'v*' upstream/master)+$VERSION_SUFFIX"
           build=true
           if [ "$sha" = "$before" ] && [ "$FORCE" != "true" ] \
              && docker manifest inspect "$IMAGE:$short" > /dev/null 2>&1; then
