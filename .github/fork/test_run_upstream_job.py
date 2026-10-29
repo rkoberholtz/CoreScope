@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import yaml
@@ -108,6 +109,17 @@ class Execute(unittest.TestCase):
         self.assertEqual(rc, 1)
         after = out.split("::endgroup::", 1)[1]
         self.assertIn("X failing case", after)
+
+    def test_background_process_does_not_hold_the_step_open(self):
+        # The E2E jobs start their test server with `&`; it inherits the
+        # output pipe. Waiting for EOF hung every shard for 6 hours.
+        start = time.monotonic()
+        rc, ran = self.run_steps([
+            {"run": "sleep 30 &\necho started >> LOG"},
+            {"run": "echo next >> LOG"},
+        ])
+        self.assertEqual((rc, ran), (0, ["started", "next"]))
+        self.assertLess(time.monotonic() - start, 15)
 
     def test_pipefail_with_bash_and_continue_on_error(self):
         rc, _ = self.run_steps([{"run": "false | true", "shell": "bash"}])

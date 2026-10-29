@@ -122,6 +122,7 @@ jobs:
     needs: merge
     if: needs.merge.outputs.build == 'true'
     runs-on: ${{ fromJSON(needs.merge.outputs.go_runs_on) }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
@@ -145,6 +146,7 @@ jobs:
     needs: merge
     if: needs.merge.outputs.build == 'true'
     runs-on: ${{ fromJSON(needs.merge.outputs.race_runs_on) }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
@@ -166,6 +168,7 @@ jobs:
     # Same runner as upstream's job (e2e moved to ubuntu-24.04 when ubuntu-latest
     # became Ubuntu 26 and the Playwright browser install broke there).
     runs-on: ${{ fromJSON(needs.merge.outputs.e2e_runs_on) }}
+    timeout-minutes: 60
     strategy:
       fail-fast: true
       matrix:
@@ -193,6 +196,7 @@ jobs:
     needs: [merge, go-test, race-test, e2e]
     if: needs.merge.outputs.build == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write

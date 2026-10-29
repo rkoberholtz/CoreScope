@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 
 import yaml
 
@@ -44,6 +45,7 @@ SKIPPED_ACTIONS = {
 
 RUN, SKIP, ALWAYS = "run", "skip", "always"
 FAILURE_TAIL_LINES = 40
+READER_DRAIN_SECONDS = 2
 
 
 class Unsupported(Exception):
@@ -170,6 +172,13 @@ def versions(workflow):
     return found
 
 
+def forward(stream, tail):
+    for line in stream:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        tail.append(line)
+
+
 def execute(steps):
     failed = False
     for step in steps:
@@ -183,14 +192,17 @@ def execute(steps):
         with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
             f.write(step["script"])
         # Stream the output, keeping its tail: GitHub shows a group folded, so
-        # a failure's last lines are printed again outside it.
+        # a failure's last lines are printed again outside it. The pipe is
+        # read on a thread and the step ends when the shell exits, not at EOF:
+        # a server the step starts in the background keeps the pipe open, and
+        # its later output keeps flowing to the log.
         tail = collections.deque(maxlen=FAILURE_TAIL_LINES)
         proc = subprocess.Popen(step["shell"] + [f.name], env={**os.environ, **step["env"]}, cwd=step["cwd"],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
-        for line in proc.stdout:
-            sys.stdout.write(line)
-            tail.append(line)
+        reader = threading.Thread(target=forward, args=(proc.stdout, tail), daemon=True)
+        reader.start()
         rc = proc.wait()
+        reader.join(timeout=READER_DRAIN_SECONDS)
         os.unlink(f.name)
         print("::endgroup::", flush=True)
         if rc != 0 and not step["coe"]:
