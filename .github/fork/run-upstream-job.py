@@ -138,9 +138,18 @@ def plan(workflow, job_name, shard):
     return steps
 
 
+RUNNER_OUTPUTS = {"go-test": "go_runs_on", "race-test": "race_runs_on", "e2e-shard": "e2e_runs_on"}
+
+
 def versions(workflow):
-    """go_version, node_version and the E2E shard list, as GITHUB_OUTPUT lines."""
+    """go_version, node_version, the E2E shard list and each test job's runner
+    (JSON, for fromJSON in runs-on), as GITHUB_OUTPUT lines."""
     found = {}
+    for job_name, key in RUNNER_OUTPUTS.items():
+        runs_on = (workflow["jobs"].get(job_name) or {}).get("runs-on")
+        if not isinstance(runs_on, str) or "${{" in runs_on or not runs_on.startswith("ubuntu"):
+            raise Unsupported(f"{job_name} runs-on is not a GitHub-hosted ubuntu label: {runs_on!r}")
+        found[key] = json.dumps(runs_on)
     for job in workflow["jobs"].values():
         for step in job.get("steps") or []:
             uses = (step.get("uses") or "").split("@")[0]

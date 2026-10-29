@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for run-upstream-job.py. Run: python3 .github/fork/test_run_upstream_job.py"""
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -115,6 +116,13 @@ class RealWorkflow(unittest.TestCase):
         v = ruj.versions(self.wf)
         self.assertTrue(v["go_version"] and v["node_version"])
         self.assertTrue(v["shards"].startswith("["))
+        for key in ("go_runs_on", "race_runs_on", "e2e_runs_on"):
+            self.assertTrue(json.loads(v[key]).startswith("ubuntu"), key)
+
+    def test_self_hosted_runner_refused(self):
+        wf = {"jobs": {j: {"runs-on": ["self-hosted"], "steps": []} for j in ("go-test", "race-test", "e2e-shard")}}
+        with self.assertRaises(ruj.Unsupported):
+            ruj.versions(wf)
 
     def test_jobs_plan_and_run_the_tests(self):
         names = lambda job, shard=None: {s["name"]: s["action"] for s in ruj.plan(self.wf, job, shard)}

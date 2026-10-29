@@ -48,6 +48,9 @@ jobs:
       go_version: ${{ steps.versions.outputs.go_version }}
       node_version: ${{ steps.versions.outputs.node_version }}
       shards: ${{ steps.versions.outputs.shards }}
+      go_runs_on: ${{ steps.versions.outputs.go_runs_on }}
+      race_runs_on: ${{ steps.versions.outputs.race_runs_on }}
+      e2e_runs_on: ${{ steps.versions.outputs.e2e_runs_on }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -118,7 +121,7 @@ jobs:
     name: Upstream go-test
     needs: merge
     if: needs.merge.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.merge.outputs.go_runs_on) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -141,7 +144,7 @@ jobs:
     name: Upstream race-test
     needs: merge
     if: needs.merge.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.merge.outputs.race_runs_on) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -160,7 +163,9 @@ jobs:
     name: Upstream E2E shard ${{ matrix.shard }}
     needs: merge
     if: needs.merge.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    # Same runner as upstream's job (e2e moved to ubuntu-24.04 when ubuntu-latest
+    # became Ubuntu 26 and the Playwright browser install broke there).
+    runs-on: ${{ fromJSON(needs.merge.outputs.e2e_runs_on) }}
     strategy:
       fail-fast: true
       matrix:
