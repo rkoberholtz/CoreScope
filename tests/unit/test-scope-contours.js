@@ -1884,7 +1884,11 @@ function timeRebuild(view) {
   return { median: times[2], cachedMs: Number(process.hrtime.bigint() - t1) / 1e6, computed: o.stats().computed, links: edges.length };
 }
 
-// Targets per view; the assertion allows twice that for slower CI runners.
+// Targets per view. The assertion allows twice the target locally and four
+// times it on CI (GitHub sets CI=true): shared runners measured the hull
+// view at 29-79 ms against its 30 ms target, which failed nightly builds
+// at random while a local run stays near 29 ms.
+const PERF_HEADROOM = process.env.CI ? 4 : 2;
 // Detailed rose from 260 ms when lobes started counting only toward
 // partners in the same area: none of this mesh's partners are in one (2% on
 // a real 190-node instance), so members merge into fewer clusters (512 grids
@@ -1900,9 +1904,9 @@ function timeRebuild(view) {
 [['hull', 30], ['detailed', 400]].forEach(([view, target]) => {
   test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes, ' + view + ' view: median rebuild within budget', () => {
     const r = timeRebuild(view);
-    console.log('     (median ' + r.median.toFixed(1) + ' ms over 5 runs (target ' + target + ' ms) for ' + r.computed + ' outlines over ' + r.links + ' links; cached rebuild ' + r.cachedMs.toFixed(1) + ' ms)');
+    console.log('     (median ' + r.median.toFixed(1) + ' ms over 5 runs (target ' + target + ' ms, limit ' + PERF_HEADROOM * target + ') for ' + r.computed + ' outlines over ' + r.links + ' links; cached rebuild ' + r.cachedMs.toFixed(1) + ' ms)');
     assert.ok(r.computed >= 32);
-    assert.ok(r.median < 2 * target, 'median ' + r.median.toFixed(1) + ' ms');
+    assert.ok(r.median < PERF_HEADROOM * target, 'median ' + r.median.toFixed(1) + ' ms, limit ' + PERF_HEADROOM * target + ' ms');
   });
 });
 
