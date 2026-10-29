@@ -96,10 +96,20 @@ function renderVersionCard(health) {
   var ver = health.version && health.version !== 'unknown' ? health.version : null;
   var sha = health.commit && health.commit !== 'unknown' ? health.commit : null;
   if (!ver && !sha) return '';
-  var vTag = ver ? (ver.charAt(0) === 'v' ? ver : 'v' + ver) : null;
+  // A build past a release reports it git-describe style (v3.15.0-38-gabc1234),
+  // so link the release it is based on. A fork build adds its owner as semver
+  // build metadata (+owner), and its commit then lives in that owner's fork.
+  var release = ver ? /^v?(\d+\.\d+\.\d+)/.exec(ver) : null;
+  var fork = ver ? /\+([A-Za-z0-9-]+)$/.exec(ver) : null;
+  var commitRepo = fork ? 'https://github.com/' + fork[1] + '/CoreScope' : GH;
   var parts = [];
-  if (vTag) parts.push('<a href="' + GH + '/releases/tag/' + vTag + '" target="_blank" rel="noopener">' + vTag + '</a>');
-  if (sha) parts.push('<a href="' + GH + '/commit/' + sha + '" target="_blank" rel="noopener">' + sha.slice(0, 7) + '</a>');
+  if (release) {
+    var vTag = 'v' + release[1];
+    parts.push('<a href="' + GH + '/releases/tag/' + vTag + '" target="_blank" rel="noopener">' + vTag + '</a>');
+  } else if (ver) {
+    parts.push(ver);
+  }
+  if (sha) parts.push('<a href="' + commitRepo + '/commit/' + sha + '" target="_blank" rel="noopener">' + sha.slice(0, 7) + '</a>');
   return '<div class="perf-card"><div class="perf-num perf-num--small">' + parts.join(' · ') + '</div><div class="perf-label">Version</div></div>';
 }
 

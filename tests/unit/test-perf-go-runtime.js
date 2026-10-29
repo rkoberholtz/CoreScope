@@ -320,6 +320,27 @@ test('renderVersionCard: commit link points to commit URL', () => {
   assert.ok(card.includes('href='), 'should contain an anchor tag');
 });
 
+test('renderVersionCard: a describe-style version links to the release it is based on', () => {
+  const sb = loadPerf();
+  const card = sb.ctx.renderVersionCard({ version: 'v3.15.0-38-g15e2d2a4', commit: 'unknown' });
+  assert.ok(card.includes('releases/tag/v3.15.0"'), 'should link to the base release tag: ' + card);
+  assert.ok(card.includes('>v3.15.0</a>'), 'should show the base release');
+});
+
+test('renderVersionCard: a fork build (+owner) links its commit to the fork', () => {
+  const sb = loadPerf();
+  const card = sb.ctx.renderVersionCard({ version: 'v3.15.0-38-g15e2d2a4+rkoberholtz', commit: '1b8dd014' });
+  assert.ok(card.includes('releases/tag/v3.15.0"'), 'release link still goes to the upstream tag');
+  assert.ok(card.includes('https://github.com/rkoberholtz/CoreScope/commit/1b8dd014'), 'commit should link to the fork: ' + card);
+});
+
+test('renderVersionCard: a version that is not a release is shown without a link', () => {
+  const sb = loadPerf();
+  const card = sb.ctx.renderVersionCard({ version: 'edge', commit: 'unknown' });
+  assert.ok(card.includes('edge'), 'should show the version');
+  assert.ok(!card.includes('releases/tag'), 'should not link to a nonexistent tag: ' + card);
+});
+
 test('renderVersionCard: returns empty string for null health', () => {
   const sb = loadPerf();
   assert.strictEqual(sb.ctx.renderVersionCard(null), '');
