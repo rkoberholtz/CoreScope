@@ -232,8 +232,11 @@
     var maxChars = opts.maxChars || MAX_CHARS;
     // The tile source: url (a template, null for the default) or off.
     var source = { off: false, url: null };
+    // Both hold the current source's tiles only: setSource empties them,
+    // and a fetch started under an earlier source is never stored.
     var tiles = new Map();     // 'x/y' → Float32Array; LRU order
     var inflight = new Map();  // 'x/y' → Promise
+    var sourceGen = 0;         // bumped by every change of source
     var results = new Map();   // key → { ext: Float64Array, antennaM, source }
     var order = [];            // persisted keys, oldest first
     var computed = 0, failures = 0, used = false;
@@ -294,9 +297,11 @@
       var k = x + '/' + y;
       if (tiles.has(k)) { var t = tiles.get(k); tiles.delete(k); tiles.set(k, t); return Promise.resolve(t); }
       if (inflight.has(k)) return inflight.get(k);
-      var p = Promise.resolve().then(function () { return fetchTile(ZOOM, x, y, source.url); })
-        .then(function (arr) { return arr; }, function () { failures++; return null; })
+      var gen = sourceGen, url = source.url;
+      var p = Promise.resolve().then(function () { return fetchTile(ZOOM, x, y, url); })
+        .then(function (arr) { return arr; }, function () { if (gen === sourceGen) failures++; return null; })
         .then(function (arr) {
+          if (gen !== sourceGen) return arr;
           inflight.delete(k);
           // A failed tile is not kept, so the next visit asks for it again.
           if (arr) {
@@ -405,7 +410,11 @@
       // Terrarium URL template; anything else is the default source. As
       // /api/config/map serves mapDefaults.terrainTiles.
       setSource: function (src) {
-        source = { off: !!(src && src.disabled), url: (src && typeof src.url === 'string' && src.url) || null };
+        var next = { off: !!(src && src.disabled), url: (src && typeof src.url === 'string' && src.url) || null };
+        if (next.off !== source.off || next.url !== source.url) {
+          tiles.clear(); inflight.clear(); sourceGen++;
+        }
+        source = next;
         failures = 0;
       },
       status: function () { return source.off ? 'off' : (failures ? 'unavailable' : (used ? 'ok' : 'idle')); },

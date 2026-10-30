@@ -589,6 +589,7 @@
     var heights = null;      // operator antenna heights, { key: metres }; null until loaded
     var terrainAsked = new Set(); // pk|key requested and not yet answered
     var renderQueued = false;
+    var destroyed = false; // destroy(): nothing is drawn or asked for after it
     var visible = false;
     var only = '';
     var hidden = new Set();
@@ -660,10 +661,12 @@
     // Ask the terrain provider for the members it has not answered yet. Each
     // answer reshapes that one node and queues a render, at most one a frame.
     function requestTerrain(members) {
-      if (!opts.terrain) return;
+      if (!opts.terrain || destroyed) return;
       // Wait for the map config: the operator's heights, so a set height is
       // never first computed as an estimate, and the terrain source.
       if (opts.loadMapConfig && heights === null) { loadHeights(); return; }
+      // Terrain is off on this instance: there is nothing to ask for.
+      if (opts.terrain.status && opts.terrain.status() === 'off') return;
       var items = [];
       members.forEach(function (n) {
         var k = terrainKey(n), t = terrain.get(n.public_key), ask = n.public_key + '|' + k;
@@ -677,11 +680,22 @@
       if (!items.length) return;
       var keyOf = new Map(items.map(function (it) { return [it.pk, it.key]; }));
       Promise.resolve(opts.terrain.extentsFor(items, function (pk, ext) {
+        if (destroyed) return;
         terrain.set(pk, { key: keyOf.get(pk), ext: ext });
         shapes.delete(pk);
         queueRender();
       })).then(done, done);
-      function done() { items.forEach(function (it) { terrainAsked.delete(it.pk + '|' + it.key); }); queueRender(); }
+      // A member the provider did not answer is recorded as answered without
+      // terrain (its radius alone), so the next render does not ask again;
+      // asking every frame would never end. Each answer has queued its own
+      // render, so none is needed here.
+      function done() {
+        items.forEach(function (it) {
+          terrainAsked.delete(it.pk + '|' + it.key);
+          var t = terrain.get(it.pk);
+          if (!destroyed && (!t || t.key !== it.key)) terrain.set(it.pk, { key: it.key, ext: null });
+        });
+      }
     }
 
     var heightsAsked = false;
@@ -768,6 +782,7 @@
     }
 
     function render() {
+      if (destroyed) return;
       clearHover();
       layer.clearLayers();
       drawn = new Map();
@@ -809,7 +824,7 @@
     }
 
     function refreshLinks() {
-      if (!visible || !opts.loadLinks) return;
+      if (!visible || !opts.loadLinks || destroyed) return;
       var seq = ++linksSeq;
       Promise.resolve(opts.loadLinks()).then(function (edges) {
         if (seq !== linksSeq) return;
@@ -908,6 +923,7 @@
       },
       pulse: function (scope) { if (visible && drawn.has(normRegion(scope))) pulser.pulse(scope); },
       destroy: function () {
+        destroyed = true;
         pulser.cancelAll(); clearHover(); listeners = [];
         if (popupOpen()) map.closePopup(popup);
         map.off('mousemove', onMove); map.off('mouseout', onOut); map.off('click', onClick);

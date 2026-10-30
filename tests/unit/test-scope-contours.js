@@ -1376,10 +1376,85 @@ test('the map config sets the terrain source before any terrain is asked for', (
   const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadMapConfig: () => new Promise(r => { resolve = r; }) }, sync));
   o.setVisible(true);
   o.setNodes([T_NODES[0]]);
-  resolve({ terrainTiles: { disabled: true } });
+  resolve({ terrainTiles: { url: 'https://t.example.org/{z}/{x}/{y}.png' } });
   return tick().then(tick).then(() => {
-    assert.deepStrictEqual(order[0], ['source', { disabled: true }]);
+    assert.deepStrictEqual(order[0], ['source', { url: 'https://t.example.org/{z}/{x}/{y}.png' }]);
     assert.ok(order.findIndex(x => x[0] === 'ask') > 0, 'asked for terrain before the source was set: ' + JSON.stringify(order));
+  });
+});
+
+// Frames run by hand, so provider calls can be counted per frame.
+function manualFrames() {
+  const queue = [];
+  return {
+    raf: (fn) => queue.push(fn),
+    run(n) {
+      let p = Promise.resolve();
+      for (let i = 0; i < n; i++) p = p.then(() => { queue.splice(0).forEach(f => f()); }).then(tick);
+      return p;
+    },
+  };
+}
+
+test('terrain off: the overlay asks the provider nothing, frame after frame', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain({ state: 'off' });
+  let calls = 0;
+  t.extentsFor = () => { calls++; return Promise.resolve(new Map()); };
+  const frames = manualFrames();
+  const o = SC.createOverlay(L, map, { terrain: t, raf: frames.raf, loadMapConfig: () => Promise.resolve({ terrainTiles: { disabled: true } }) });
+  o.setVisible(true);
+  o.setLinks([two('h0', 'e1')]);
+  o.setNodes(T_NODES);
+  return tick().then(() => frames.run(10)).then(() => {
+    assert.strictEqual(calls, 0, calls + ' provider calls in 10 frames');
+  });
+});
+
+test('a member the provider does not answer is asked once, not every frame', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain();
+  let calls = 0;
+  t.extentsFor = () => { calls++; return Promise.resolve(new Map()); };
+  const frames = manualFrames();
+  const o = SC.createOverlay(L, map, { terrain: t, raf: frames.raf });
+  o.setVisible(true);
+  o.setLinks([two('h0', 'e1')]);
+  o.setNodes(T_NODES);
+  return tick().then(() => frames.run(10)).then(() => {
+    assert.strictEqual(calls, 1, calls + ' provider calls in 10 frames');
+  });
+});
+
+test('after destroy, nothing is drawn or asked: late answers and queued frames are dropped', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const t = fakeTerrain();
+  let calls = 0, answer = null;
+  t.extentsFor = (items, onP) => {
+    calls++;
+    return new Promise(r => { answer = () => { items.forEach(it => onP(it.pk, new Float64Array(SC.sectors).fill(500))); r(); }; });
+  };
+  const frames = manualFrames();
+  let linkLoads = 0;
+  const o = SC.createOverlay(L, map, { terrain: t, raf: frames.raf, loadLinks: () => { linkLoads++; return [two('h0', 'e1')]; } });
+  o.setVisible(true);
+  o.setNodes(T_NODES);
+  return tick().then(() => frames.run(1)).then(() => {
+    assert.ok(calls >= 1 && answer, 'terrain was asked for');
+    const asked = calls, loadsBefore = linkLoads;
+    const drawn = rec.polygons.length;
+    o.destroy();
+    answer();
+    return tick().then(() => frames.run(5)).then(() => {
+      assert.strictEqual(calls, asked, (calls - asked) + ' provider calls after destroy');
+      assert.strictEqual(rec.polygons.length, drawn, 'drew after destroy');
+      o.setNodes(T_NODES.slice(0, 1));
+      return frames.run(2);
+    }).then(() => {
+      assert.strictEqual(calls, asked, 'setNodes after destroy asked the provider');
+      assert.strictEqual(rec.polygons.length, drawn, 'setNodes after destroy drew');
+      assert.strictEqual(linkLoads, loadsBefore, 'setNodes after destroy reloaded the links');
+    });
   });
 });
 
