@@ -61,12 +61,19 @@ type GraphNode struct {
 	NeighborCount int    `json:"neighbor_count"`
 }
 
+// GraphEdge is one neighbor-graph link. HeardBySource and HeardByTarget
+// count the observations in which the source received the target, and the
+// target received the source; Bidirectional is true only when both are
+// non-zero. Both are 0 when the direction is unknown (edges restored from
+// the persisted snapshot at startup, until the first rebuild from packets).
 type GraphEdge struct {
 	Source        string   `json:"source"`
 	Target        string   `json:"target"`
 	Weight        int      `json:"weight"`
 	Score         float64  `json:"score"`
 	Bidirectional bool     `json:"bidirectional"`
+	HeardBySource int      `json:"heard_by_source"`
+	HeardByTarget int      `json:"heard_by_target"`
 	AvgSNR        *float64 `json:"avg_snr"`
 	Ambiguous     bool     `json:"ambiguous"`
 }
@@ -394,7 +401,9 @@ func (s *Server) computeNeighborGraphResponse(minCount int, minScore float64, re
 			Target:        e.NodeB,
 			Weight:        e.Count,
 			Score:         score,
-			Bidirectional: true,
+			Bidirectional: e.HeardByA > 0 && e.HeardByB > 0,
+			HeardBySource: e.HeardByA,
+			HeardByTarget: e.HeardByB,
 			Ambiguous:     e.Ambiguous,
 		}
 		if e.SNRCount > 0 {

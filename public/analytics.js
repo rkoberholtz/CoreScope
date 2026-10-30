@@ -2680,6 +2680,17 @@
       </div>`;
   }
 
+  // linkArrow shows which way a neighbor-graph link was heard: ↔ both ways,
+  // → when only the target heard the source, ← the reverse, and a plain
+  // dash when the direction is unknown (edges restored at startup).
+  function linkArrow(e) {
+    const st = e.heard_by_target > 0, ts = e.heard_by_source > 0;
+    if (st && ts) return '<span title="Heard both ways">&harr;</span>';
+    if (st) return '<span title="Only the second heard the first">&rarr;</span>';
+    if (ts) return '<span title="Only the first heard the second">&larr;</span>';
+    return '<span title="Direction not known yet">&ndash;</span>';
+  }
+
   async function renderMyRepeatersTab(el) {
     const haveFavs = () => (typeof getFavorites === 'function' ? getFavorites() : []);
     if (!haveFavs().length) { el.innerHTML = _mrEmptyState(); return; }
@@ -2797,9 +2808,7 @@
           affinityHtml = `<table class="analytics-table">
             <thead><tr><th scope="col">Link</th><th scope="col" style="text-align:right">Affinity</th><th scope="col" style="text-align:right">Packets</th><th scope="col" style="text-align:right">Avg SNR</th></tr></thead>
             <tbody>${myEdges.map(e => {
-              // The affinity graph is undirected — the server marks every edge
-              // bidirectional — so the link glyph is always a double arrow.
-              const arrow = '&harr;';
+              const arrow = linkArrow(e);
               const snr = (e.avg_snr != null) ? e.avg_snr.toFixed(1) + ' dB' : '—';
               return `<tr>
                 <td>${esc(nameByPk[e.source] || e.source.slice(0, 12))} ${arrow} ${esc(nameByPk[e.target] || e.target.slice(0, 12))}${e.ambiguous ? ' <svg class="ph-icon" role="img" aria-label="Path attribution ambiguous"><title>Path attribution ambiguous</title><use href="/icons/phosphor-sprite.svg#ph-question"/></svg>' : ''}</td>
