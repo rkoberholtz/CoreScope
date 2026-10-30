@@ -1,7 +1,8 @@
 'use strict';
-// Unit tests for scope-contours.js: the region-scope reach overlay on the map.
-// Loads the browser IIFE in a vm sandbox, the same way test-map-estimated.js
-// does, and drives the overlay with a recording Leaflet stub.
+// Unit tests for scope-contours.js: the region-scope reach overlay on the map
+// and live pages. Loads the browser IIFE in a vm sandbox, the same way
+// test-map-estimated.js does, and drives the overlay with a recording Leaflet
+// stub and a fake clock.
 const REPO_ROOT = require('path').resolve(__dirname, '..', '..');
 const assert = require('assert');
 const fs = require('fs');
@@ -44,7 +45,7 @@ console.log('\n=== scope-contours.js: hull geometry ===');
 
 test('exposes its API', () => {
   assert.ok(SC, 'window.ScopeContours not defined');
-  for (const fn of ['normRegion', 'nodeRegionEvidence', 'groupNodesByScope', 'convexHull', 'scopeHull', 'contourShapes', 'wrapShapes', 'shapeFor', 'reachFor', 'linkReach', 'inRings', 'colorsFor', 'createOverlay', 'mountViewPicker', 'viewFromHash']) {
+  for (const fn of ['normRegion', 'nodeRegionEvidence', 'groupNodesByScope', 'convexHull', 'scopeHull', 'contourShapes', 'wrapShapes', 'shapeFor', 'reachFor', 'linkReach', 'inRings', 'colorsFor', 'createPulser', 'createOverlay', 'mountViewPicker', 'viewFromHash']) {
     assert.strictEqual(typeof SC[fn], 'function', fn + ' not exported');
   }
 });
@@ -311,7 +312,7 @@ console.log('\n=== scope-contours.js: deep link ===');
 
 test('hashFlag reads ?contours=, null when absent', () => {
   assert.strictEqual(SC.hashFlag('#/map?contours=1'), true);
-  assert.strictEqual(SC.hashFlag('#/map?lat=1&contours=0&zoom=3'), false);
+  assert.strictEqual(SC.hashFlag('#/live?lat=1&contours=0&zoom=3'), false);
   assert.strictEqual(SC.hashFlag('#/map?lat=1'), null);
   assert.strictEqual(SC.hashFlag('#/map'), null);
   assert.strictEqual(SC.hashFlag(''), null);
@@ -335,6 +336,49 @@ test('writeHashFlag sets and clears the param, keeping the others, without histo
   assert.strictEqual(calls.length, 1, 'no rewrite when nothing changes');
   S.writeHashFlag(false);
   assert.strictEqual(S.hashFlag(us.location.hash), null, us.location.hash);
+});
+
+console.log('\n=== scope-contours.js: pulse coalescing ===');
+
+function fakeClock() {
+  let now = 0, seq = 0;
+  const timers = new Map();
+  return {
+    setTimeout(fn, ms) { const id = ++seq; timers.set(id, { fn, at: now + ms }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    advance(ms) {
+      now += ms;
+      for (const [id, t] of Array.from(timers)) if (t.at <= now) { timers.delete(id); t.fn(); }
+    },
+    pending() { return timers.size; },
+  };
+}
+
+test('a burst of packets for one scope starts one pulse and extends it', () => {
+  const clock = fakeClock();
+  const log = [];
+  const p = SC.createPulser({ durationMs: 1500, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+    onStart: s => log.push('start:' + s), onEnd: s => log.push('end:' + s) });
+  p.pulse('#nyc'); p.pulse('nyc'); clock.advance(1000); p.pulse('nyc');
+  assert.deepStrictEqual(log, ['start:nyc']);
+  assert.strictEqual(clock.pending(), 1, 'one timer per scope');
+  clock.advance(1000);
+  assert.deepStrictEqual(log, ['start:nyc'], 'the last packet extended the pulse');
+  clock.advance(600);
+  assert.deepStrictEqual(log, ['start:nyc', 'end:nyc']);
+  assert.strictEqual(p.isActive('nyc'), false);
+});
+
+test('scopes pulse independently; empty names are ignored; cancelAll ends all', () => {
+  const clock = fakeClock();
+  const log = [];
+  const p = SC.createPulser({ durationMs: 1500, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+    onStart: s => log.push('start:' + s), onEnd: s => log.push('end:' + s) });
+  p.pulse('a'); p.pulse('b'); p.pulse(''); p.pulse(null); p.pulse('#');
+  assert.deepStrictEqual(log, ['start:a', 'start:b']);
+  p.cancelAll();
+  assert.deepStrictEqual(log, ['start:a', 'start:b', 'end:a', 'end:b']);
+  assert.strictEqual(clock.pending(), 0);
 });
 
 console.log('\n=== scope-contours.js: reach (radius, terrain, links) ===');
@@ -1276,9 +1320,10 @@ test('unlinked groups of one scope get separate outlines, not one area over the 
   }
 });
 
-test('a split scope is hovered and listed once, and the click box says how many groups', () => {
+test('a split scope is hovered, pulsed and listed once, and the click box says how many groups', () => {
   const { L, map, rec } = fakeLeaflet();
-  const o = SC.createOverlay(L, map, sync);
+  let now = 0; const timers = [];
+  const o = SC.createOverlay(L, map, Object.assign({ pulseMs: 100, setTimeout: (fn, ms) => { timers.push([now + ms, fn]); return timers.length; }, clearTimeout: () => {} }, sync));
   // Close enough that the two areas overlap between them, still unlinked.
   const near = [WEST[0], WEST[1], Object.assign({}, EASTS[0], { lon: -100.25 }), Object.assign({}, EASTS[1], { lon: -100.24 })];
   o.setNodes(scoped(near, '#us'));
@@ -1288,6 +1333,8 @@ test('a split scope is hovered and listed once, and the click box says how many 
   map.fire('mousemove', { latlng: { lat: 45, lng: -100.27 } });
   assert.strictEqual(rec.tip.content, '#us · 4 nodes · 2 separate groups', rec.tip.content);
   assert.strictEqual(drawnNow(o).filter(p => p.getElement().classList.contains('is-hovered')).length, 2, 'both groups lit');
+  o.pulse('#us');
+  assert.strictEqual(drawnNow(o).filter(p => p.getElement().classList.contains('is-pulsing')).length, 2, 'both groups pulse');
   map.fire('click', { latlng: { lat: 45, lng: -100.27 }, sourceTarget: map });
   const html = rec.popup.content;
   assert.strictEqual(html.split('#us</strong>').length - 1, 1, 'listed once: ' + html);
@@ -1587,6 +1634,32 @@ test('the popup lists at most 50 rows per scope, then says how many more', () =>
   assert.ok(html.includes('+10 more'), 'no overflow line');
 });
 
+test('pulse marks the scope\'s drawn polygons and clears them after the duration', () => {
+  const clock = fakeClock();
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, { pulseMs: 1500, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+  o.setNodes(NODES); o.setVisible(true);
+  o.pulse('#ny');
+  const pulsing = () => rec.polygons.filter(p => p.getElement().classList.contains('is-pulsing'));
+  assert.strictEqual(pulsing().length, 1);
+  clock.advance(1600);
+  assert.strictEqual(pulsing().length, 0);
+});
+
+test('pulse is a no-op while hidden, and destroy cancels pending pulses', () => {
+  const clock = fakeClock();
+  const { L, map } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+  o.setNodes(NODES);
+  o.pulse('nyc');
+  assert.strictEqual(clock.pending(), 0);
+  o.setVisible(true);
+  o.pulse('nyc');
+  assert.strictEqual(clock.pending(), 1);
+  o.destroy();
+  assert.strictEqual(clock.pending(), 0);
+});
+
 console.log('\n=== scope-contours.js: show/hide list ===');
 
 function listSandbox(hash, stored) {
@@ -1631,7 +1704,7 @@ test('the list shows a row per scope with its colour, escaped, only while visibl
 });
 
 test('unchecking a row hides the scope, stores it, and writes it to the URL', () => {
-  const { S, ctx, store } = listSandbox('#/map?contours=1');
+  const { S, ctx, store } = listSandbox('#/live?contours=1');
   const { L, map, rec } = fakeLeaflet();
   const o = S.createOverlay(L, map, {});
   const el = fakeListEl();
@@ -1820,8 +1893,8 @@ test('the starting view comes from the URL first, then the stored choice', () =>
   assert.strictEqual(start('#/map'), 'hull');
 });
 
-test('the view picker takes an optional heading above it', () => {
-  const { S } = listSandbox('#/map');
+test('the view picker takes an optional heading (live puts REGION SCOPES above it)', () => {
+  const { S } = listSandbox('#/live');
   const { L, map } = fakeLeaflet();
   const o = S.createOverlay(L, map, {});
   const el = fakeListEl();
@@ -1832,7 +1905,7 @@ test('the view picker takes an optional heading above it', () => {
   assert.strictEqual(el.innerHTML, '', 'heading hidden with the picker');
 });
 
-test('the stored view is shared by every overlay that mounts the picker', () => {
+test('the map and live pages share one stored view', () => {
   const { S, store } = listSandbox('#/map');
   const { L, map } = fakeLeaflet();
   const onMap = S.createOverlay(L, map, {});
@@ -1840,10 +1913,26 @@ test('the stored view is shared by every overlay that mounts the picker', () => 
   S.mountViewPicker(mapEl, onMap);
   onMap.setNodes(NODES); onMap.setVisible(true);
   mapEl.fire('click', viewButton('detailed'));
-  const { S: S2 } = listSandbox('#/map', store);
-  const again = S2.createOverlay(L, map, {});
-  S2.mountViewPicker(fakeListEl(), again);
-  assert.strictEqual(again.view(), 'detailed');
+  const { S: S2 } = listSandbox('#/live', store);
+  const onLive = S2.createOverlay(L, map, {});
+  S2.mountViewPicker(fakeListEl(), onLive);
+  assert.strictEqual(onLive.view(), 'detailed');
+});
+
+test('in Detailed, a pulse lights a scope drawn as two separate areas', () => {
+  const clock = fakeClock();
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, { view: 'detailed', pulseMs: 1500, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+  // Two repeaters 60 km apart: Detailed leaves them as two areas.
+  const far = offset(45.0, -100.0, 60000, 0);
+  o.setNodes([{ public_key: 'd1', lat: 45.0, lon: -100.0, transported_scopes: ['#two'] }, { public_key: 'd2', lat: far.lat, lon: far.lon, transported_scopes: ['#two'] }]);
+  o.setVisible(true);
+  const polys = drawnNow(o);
+  assert.strictEqual(polys.length, 2, 'Detailed drew ' + polys.length + ' areas');
+  o.pulse('two');
+  assert.ok(polys.every(p => p.getElement().classList.contains('is-pulsing')));
+  clock.advance(1600);
+  assert.ok(polys.every(p => !p.getElement().classList.contains('is-pulsing')));
 });
 
 test('viewFromHash reads ?contoursView=, null when absent or unknown', () => {

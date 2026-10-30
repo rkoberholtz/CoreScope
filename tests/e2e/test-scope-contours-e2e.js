@@ -1,5 +1,6 @@
 /**
- * E2E: region contours (scope-contours.js) on the map page.
+ * E2E: region contours (scope-contours.js) on the map and live
+ * pages.
  *
  * Each region scope gets an outline of the area its nodes are proven to reach,
  * following who is known to hear whom (the neighbor graph), one area per
@@ -9,11 +10,14 @@
  * Clicking inside outlines lists each scope's repeaters. The "Region contours" toggle draws them,
  * ?contours=1 deep-links them, the Region Scope picker narrows them to one
  * scope, a per-scope list shows and hides them (?contoursHide=), an area
- * shape picker draws them as a Convex Hull or Detailed (shrink-wrapped;
- * ?contoursView=detailed), hovering names every scope under the cursor, and
- * the outlines never take pointer events.
+ * shape picker on the map draws them as a Convex Hull or Detailed
+ * (shrink-wrapped; ?contoursView=detailed), hovering
+ * names every scope under the cursor on both pages (the live map draws
+ * canvases above the outlines), and the outlines never take pointer events.
+ * On the live page a scope's outline flashes when one of its packets arrives.
  *
- * Backend-independent: every /api/* call is mocked via page.route.
+ * Backend-independent: every /api/* call is mocked via page.route, and the
+ * live packet is delivered to the page's own WebSocket listeners.
  *
  * Run: BASE_URL=http://localhost:13581 node test-scope-contours-e2e.js
  */
@@ -442,6 +446,117 @@ const EDGES = [
     assert(!/[?&]contours=/.test(await page.evaluate(() => location.hash)), 'contours param left in the URL');
   });
 
+  await step('live: ?contours=1 draws the outlines on the canvas map, with the list in the legend', async () => {
+    await page.goto(BASE + '/#/live?contours=1&lat=37.785&lon=-122.35&zoom=11', { waitUntil: 'load' });
+    await page.waitForSelector('#liveMap');
+    await page.waitForSelector('path.mc-scope-area');
+    assert(await page.$eval('#liveScopeContoursToggle', (el) => el.checked), 'live toggle unchecked');
+    assert((await areas()).length === 3, 'live outlines: ' + (await areas()).join(' | '));
+    const legend = await page.$eval('#liveScopeList', (el) => ({ hidden: el.hidden, text: el.textContent }));
+    assert(!legend.hidden && /#south-bay/.test(legend.text), 'legend list: ' + JSON.stringify(legend));
+    // Heading, then the area shape picker, then the list.
+    const picker = await page.$eval('#liveScopeView', (el) => ({ hidden: el.hidden, text: el.textContent, next: el.nextElementSibling && el.nextElementSibling.id }));
+    assert(!picker.hidden && /^REGION SCOPES\s*Area shape/.test(picker.text) && picker.next === 'liveScopeList', 'live picker: ' + JSON.stringify(picker));
+    assert(await page.$eval('#liveScopeView button[data-view="hull"]', (b) => b.getAttribute('aria-pressed')) === 'true', 'Convex Hull not pressed on live');
+  });
+
+  await step('live: hovering works through the canvases above the outlines', async () => {
+    const pt = await pointInside(['sf']);
+    assert(pt, 'no point inside #sf');
+    // Something other than the outline is on top there: the canvas renderer
+    // or the heat map. The hover must not depend on the outline's events.
+    const top = await page.evaluate(({ x, y }) => { const el = document.elementFromPoint(x, y); return el && el.tagName; }, pt);
+    await page.mouse.move(pt.x, pt.y);
+    await page.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
+    const text = await page.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent);
+    assert(/#sf · 3 nodes/.test(text), 'tooltip: ' + text + ' (top element ' + top + ')');
+  });
+
+  await step('live: clicking inside an outline lists its repeaters', async () => {
+    const pt = await pointInside(['sf']);
+    await page.mouse.click(pt.x, pt.y);
+    await page.waitForSelector('.leaflet-popup.mc-scope-popup', { timeout: 3000 });
+    const text = await page.$eval('.mc-scope-popup', (el) => el.textContent);
+    assert(/#sf/.test(text) && /SF Default/.test(text), 'popup: ' + text);
+    await page.keyboard.press('Escape');
+  });
+
+  await step('live: a scoped packet flashes only its scope, and the flash ends', async () => {
+    const sfClass = await colourOf('sf');
+    await page.evaluate(() => {
+      const pkt = {
+        id: 999001, hash: 'e2econtour0001', raw_hex: '0000', route_type: 0, payload_type: 5, timestamp: new Date().toISOString(),
+        observer_id: 'obs-e2e', observer_name: 'E2E', snr: 5, rssi: -90, path_json: '[]', scope_name: '#sf',
+        decoded: { header: { payloadTypeName: 'GRP_TXT' }, payload: {} },
+      };
+      // app.js's listener list: the live page's handler is on it.
+      wsListeners.forEach((fn) => fn({ type: 'packet', data: pkt }));
+    });
+    await page.waitForSelector('path.mc-scope-area.is-pulsing', { timeout: 3000 });
+    const pulsing = await page.$$eval('path.mc-scope-area.is-pulsing', (els) => els.map((el) => el.getAttribute('class')));
+    // Both of #sf's areas, and nothing else.
+    assert(pulsing.length === 2 && pulsing.every((c) => c.includes(sfClass)), 'pulsing: ' + pulsing.join(' | '));
+    await page.waitForFunction(() => !document.querySelector('path.is-pulsing'), null, { timeout: 4000 });
+  });
+
+  await step('live: the legend\'s scope checkboxes and All work (the legend itself takes no clicks)', async () => {
+    await page.click('#liveScopeList input[data-scope="sf"]');
+    await page.waitForFunction(() => new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 2, null, { timeout: 3000 });
+    await page.click('#liveScopeList [data-scope-all]');
+    await page.waitForFunction(() => new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 3, null, { timeout: 3000 });
+  });
+
+  const livePick = async (v, hintRe) => {
+    await page.click('#liveScopeView button[data-view="' + v + '"]');
+    await page.waitForFunction(({ src, v }) => {
+      const b = document.querySelector('#liveScopeView button[aria-pressed="true"]');
+      return b && b.getAttribute('data-view') === v && new RegExp(src).test(document.querySelector('#liveScopeList').textContent) &&
+        new Set(Array.from(document.querySelectorAll('path.mc-scope-area'), (p) => p.getAttribute('data-scope'))).size === 3;
+    }, { src: hintRe.source, v }, { timeout: 5000 });
+  };
+
+  await step('live: the area shape picker switches to Detailed, stored and in the URL', async () => {
+    const before = await pathsD();
+    await livePick('detailed', /narrower than 15 km/);
+    assert((await pathsD()) !== before, 'Detailed drew the same outlines on live');
+    assert(await page.evaluate(() => localStorage.getItem('meshcore-scope-contours-view')) === 'detailed', 'not stored');
+    assert(/[?&]contoursView=detailed\b/.test(await page.evaluate(() => location.hash)), 'hash: ' + (await page.evaluate(() => location.hash)));
+  });
+
+  await step('live, in Detailed: hover, click and a scoped packet\'s flash still work', async () => {
+    const pt = await pointInside(['sf']);
+    assert(pt, 'no point inside #sf in Detailed');
+    await page.mouse.move(pt.x, pt.y);
+    await page.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
+    assert(/#sf · 3 nodes/.test(await page.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent)), 'tooltip');
+    await page.mouse.click(pt.x, pt.y);
+    await page.waitForSelector('.leaflet-popup.mc-scope-popup', { timeout: 3000 });
+    assert(/#sf/.test(await page.$eval('.mc-scope-popup', (el) => el.textContent)), 'popup');
+    await page.keyboard.press('Escape');
+    await page.mouse.move(5, 450);
+    await page.evaluate(() => {
+      const pkt = {
+        id: 999002, hash: 'e2econtour0002', raw_hex: '0000', route_type: 0, payload_type: 5, timestamp: new Date().toISOString(),
+        observer_id: 'obs-e2e', observer_name: 'E2E', snr: 5, rssi: -90, path_json: '[]', scope_name: '#sf',
+        decoded: { header: { payloadTypeName: 'GRP_TXT' }, payload: {} },
+      };
+      wsListeners.forEach((fn) => fn({ type: 'packet', data: pkt }));
+    });
+    await page.waitForSelector('path.mc-scope-area.is-pulsing[data-scope="sf"]', { timeout: 3000 });
+    await page.waitForFunction(() => !document.querySelector('path.is-pulsing'), null, { timeout: 4000 });
+  });
+
+  await step('the choice is shared: the map page opens in Detailed; ?contoursView= opens live in it', async () => {
+    await page.goto(BASE + '/#/map?contours=1', { waitUntil: 'load' });
+    await page.waitForSelector('path.mc-scope-area');
+    assert(await page.$eval('#mcScopeView button[data-view="detailed"]', (b) => b.getAttribute('aria-pressed')) === 'true', 'map did not follow live');
+    await pickView('hull', /farthest reach/);
+    await page.goto(BASE + '/#/live?contours=1&contoursView=detailed&lat=37.785&lon=-122.35&zoom=11', { waitUntil: 'load' });
+    await page.waitForSelector('path.mc-scope-area');
+    assert(await page.$eval('#liveScopeView button[data-view="detailed"]', (b) => b.getAttribute('aria-pressed')) === 'true', 'live ignored ?contoursView=detailed');
+    await livePick('hull', /farthest reach/);
+  });
+
   await step('when elevation tiles fail, outlines fall back to radius + links and say so', async () => {
     const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const p2 = await ctx2.newPage();
@@ -535,6 +650,7 @@ const EDGES = [
 
   await page.evaluate(() => {
     localStorage.removeItem('meshcore-map-scope-contours');
+    localStorage.removeItem('live-scope-contours');
     localStorage.removeItem('meshcore-scope-contours-hidden');
     localStorage.removeItem('meshcore-map-clustering');
   });

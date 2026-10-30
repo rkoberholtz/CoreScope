@@ -101,7 +101,7 @@ Scoped packets carry a code derived from the region name, not the name itself. C
 
 - Being seen carrying a scope never expires for a repeater that has never reported a list, so on an instance that keeps packets for a long time an old scope can linger.
 - **Detailed** can reach up to about 1.5 km past the hull on very large reaches.
-- The radius rule, floor, margin, terrain model, wrap gap and default view are fixed for now.
+- The radius rule, floor, margin, terrain model, wrap gap, default view and pulse duration are fixed for now.
 
 ### Links
 

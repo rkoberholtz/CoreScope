@@ -62,8 +62,9 @@
    separate groups a split scope has. The outlines take no pointer events,
    so they never block a click on anything else.
 
-   The radius rule, floor, margin, terrain model, wrap gap and default view
-   are fixed for now; exposing them in the customizer is a follow-up. */
+   The radius rule, floor, margin, terrain model, wrap gap, default view and
+   pulse duration are fixed for now; exposing them in the customizer is a
+   follow-up. */
 (function () {
   'use strict';
 
@@ -79,6 +80,7 @@
   var MIN_RADIUS_M = 1000;
   var MAX_RADIUS_M = 20000;
   var NO_LINK_RADIUS_M = 1000;
+  var DEFAULT_PULSE_MS = 1500;
   // Every area is drawn this much past its members' reach, round its
   // corners too: a little generous, so a repeater at a corner or just past
   // a lobe's tip is not left on the line. With the floor, every member has
@@ -410,6 +412,32 @@
   var shapeEdge = G.shapeEdge, hullOfEdges = G.hullOfEdges, convexHull = G.convexHull, scopeHull = G.scopeHull,
     roundOut = G.roundOut, contourShapes = G.contourShapes, wrapShapes = G.wrapShapes, ringsBounds = G.ringsBounds, inRings = G.inRings;
 
+  // ── Pulse ────────────────────────────────────────────────────────────────
+
+  // createPulser runs one timer per scope. A packet for a scope that is
+  // already pulsing only pushes its end back, so a burst of packets costs one
+  // onStart and one onEnd, never a pile of DOM work.
+  function createPulser(opts) {
+    var setT = opts.setTimeout || setTimeout, clearT = opts.clearTimeout || clearTimeout;
+    var ms = opts.durationMs || DEFAULT_PULSE_MS;
+    var timers = new Map();
+    function end(s) { timers.delete(s); if (opts.onEnd) opts.onEnd(s); }
+    return {
+      pulse: function (scope) {
+        var s = normRegion(scope);
+        if (!s) return;
+        var t = timers.get(s);
+        if (t != null) clearT(t);
+        else if (opts.onStart) opts.onStart(s);
+        timers.set(s, setT(function () { end(s); }, ms));
+      },
+      isActive: function (scope) { return timers.has(normRegion(scope)); },
+      cancelAll: function () {
+        Array.from(timers.keys()).forEach(function (s) { clearT(timers.get(s)); end(s); });
+      },
+    };
+  }
+
   // ── Overlay ──────────────────────────────────────────────────────────────
 
   // shapeKey identifies a member's shape: its pubkey and a 32-bit FNV-1a
@@ -522,12 +550,13 @@
     }).join('') + '</div>';
   }
 
-  // createOverlay owns the layer, the cache and hover for one Leaflet map.
-  // opts: floorM, marginM (AREA_MARGIN_M), loadLinks (() => Promise of neighbor
+  // createOverlay owns the layer, the cache, hover and the pulses for one
+  // Leaflet map. opts: floorM, marginM (AREA_MARGIN_M), pulseMs, loadLinks (() => Promise of neighbor
   // graph edges), terrain (a terrain-reach.js provider: extentsFor and
   // status, setSource), loadMapConfig (() => Promise of /api/config/map:
   // antennaHeights, { pubkey or prefix: metres } the operator set, and
-  // terrainTiles, the elevation source), and raf for tests.
+  // terrainTiles, the elevation source), and setTimeout/clearTimeout/raf
+  // for tests.
   //   setNodes(nodes)   new node list; recomputes changed scopes when visible
   //   setLinks(edges)   neighbor graph edges the reach shapes follow
   //   setVisible(bool)  adds or removes the layer; computes lazily
@@ -537,6 +566,7 @@
   //   view()            the current view
   //   scopes()          [{ scope, colour, observed, configured, hidden }]
   //   onChange(fn)      called after each render; returns an unsubscribe
+  //   pulse(scope)      briefly highlight one scope (live page)
   //   destroy()         drop listeners and pending work
   function createOverlay(L, map, opts) {
     opts = opts || {};
@@ -545,7 +575,7 @@
     var raf = opts.raf || (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : function (fn) { return setTimeout(fn, 16); });
     if (!map.getPane(PANE)) map.createPane(PANE).style.zIndex = String(PANE_Z);
     // Its own SVG renderer: the live map prefers canvas, which would ignore
-    // the className the colours and hover are styled through.
+    // the className the colours, hover and pulse are styled through.
     var renderer = L.svg({ pane: PANE });
     var layer = L.layerGroup();
     var tip = L.tooltip({ direction: 'top', offset: [0, -10], className: 'mc-scope-tip', opacity: 1 });
@@ -577,6 +607,11 @@
     var linksSeq = 0;
     var hovered = [];
     var moveAt = null, moveQueued = false;
+    var pulser = createPulser({
+      durationMs: opts.pulseMs, setTimeout: opts.setTimeout, clearTimeout: opts.clearTimeout,
+      onStart: function (s) { setClass(drawn.get(s) || [], 'is-pulsing', true); },
+      onEnd: function (s) { setClass(drawn.get(s) || [], 'is-pulsing', false); },
+    });
 
     function radiusOf(n) { return (reach && reach.radius.get(n.public_key)) || NO_LINK_RADIUS_M; }
     // The operator's antenna height for a node: its pubkey, or the longest
@@ -728,7 +763,7 @@
     var groupsUsed = new Set();
 
     // draw adds a scope's polygons, one per group, and returns them. Hover
-    // lights them all.
+    // and pulse light them all.
     function draw(scope, members, text) {
       var parts = areas(scope, members);
       var polys = [];
@@ -862,7 +897,7 @@
       setVisible: function (v) {
         visible = !!v;
         if (visible) { if (!map.hasLayer(layer)) layer.addTo(map); }
-        else { if (popupOpen()) map.closePopup(popup); if (map.hasLayer(layer)) map.removeLayer(layer); }
+        else { pulser.cancelAll(); if (popupOpen()) map.closePopup(popup); if (map.hasLayer(layer)) map.removeLayer(layer); }
         render();
         if (visible && links === null) refreshLinks();
       },
@@ -886,9 +921,10 @@
         listeners.push(fn);
         return function () { listeners = listeners.filter(function (f) { return f !== fn; }); };
       },
+      pulse: function (scope) { if (visible && drawn.has(normRegion(scope))) pulser.pulse(scope); },
       destroy: function () {
         destroyed = true;
-        clearHover(); listeners = [];
+        pulser.cancelAll(); clearHover(); listeners = [];
         if (popupOpen()) map.closePopup(popup);
         map.off('mousemove', onMove); map.off('mouseout', onOut); map.off('click', onClick);
       },
@@ -1094,6 +1130,7 @@
     scopeHull: scopeHull,
     inRings: inRings,
     colorsFor: colorsFor,
+    createPulser: createPulser,
     createOverlay: createOverlay,
     sectors: SECTORS,
     mountScopeList: mountScopeList,
