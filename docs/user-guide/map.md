@@ -114,7 +114,7 @@ Scoped packets carry a code derived from the region name, not the name itself. C
 - Being seen carrying a scope never expires for a repeater that has never reported a list, so on an instance that keeps packets for a long time an old scope can linger.
 - **Detailed** is drawn on a grid: its edge can sit about 0.3 km past the hull on 30 km reaches, and its margin round a repeater can fall up to about 150 m short of 2 km.
 - The terrain is bare earth: buildings and trees aren't in it.
-- The loss budget, the 120 dB default, the 30 km limit, the radius rule, floor, margin, wrap gap and default view are fixed for now.
+- The loss budget, the 120 dB default, the 30 km limit, the radius rule, floor, margin, wrap gap, default view and pulse duration are fixed for now.
 
 ### Links
 

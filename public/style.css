@@ -5889,7 +5889,8 @@ body.embed #app.app-fixed {
  * one of eight colours, handed out in name order (colorsFor), so up to eight
  * scopes all differ. Paul
  * Tol's "muted" palette: told apart under the common colour-vision
- * deficiencies, and none of them is a role colour. */
+ * deficiencies, and none of them is a role colour. The live page pulses a
+ * scope's outline (.is-pulsing) when one of its packets arrives. */
 :root {
   --mc-reach-1: #88CCEE;
   --mc-reach-2: #CC6677;
@@ -5901,16 +5902,20 @@ body.embed #app.app-fixed {
   --mc-reach-8: #882255;
 }
 path.mc-scope-area { stroke: var(--mc-reach-colour); fill: var(--mc-reach-colour); stroke-width: 2; stroke-opacity: .85; fill-opacity: .12; transition: fill-opacity .25s ease-out, stroke-width .25s ease-out; }
+path.mc-scope-area.is-pulsing { stroke-width: 3.5; stroke-opacity: 1; fill-opacity: .3; }
 path.mc-scope-area.is-hovered { stroke-width: 3; stroke-opacity: 1; fill-opacity: .2; }
 /* One tooltip for every scope under the cursor (hit-tested in JS, since the
  * outlines take no pointer events). */
 .leaflet-tooltip.mc-scope-tip { font-size: 12px; line-height: 1.45; }
-/* Show/hide list: under Region contours on the map. */
+/* Show/hide list: under Region contours on the map, in the legend on live. */
 .mc-scope-list { margin: 4px 0 0 20px; font-size: 12px; }
 .mc-scope-list[hidden] { display: none; }
 /* Area shape picker: Convex Hull, Detailed. Under Region contours on the
- * map. */
+ * map, under REGION SCOPES in the legend on live. */
 .mc-scope-view { margin: 4px 0 0 20px; font-size: 12px; }
+.live-legend .mc-scope-list, .live-legend .mc-scope-view { margin-left: 0; }
+/* The live legend takes no pointer events (#1616); these two are controls. */
+.live-legend .mc-scope-list, .live-legend .mc-scope-view { pointer-events: auto; }
 .mc-scope-view[hidden] { display: none; }
 .mc-scope-view .btn { white-space: nowrap; }
 .mc-scope-view-label { display: block; font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
