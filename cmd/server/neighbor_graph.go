@@ -65,6 +65,15 @@ type NeighborEdge struct {
 	Ambiguous  bool            // multiple candidates or zero candidates
 	Candidates []string        // candidate pubkeys when ambiguous
 	Resolved   bool            // true if auto-resolved via Jaccard
+	// HeardByA and HeardByB count the observations in which NodeA received
+	// NodeB, and NodeB received NodeA. Every observation proves one
+	// direction only: an observer heard the last hop, or the first hop
+	// heard an advert's originator. On an ambiguous edge HeardByB is the
+	// unresolved end receiving. Both stay 0 for an edge whose direction is
+	// unknown (the persisted snapshot, upsertEdge), so such an edge never
+	// counts as two-way.
+	HeardByA int
+	HeardByB int
 	// CountsByMode tallies sightings broken down by hash-prefix mode in bytes
 	// (1, 2, or 3). Firmware path-byte encoding (Packet.cpp:13-18) sets
 	// hash_size = (pathByte>>6)+1 with values 1/2/3 valid and 4 reserved.
@@ -339,7 +348,7 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 				// Zero-hop
 				if hasFullOriginator && fromLower != "" {
 					if fromLower != observerPK { // self-edge guard
-						g.upsertEdge(fromLower, observerPK, "", observerPK, obs.SNR, parseTimestamp(obs.Timestamp))
+						g.upsertHeard(fromLower, observerPK, observerPK, "", observerPK, obs.SNR, parseTimestamp(obs.Timestamp))
 					}
 				}
 				continue
@@ -351,7 +360,7 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 				if fromLower != firstHop { // self-edge guard (shouldn't happen but spec says check)
 					if packetpath.MeetsPathTrust(len(path[0])/2, opts.PathTrust) {
 						candidates := pm.m[firstHop]
-						g.upsertEdgeWithCandidates(fromLower, firstHop, candidates, observerPK, obs.SNR, parseTimestamp(obs.Timestamp), lowerCache)
+						g.upsertEdgeWithCandidates(fromLower, firstHop, candidates, false, observerPK, obs.SNR, parseTimestamp(obs.Timestamp), lowerCache)
 					}
 				}
 			}
@@ -361,7 +370,7 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 			if observerPK != lastHop { // self-edge guard
 				if packetpath.MeetsPathTrust(len(path[len(path)-1])/2, opts.PathTrust) {
 					candidates := pm.m[lastHop]
-					g.upsertEdgeWithCandidates(observerPK, lastHop, candidates, observerPK, obs.SNR, parseTimestamp(obs.Timestamp), lowerCache)
+					g.upsertEdgeWithCandidates(observerPK, lastHop, candidates, true, observerPK, obs.SNR, parseTimestamp(obs.Timestamp), lowerCache)
 				}
 			}
 		}
@@ -419,8 +428,15 @@ func jsonUnmarshalFast(data string, v interface{}) error {
 	return json.Unmarshal([]byte(data), v)
 }
 
-// upsertEdge adds/updates an edge between two fully-known pubkeys.
+// upsertEdge adds/updates an edge between two fully-known pubkeys without
+// recording which of them heard the other.
 func (g *NeighborGraph) upsertEdge(pubkeyA, pubkeyB, prefix, observer string, snr *float64, ts time.Time) {
+	g.upsertHeard(pubkeyA, pubkeyB, "", prefix, observer, snr, ts)
+}
+
+// upsertHeard adds/updates the edge between pubkeyA and pubkeyB, recording
+// that rx (one of the two, or "" when unknown) received the other.
+func (g *NeighborGraph) upsertHeard(pubkeyA, pubkeyB, rx, prefix, observer string, snr *float64, ts time.Time) {
 	// Geo-sanity guard (issue #1228): if both endpoints have known GPS and
 	// the haversine distance exceeds the configured threshold, drop the
 	// edge. When either lacks GPS we have no signal and accept.
@@ -449,6 +465,13 @@ func (g *NeighborGraph) upsertEdge(pubkeyA, pubkeyB, prefix, observer string, sn
 		g.byNode[key.B] = append(g.byNode[key.B], e)
 	}
 
+	switch {
+	case rx == "":
+	case rx == e.NodeA:
+		e.HeardByA++
+	case rx == e.NodeB:
+		e.HeardByB++
+	}
 	e.Count++
 	incCountsByMode(e, prefix)
 	if ts.After(e.LastSeen) {
@@ -467,13 +490,23 @@ func (g *NeighborGraph) upsertEdge(pubkeyA, pubkeyB, prefix, observer string, sn
 }
 
 // upsertEdgeWithCandidates handles prefix-based edges that may be ambiguous.
-func (g *NeighborGraph) upsertEdgeWithCandidates(knownPK, prefix string, candidates []nodeInfo, observer string, snr *float64, ts time.Time, lc map[string]string) {
+// knownHeard says which end received: true when knownPK heard the prefix's
+// node (an observer and the last hop), false when the prefix's node heard
+// knownPK (the first hop and an advert's originator).
+func (g *NeighborGraph) upsertEdgeWithCandidates(knownPK, prefix string, candidates []nodeInfo, knownHeard bool, observer string, snr *float64, ts time.Time, lc map[string]string) {
+	heard := func(other string) {
+		rx := other
+		if knownHeard {
+			rx = knownPK
+		}
+		g.upsertHeard(knownPK, other, rx, prefix, observer, snr, ts)
+	}
 	if len(candidates) == 1 {
 		resolved := cachedToLower(lc, candidates[0].PublicKey)
 		if resolved == knownPK {
 			return // self-edge guard
 		}
-		g.upsertEdge(knownPK, resolved, prefix, observer, snr, ts)
+		heard(resolved)
 		return
 	}
 
@@ -487,7 +520,7 @@ func (g *NeighborGraph) upsertEdgeWithCandidates(knownPK, prefix string, candida
 	}
 
 	if len(filtered) == 1 {
-		g.upsertEdge(knownPK, filtered[0], prefix, observer, snr, ts)
+		heard(filtered[0])
 		return
 	}
 
@@ -515,6 +548,11 @@ func (g *NeighborGraph) upsertEdgeWithCandidates(knownPK, prefix string, candida
 		g.byNode[knownPK] = append(g.byNode[knownPK], e)
 	}
 
+	if knownHeard == (e.NodeA == knownPK) {
+		e.HeardByA++
+	} else {
+		e.HeardByB++
+	}
 	e.Count++
 	incCountsByMode(e, prefix)
 	if ts.After(e.LastSeen) {
@@ -714,16 +752,27 @@ func (g *NeighborGraph) resolveEdge(oldKey edgeKey, e *NeighborEdge, knownNode, 
 	g.removeFromByNode(oldKey.A, e)
 	g.removeFromByNode(oldKey.B, e)
 
-	// Update edge.
+	// Update edge. The direction counts follow their ends: the known end's
+	// moves with it, and the unresolved end's becomes resolvedPK's.
+	byKnown, byOther := e.HeardByA, e.HeardByB
+	if e.NodeA != knownNode {
+		byKnown, byOther = byOther, byKnown
+	}
 	newKey := makeEdgeKey(knownNode, resolvedPK)
 	e.NodeA = newKey.A
 	e.NodeB = newKey.B
+	e.HeardByA, e.HeardByB = byKnown, byOther
+	if newKey.A != knownNode {
+		e.HeardByA, e.HeardByB = byOther, byKnown
+	}
 	e.Ambiguous = false
 	e.Resolved = true
 
 	// Merge with existing edge if any.
 	if existing, ok := g.edges[newKey]; ok {
 		existing.Count += e.Count
+		existing.HeardByA += e.HeardByA
+		existing.HeardByB += e.HeardByB
 		if e.LastSeen.After(existing.LastSeen) {
 			existing.LastSeen = e.LastSeen
 		}
