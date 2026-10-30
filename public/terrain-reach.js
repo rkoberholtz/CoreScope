@@ -19,8 +19,8 @@
    Antenna height above ground is the input that matters most, and adverts
    do not carry it. In order of preference:
      set:     the operator's figure (mapDefaults.antennaHeights in config)
-     links:   raised from its proven two-way links: for each, the lowest
-              antenna that gives the link line of sight over the terrain
+     links:   raised from the repeaters known to hear it: for each, the
+              lowest antenna that gives the link line of sight over the terrain
               between them (far end at 10 m); the 75th percentile of those,
               when that is more than 10 m, up to 60 m. Links only prove a
               lower bound, so they never lower it below the default.
@@ -221,7 +221,7 @@
   //   extentsFor([{ pk, lat, lon, R, antennaM?, links? }], onProgress)
   //       → Promise<Map pk → ext>; onProgress(pk, ext, { antennaM, source })
   //       antennaM: the operator's height (source 'set'); otherwise it is
-  //       estimated from links ([{ lat, lon }] of its two-way partners)
+  //       estimated from links ([{ lat, lon }] of the nodes that heard it)
   //   status()  'ok' | 'unavailable' (a tile failed) | 'idle'
   function createTerrainProvider(opts) {
     opts = opts || {};
@@ -232,8 +232,11 @@
     var maxChars = opts.maxChars || MAX_CHARS;
     // The tile source: url (a template, null for the default) or off.
     var source = { off: false, url: null };
+    // Both hold the current source's tiles only: setSource empties them,
+    // and a fetch started under an earlier source is never stored.
     var tiles = new Map();     // 'x/y' → Float32Array; LRU order
     var inflight = new Map();  // 'x/y' → Promise
+    var sourceGen = 0;         // bumped by every change of source
     var results = new Map();   // key → { ext: Float64Array, antennaM, source }
     var order = [];            // persisted keys, oldest first
     var computed = 0, failures = 0, used = false;
@@ -294,9 +297,11 @@
       var k = x + '/' + y;
       if (tiles.has(k)) { var t = tiles.get(k); tiles.delete(k); tiles.set(k, t); return Promise.resolve(t); }
       if (inflight.has(k)) return inflight.get(k);
-      var p = Promise.resolve().then(function () { return fetchTile(ZOOM, x, y, source.url); })
-        .then(function (arr) { return arr; }, function () { failures++; return null; })
+      var gen = sourceGen, url = source.url;
+      var p = Promise.resolve().then(function () { return fetchTile(ZOOM, x, y, url); })
+        .then(function (arr) { return arr; }, function () { if (gen === sourceGen) failures++; return null; })
         .then(function (arr) {
+          if (gen !== sourceGen) return arr;
           inflight.delete(k);
           // A failed tile is not kept, so the next visit asks for it again.
           if (arr) {
@@ -405,7 +410,11 @@
       // Terrarium URL template; anything else is the default source. As
       // /api/config/map serves mapDefaults.terrainTiles.
       setSource: function (src) {
-        source = { off: !!(src && src.disabled), url: (src && typeof src.url === 'string' && src.url) || null };
+        var next = { off: !!(src && src.disabled), url: (src && typeof src.url === 'string' && src.url) || null };
+        if (next.off !== source.off || next.url !== source.url) {
+          tiles.clear(); inflight.clear(); sourceGen++;
+        }
+        source = next;
         failures = 0;
       },
       status: function () { return source.off ? 'off' : (failures ? 'unavailable' : (used ? 'ok' : 'idle')); },

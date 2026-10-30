@@ -2,12 +2,12 @@
 
    For each MeshCore region scope, outline the general area its nodes reach,
    from every node that is configured for it (configuredScopes: its default
-   scope, the regions an observer reported it allows, or its own declared
-   list) or whose full pubkey appears in the path of traffic for it
+   scope, or the newest region list it reported, through an observer or a
+   companion's regions query) or whose full pubkey appears in the path of traffic for it
    (transported_scopes, #1751/#1902): one area per group of those members
-   joined by two-way links (linkedGroups). A scoped flood crosses from one
-   group to another only through a repeater that forwards the scope, so an
-   area never spans a gap no such link is known to bridge. A repeater
+   joined by links heard either way (linkedGroups). A scoped flood crosses
+   from one group to another only through a repeater that forwards the
+   scope, so an area never spans a gap no such link is known to bridge. A repeater
    forwards a scoped flood when the scope is in its region map without the
    deny-flood flag (firmware simple_repeater: onRecvPacket's
    region_map.findMatch(pkt, REGION_DENY_FLOOD), allowPacketForward). Its
@@ -19,24 +19,25 @@
    it to allow floods (the auto-created default does), so it counts only
    for a repeater, and only while its reported list, if any, names it.
    Being seen carrying a scope is the only way in for a repeater whose
-   configuration is unknown; once a repeater has reported its list,
+   configuration is unknown; once a repeater has reported a complete list,
    carrying counts only for regions on it (carriedScopes). The click box
    says which evidence each member has.
 
    A node's reach, in 72 directions (reachFor):
      max( min(R, terrain cut), link lobe, 1 km floor )
-   - R, how far it regularly reaches, comes from its proven two-way links in
-     the neighbor graph (linkReach): the 75th percentile of their distances
-     × 1.1, 1-20 km; 1 km for a node with no links.
+   - R, how far it regularly reaches, comes from the links in the neighbor
+     graph over which another node heard it (linkReach; every observation
+     proves one direction only): the 75th percentile of their distances
+     × 1.1, 1-20 km; 1 km for a node nobody is known to hear.
    - The terrain cut is where line of sight over elevation data ends in that
      direction (terrain-reach.js). Real radios reach roughly a circle, trimmed
      where a ridge or valley shadows the ground.
-   - Each proven link to a repeater in the same area still stretches its own
+   - Each repeater in the same area that heard it still stretches that
      bearing out past it: full length within 5° (one ray) of it, so the
      partner is inside even between two rays, tapering to nothing at
      ±11.25°. Evidence always beats the model. A link to a repeater outside
-     the area (a hilltop site 60 km off) stretches nothing: it proves the two
-     ends hear each other, not that the ground between them is covered.
+     the area (a hilltop site 60 km off) stretches nothing: it proves the
+     site heard it, not that the ground between them is covered.
    Interpolating between the 72 directions keeps the shape smooth.
 
    Each group's outline is drawn in one of two views (setView), each built
@@ -72,8 +73,9 @@
   // region round it, edge repeaters included. Within ~1 km a LoRa signal
   // from a mast mostly gets round nearby terrain anyway.
   var DEFAULT_FLOOR_M = 1000;
-  // Radius rule (linkReach): 75th percentile of two-way link distances,
-  // × LINK_MARGIN, clamped; a node with no links gets NO_LINK_RADIUS_M.
+  // Radius rule (linkReach): 75th percentile of the distances a node was
+  // heard over, × LINK_MARGIN, clamped; a node nobody is known to hear gets
+  // NO_LINK_RADIUS_M.
   var RADIUS_PCT = 0.75;
   var MIN_RADIUS_M = 1000;
   var MAX_RADIUS_M = 20000;
@@ -140,27 +142,25 @@
     return [lat, lon];
   }
 
-  // configuredScopes returns Map scope → { default, allowed, declared }: the
-  // region scopes a node is configured for, from the three sources the API
-  // carries, and which of them say so.
-  //   default_scope     the scope its own adverts go out under (its
-  //                     firmware default, "region default"). Counted only
-  //                     for a repeater (or a node of unknown role) and, once
-  //                     it has reported a list, only if the list names it:
-  //                     only simple_repeater checks a scoped flood against
-  //                     its regions (allowPacketForward). A companion
-  //                     (isRepeatEn) or a room server (disable_fwd) forwards
-  //                     regardless, so its default says nothing about that.
-  //   configured_scope  the comma-separated regions an observer reported it
-  //                     allows (#1865); '*' is the flood wildcard, not a region
-  //   declared_regions  its own answer to a companion's regions query (#1862)
+  // configuredScopes returns Map scope → { default, reported }: the region
+  // scopes a node is configured for, and which evidence says so.
+  //   default   default_scope, the scope its own adverts go out under (its
+  //             firmware default, "region default"). Counted only for a
+  //             repeater (or a node of unknown role) and, once it has
+  //             reported a complete list, only if the list names it: only
+  //             simple_repeater checks a scoped flood against its regions
+  //             (allowPacketForward). A companion (isRepeatEn) or a room
+  //             server (disable_fwd) forwards regardless, so its default
+  //             says nothing about that.
+  //   reported  on the newest region list it reported (reportedRegions);
+  //             '*' is the flood wildcard, not a region.
   function configuredScopes(n) {
     var out = new Map();
     function add(r, key) {
       r = normRegion(String(r).trim());
       if (!r || r === '*') return;
       var e = out.get(r);
-      if (!e) { e = { default: false, allowed: false, declared: false }; out.set(r, e); }
+      if (!e) { e = { default: false, reported: false }; out.set(r, e); }
       e[key] = true;
     }
     if (!n) return out;
@@ -169,28 +169,44 @@
       var list = reportedList(n);
       if (!list || list.has(def)) add(def, 'default');
     }
-    if (n.configured_scope) String(n.configured_scope).split(',').forEach(function (r) { add(r, 'allowed'); });
-    (Array.isArray(n.declared_regions) ? n.declared_regions : []).forEach(function (r) { add(r, 'declared'); });
+    var rep = reportedRegions(n);
+    if (rep) rep.regions.forEach(function (r) { add(r, 'reported'); });
     return out;
   }
 
-  // reportedList returns the Set of regions a node has reported it allows
-  // (configured_scope and declared_regions together), or null when it has
-  // reported neither. An empty or '*'-only answer is a list: it names nothing.
+  // reportedRegions returns the newest region list a node reported, as
+  // { regions, partial }, or null when it has reported none. The server's
+  // declared_regions is already the newest answer across both collectors
+  // (configured_scope from observer /neighbors reports, and companions'
+  // regions queries; AllCurrentDeclaredRegions), so configured_scope is read
+  // only from a server that does not send declared_regions: adding the two
+  // would bring back a region the newer answer dropped. partial: the answer
+  // was cut off (declared_regions_truncated), so a region missing from it may
+  // still be configured.
+  function reportedRegions(n) {
+    if (!n) return null;
+    if (Array.isArray(n.declared_regions)) return { regions: n.declared_regions, partial: n.declared_regions_truncated === true };
+    if (n.configured_scope != null) return { regions: String(n.configured_scope).split(','), partial: false };
+    return null;
+  }
+
+  // reportedList returns the Set of regions on a node's newest complete
+  // list, or null when it has reported none or only a partial one: a list
+  // can rule a region out only when it is whole. An empty or '*'-only answer
+  // is a list: it names nothing.
   function reportedList(n) {
-    if (!n || (n.configured_scope == null && !Array.isArray(n.declared_regions))) return null;
+    var rep = reportedRegions(n);
+    if (!rep || rep.partial) return null;
     var out = new Set();
-    function add(r) {
+    rep.regions.forEach(function (r) {
       r = normRegion(String(r).trim());
       if (r && r !== '*') out.add(r);
-    }
-    if (n.configured_scope != null) String(n.configured_scope).split(',').forEach(add);
-    (Array.isArray(n.declared_regions) ? n.declared_regions : []).forEach(add);
+    });
     return out;
   }
 
   // carriedScopes returns the scopes a node has been seen carrying. A node
-  // that has reported its list keeps only the scopes on it: the firmware
+  // that has reported a complete list keeps only the scopes on it: the firmware
   // forwards a scoped flood only for a region on that list
   // (RegionMap::findMatch returns NULL for any other transport code), so
   // carrying anything else was seen before the list changed. transported_scopes
@@ -255,19 +271,22 @@
   }
 
   // linkReach reads what the neighbor graph proves about each node's reach.
-  // Only two-way links between two placed nodes count (each end has heard
-  // the other), never an ambiguous one (a hop prefix that could be several
-  // nodes). O(links × SECTORS).
+  // A link counts in the direction it was heard: heard_by_target means the
+  // target received the source, which proves how far the source's signal
+  // goes, not the target's. Only links between two placed nodes count, with
+  // at least one direction seen (bidirectional alone proves nothing), never
+  // an ambiguous one (a hop prefix that could be several nodes).
+  // O(links × SECTORS).
   //   radius: Map pk → R, how far the node regularly reaches: the 75th
-  //           percentile of its link distances × 1.1, clamped to 1-20 km.
-  //           It ignores one exceptional long link and a crowd of close
-  //           neighbours alike.
-  //   links:  Map pk → [{ pk, bearing, len }], each link's partner, its
-  //           bearing and its distance × 1.1, for lobeOf.
-  //   partners: Map pk → [{ lat, lon }] of the other ends, from which the
-  //           terrain provider estimates the node's antenna height.
-  //   peers:  Map pk → [pk] of the other ends, co-located ones included,
-  //           for linkedGroups.
+  //           percentile of the distances it was heard over × 1.1, clamped
+  //           to 1-20 km. It ignores one exceptional long link and a crowd
+  //           of close neighbours alike.
+  //   links:  Map pk → [{ pk, bearing, len }], each partner that heard it,
+  //           its bearing and its distance × 1.1, for lobeOf.
+  //   partners: Map pk → [{ lat, lon }] of the nodes that heard it, from
+  //           which the terrain provider estimates its antenna height.
+  //   peers:  Map pk → [pk] of the other ends, heard either way, co-located
+  //           ones included, for linkedGroups.
   function linkReach(nodes, edges) {
     var pos = new Map();
     (nodes || []).forEach(function (n) { var p = position(n); if (p && n.public_key) pos.set(n.public_key, p); });
@@ -280,19 +299,23 @@
     }
     function dist(pk, d) { var l = dists.get(pk); if (l) l.push(d); else dists.set(pk, [d]); }
     (edges || []).forEach(function (e) {
-      if (!e || e.bidirectional !== true || e.ambiguous || e.source === e.target) return;
+      if (!e || e.ambiguous || e.source === e.target) return;
+      var srcHeard = e.heard_by_target > 0, tgtHeard = e.heard_by_source > 0;
+      if (!srcHeard && !tgtHeard) return;
       var a = pos.get(e.source), b = pos.get(e.target);
       if (!a || !b) return;
       var cos = Math.cos(((a[0] + b[0]) / 2) * Math.PI / 180);
       var dx = (b[1] - a[1]) * M_PER_DEG * cos, dy = (b[0] - a[0]) * M_PER_DEG;
-      var d = Math.sqrt(dx * dx + dy * dy);
-      dist(e.source, d); dist(e.target, d);
-      partner(e.source, b); partner(e.target, a);
+      var d = Math.sqrt(dx * dx + dy * dy), fwd = Math.atan2(dx, dy);
       peer(e.source, e.target); peer(e.target, e.source);
-      if (!(d > 0)) return;
-      var fwd = Math.atan2(dx, dy);
-      link(e.source, e.target, fwd, d * LINK_MARGIN);
-      link(e.target, e.source, fwd + Math.PI, d * LINK_MARGIN);
+      if (srcHeard) {
+        dist(e.source, d); partner(e.source, b);
+        if (d > 0) link(e.source, e.target, fwd, d * LINK_MARGIN);
+      }
+      if (tgtHeard) {
+        dist(e.target, d); partner(e.target, a);
+        if (d > 0) link(e.target, e.source, fwd + Math.PI, d * LINK_MARGIN);
+      }
     });
     var radius = new Map();
     dists.forEach(function (l, pk) {
@@ -303,8 +326,8 @@
     return { radius: radius, links: links, partners: partners, peers: peers };
   }
 
-  // linkedGroups splits a scope's members into groups joined by two-way
-  // links between members (peers, from linkReach; null: no links yet), in
+  // linkedGroups splits a scope's members into groups joined by links,
+  // heard either way, between members (peers, from linkReach; null: no links yet), in
   // member order. A scoped flood crosses from one group to another only
   // through a repeater that forwards the scope, so a link through a
   // non-member joins nothing, and each group gets an area of its own: one
@@ -339,7 +362,7 @@
   // of it, so interpolating between them still reaches past the partner,
   // then tapering to nothing at ±11.25°. Float64Array(SECTORS), or null
   // with no links. The overlay passes only the links to partners in the
-  // same area: a link proves the two ends hear each other, not that the
+  // same area: a link proves the partner heard the node, not that the
   // ground between them is covered, so a lobe toward a hilltop repeater in
   // another area would only inflate this one.
   function lobeOf(links) {
@@ -473,7 +496,7 @@
   // about what CoreScope knows, not what the repeater is.
   var KNOWN_TITLE = 'Its region list or default scope has been reported';
   var CARRY_TITLE = 'Seen relaying this scope\'s traffic, so it forwards it';
-  var GROUPS_TITLE = 'No two-way link joins these groups of its repeaters, so each has its own area and the gap between them is not shown as reached';
+  var GROUPS_TITLE = 'No known link joins these groups of its repeaters, so each has its own area and the gap between them is not shown as reached';
 
   // scopePopupHtml: one section per scope under the click, each listing its
   // repeaters with why they are listed, and how many separate areas the
@@ -503,8 +526,7 @@
         var n = m.node, pk = String(n.public_key || '');
         var tags = '';
         if (m.conf && m.conf.default) tags += tagHtml('default', 'Its own adverts go out scoped to this region');
-        if (m.conf && m.conf.allowed) tags += tagHtml('allowed', 'An observer reported it allows this region');
-        if (m.conf && m.conf.declared) tags += tagHtml('declared', 'It lists this region when asked');
+        if (m.conf && m.conf.reported) tags += tagHtml('reported', 'Its newest reported region list names this region');
         if (m.carrying) tags += tagHtml('carrying', 'Seen relaying this region\'s traffic');
         if (!m.placed) tags += tagHtml('no position', 'Has no position, so it is not part of the outline');
         return '<li><a href="#/nodes/' + encodeURIComponent(pk) + '">' + escapeHtml(n.name || pk.slice(0, 8)) + '</a> ' + tags + '</li>';
@@ -567,6 +589,7 @@
     var heights = null;      // operator antenna heights, { key: metres }; null until loaded
     var terrainAsked = new Set(); // pk|key requested and not yet answered
     var renderQueued = false;
+    var destroyed = false; // destroy(): nothing is drawn or asked for after it
     var visible = false;
     var only = '';
     var hidden = new Set();
@@ -638,10 +661,12 @@
     // Ask the terrain provider for the members it has not answered yet. Each
     // answer reshapes that one node and queues a render, at most one a frame.
     function requestTerrain(members) {
-      if (!opts.terrain) return;
+      if (!opts.terrain || destroyed) return;
       // Wait for the map config: the operator's heights, so a set height is
       // never first computed as an estimate, and the terrain source.
       if (opts.loadMapConfig && heights === null) { loadHeights(); return; }
+      // Terrain is off on this instance: there is nothing to ask for.
+      if (opts.terrain.status && opts.terrain.status() === 'off') return;
       var items = [];
       members.forEach(function (n) {
         var k = terrainKey(n), t = terrain.get(n.public_key), ask = n.public_key + '|' + k;
@@ -655,11 +680,22 @@
       if (!items.length) return;
       var keyOf = new Map(items.map(function (it) { return [it.pk, it.key]; }));
       Promise.resolve(opts.terrain.extentsFor(items, function (pk, ext) {
+        if (destroyed) return;
         terrain.set(pk, { key: keyOf.get(pk), ext: ext });
         shapes.delete(pk);
         queueRender();
       })).then(done, done);
-      function done() { items.forEach(function (it) { terrainAsked.delete(it.pk + '|' + it.key); }); queueRender(); }
+      // A member the provider did not answer is recorded as answered without
+      // terrain (its radius alone), so the next render does not ask again;
+      // asking every frame would never end. Each answer has queued its own
+      // render, so none is needed here.
+      function done() {
+        items.forEach(function (it) {
+          terrainAsked.delete(it.pk + '|' + it.key);
+          var t = terrain.get(it.pk);
+          if (!destroyed && (!t || t.key !== it.key)) terrain.set(it.pk, { key: it.key, ext: null });
+        });
+      }
     }
 
     var heightsAsked = false;
@@ -746,6 +782,7 @@
     }
 
     function render() {
+      if (destroyed) return;
       clearHover();
       layer.clearLayers();
       drawn = new Map();
@@ -787,7 +824,7 @@
     }
 
     function refreshLinks() {
-      if (!visible || !opts.loadLinks) return;
+      if (!visible || !opts.loadLinks || destroyed) return;
       var seq = ++linksSeq;
       Promise.resolve(opts.loadLinks()).then(function (edges) {
         if (seq !== linksSeq) return;
@@ -886,6 +923,7 @@
       },
       pulse: function (scope) { if (visible && drawn.has(normRegion(scope))) pulser.pulse(scope); },
       destroy: function () {
+        destroyed = true;
         pulser.cancelAll(); clearHover(); listeners = [];
         if (popupOpen()) map.closePopup(popup);
         map.off('mousemove', onMove); map.off('mouseout', onOut); map.off('click', onClick);
@@ -950,11 +988,11 @@
     hull: 'Each area spans the farthest reach of its repeaters, at least ' + ((DEFAULT_FLOOR_M + AREA_MARGIN_M) / 1000) + ' km round each.',
     detailed: 'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least ' + ((DEFAULT_FLOOR_M + AREA_MARGIN_M) / 1000) + ' km round each.',
   };
-  var TERRAIN_NOTE = 'A repeater\'s range comes from its two-way links, trimmed by line of sight over terrain and stretched to proven links within its area. ' +
-    'Antenna heights are the operator\'s where set; otherwise 10 m, raised where a repeater\'s links need more (click an outline to see them). ';
+  var TERRAIN_NOTE = 'A repeater\'s range comes from how far other repeaters are known to hear it, trimmed by line of sight over terrain and stretched to repeaters in its area that heard it. ' +
+    'Antenna heights are the operator\'s where set; otherwise 10 m, raised where those links need more. ';
   var TERRAIN_SOURCE = 'Terrain: AWS Terrain Tiles (Mapzen; SRTM, USGS 3DEP and others), bare earth: buildings and trees are not in it.';
-  var NO_TERRAIN_NOTE = 'Terrain unavailable: a repeater\'s range comes from its two-way links, stretched to proven links within its area, with no terrain trimming.';
-  var TERRAIN_OFF_NOTE = 'Terrain is off on this instance: a repeater\'s range comes from its two-way links, stretched to proven links within its area, with no terrain trimming.';
+  var NO_TERRAIN_NOTE = 'Terrain unavailable: a repeater\'s range comes from how far other repeaters are known to hear it, stretched to repeaters in its area that heard it, with no terrain trimming.';
+  var TERRAIN_OFF_NOTE = 'Terrain is off on this instance: a repeater\'s range comes from how far other repeaters are known to hear it, stretched to repeaters in its area that heard it, with no terrain trimming.';
 
   // terrainNote says how ranges were drawn, and from which elevation source.
   function terrainNote(info) {

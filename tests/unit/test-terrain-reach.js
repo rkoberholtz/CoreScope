@@ -452,6 +452,54 @@ test('another tile source: its URL template is filled in, and its results are ke
   });
 });
 
+// Tiles are cached by position; the source must be part of what they are
+// cached under, or a new source draws with the old one's elevation.
+test('changing the tile source never reuses the previous source\'s tiles', () => {
+  const B = 'https://t.example.org/dem/{z}/{x}/{y}.png';
+  const urls = [];
+  const flat = tileFetcher(() => 50).fetchTile;
+  const fetchTile = (z, x, y, url) => { urls.push(url || 'default'); return flat(z, x, y); };
+  const p = TR.createTerrainProvider({ fetchTile, storage: memStore(), yieldFn: immediate });
+  const it = { pk: 'a', lat: O.lat, lon: O.lon, R: 3000 };
+  return p.extentsFor([it]).then(() => {
+    const first = urls.length;
+    assert.ok(first > 0 && urls.every(u => u === 'default'));
+    p.setSource({ url: B });
+    return p.extentsFor([it]).then(() => {
+      const after = urls.slice(first);
+      assert.strictEqual(after.length, first, 'every tile fetched again: ' + after.join(' '));
+      assert.ok(after.every(u => u === B), 'from the new source: ' + after.join(' '));
+    });
+  });
+});
+
+test('a tile still on its way from the previous source is not kept for the new one', () => {
+  const B = 'https://t.example.org/dem/{z}/{x}/{y}.png';
+  const flat = tileFetcher(() => 50).fetchTile;
+  const held = [], urls = [];
+  const fetchTile = (z, x, y, url) => {
+    urls.push(url || 'default');
+    if (!url) return new Promise(r => held.push(() => r(flat(z, x, y))));
+    return flat(z, x, y);
+  };
+  const p = TR.createTerrainProvider({ fetchTile, storage: memStore(), yieldFn: immediate });
+  const it = { pk: 'a', lat: O.lat, lon: O.lon, R: 3000 };
+  const old = p.extentsFor([it]);
+  const started = () => held.length ? Promise.resolve() : new Promise(r => setTimeout(r, 0)).then(started);
+  return started().then(() => {
+    assert.ok(urls.every(u => u === 'default'), 'test premise: the old source\'s fetch is in flight');
+    p.setSource({ url: B });
+    held.forEach(f => f());
+    return old;
+  }).then(() => {
+    const before = urls.length;
+    return p.extentsFor([Object.assign({}, it, { pk: 'b' })]).then(() => {
+      const after = urls.slice(before);
+      assert.ok(after.length > 0 && after.every(u => u === B), 'fetched from the new source: ' + after.join(' '));
+    });
+  });
+});
+
 test('broken storage never breaks the provider', () => {
   const bad = { getItem() { throw new Error('denied'); }, setItem() { throw new Error('full'); } };
   const p = TR.createTerrainProvider({ fetchTile: tileFetcher(() => 50).fetchTile, storage: bad, yieldFn: immediate });

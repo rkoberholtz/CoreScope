@@ -137,17 +137,41 @@ test('a node listing a scope twice counts once', () => {
   assert.strictEqual(g.get('a').configuredOnly.length, 0);
 });
 
-test('configuredScopes reads default_scope, configured_scope and declared_regions, and says which', () => {
-  const m = SC.configuredScopes({ default_scope: '#phl', configured_scope: '#phl, #us-pa,*,,us', declared_regions: ['us', 'nj'] });
-  const plainMap = JSON.parse(JSON.stringify(Array.from(m)));
-  assert.deepStrictEqual(plainMap, [
-    ['phl', { default: true, allowed: true, declared: false }],
-    ['us-pa', { default: false, allowed: true, declared: false }],
-    ['us', { default: false, allowed: true, declared: true }],
-    ['nj', { default: false, allowed: false, declared: true }],
+test('configuredScopes reads default_scope and the reported list, and says which', () => {
+  // A server without declared_regions: configured_scope is the list.
+  const m = SC.configuredScopes({ default_scope: '#metro', configured_scope: '#metro, #us-pa,*,,us' });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(Array.from(m))), [
+    ['metro', { default: true, reported: true }],
+    ['us-pa', { default: false, reported: true }],
+    ['us', { default: false, reported: true }],
   ]);
   assert.strictEqual(SC.configuredScopes({}).size, 0);
   assert.strictEqual(SC.configuredScopes(null).size, 0);
+});
+
+// declared_regions is the server's newest answer across configured_scope and
+// the companions' regions queries. Adding the raw configured_scope to it
+// brought back regions a newer answer had dropped.
+test('declared_regions is the newest list: an older configured_scope does not add to it', () => {
+  const n = { role: 'repeater', configured_scope: '#metro,#us-pa', declared_regions: ['us-pa'], transported_scopes: ['#metro'] };
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(Array.from(SC.configuredScopes(n)))), [['us-pa', { default: false, reported: true }]]);
+  assert.strictEqual(SC.carriedScopes(n).size, 0, 'carrying #metro is older than the list that dropped it');
+  const g = SC.groupNodesByScope([Object.assign({ public_key: 'r', lat: 1, lon: 1 }, n)]);
+  assert.strictEqual(g.has('metro'), false, 'the dropped region makes no area');
+});
+
+// A truncated answer names only part of the list, so a region missing from
+// it may still be configured: it adds what it names and rules nothing out.
+test('a truncated list adds its regions but does not override carrying or the default scope', () => {
+  const n = { role: 'repeater', default_scope: '#c', declared_regions: ['a'], declared_regions_truncated: true, transported_scopes: ['#b'] };
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(Array.from(SC.configuredScopes(n)))), [
+    ['c', { default: true, reported: false }],
+    ['a', { default: false, reported: true }],
+  ]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(Array.from(SC.carriedScopes(n)))), ['b']);
+  const whole = Object.assign({}, n, { declared_regions_truncated: undefined });
+  assert.strictEqual(SC.carriedScopes(whole).size, 0, 'the same list, complete, rules #b out');
+  assert.strictEqual(SC.configuredScopes(whole).has('c'), false, 'and the default it leaves out');
 });
 
 test('a node configured by default_scope or configured_scope is a configured-only member unless it carries the scope', () => {
@@ -179,9 +203,11 @@ test('a reported list overrides carrying a scope it does not name', () => {
   assert.strictEqual(g.get('east-side').configuredOnly.length, 0);
 });
 
-test('either reported list keeps a carried scope, and default_scope alone does not', () => {
+test('the reported list keeps a carried scope, and default_scope alone does not', () => {
   const c = n => JSON.parse(JSON.stringify(Array.from(SC.carriedScopes(n))));
-  assert.deepStrictEqual(c({ configured_scope: '*,#a', declared_regions: ['b'], transported_scopes: ['#a', '#b', '#c'] }), ['a', 'b']);
+  assert.deepStrictEqual(c({ configured_scope: '*,#a', transported_scopes: ['#a', '#b', '#c'] }), ['a']);
+  assert.deepStrictEqual(c({ configured_scope: '*,#a', declared_regions: ['b'], transported_scopes: ['#a', '#b', '#c'] }), ['b'],
+    'declared_regions, the newest list, wins over configured_scope');
   assert.deepStrictEqual(c({ default_scope: '#c', configured_scope: '*,#a', transported_scopes: ['#c'] }), [],
     'the default region need not allow floods, so it does not vouch for carrying');
   assert.deepStrictEqual(c({ default_scope: '#c', transported_scopes: ['#c'] }), ['c'], 'no list: carrying stands');
@@ -213,13 +239,13 @@ test('default_scope makes a member only of a repeater, or of a node whose role i
 test('a default scope the repeater\'s own list leaves out does not count', () => {
   const m = n => JSON.parse(JSON.stringify(Array.from(SC.configuredScopes(n))));
   assert.deepStrictEqual(m({ role: 'repeater', default_scope: '#c', configured_scope: '*,#a' }),
-    [['a', { default: false, allowed: true, declared: false }]]);
+    [['a', { default: false, reported: true }]]);
   assert.deepStrictEqual(m({ role: 'repeater', default_scope: '#a', declared_regions: ['a'] }),
-    [['a', { default: true, allowed: false, declared: true }]], 'on the list: still tagged default');
+    [['a', { default: true, reported: true }]], 'on the list: still tagged default');
   assert.strictEqual(SC.configuredScopes({ role: 'repeater', default_scope: '#c', configured_scope: '*' }).size, 0);
 });
 
-test('linkedGroups splits members by the two-way links between them', () => {
+test('linkedGroups splits members by the links between them, heard either way', () => {
   const ns = [
     { public_key: 'a', lat: 40, lon: -75.0 }, { public_key: 'b', lat: 40, lon: -74.9 },
     { public_key: 'c', lat: 40, lon: -74.5 }, { public_key: 'd', lat: 40, lon: -74.4 },
@@ -227,14 +253,15 @@ test('linkedGroups splits members by the two-way links between them', () => {
     { public_key: 'e', lat: 41, lon: -74.0 }, { public_key: 'f', lat: 41, lon: -74.0 },
   ];
   const r = SC.linkReach(ns, [
-    { source: 'a', target: 'b', bidirectional: true },
-    { source: 'c', target: 'd', bidirectional: true },
+    { source: 'a', target: 'b', heard_by_target: 2 },
+    { source: 'c', target: 'd', heard_by_source: 1 },
     // Through x, which is not a member: it forwards nothing for the scope.
-    { source: 'b', target: 'x', bidirectional: true }, { source: 'x', target: 'c', bidirectional: true },
-    { source: 'b', target: 'c', bidirectional: false },
-    { source: 'a', target: 'd', bidirectional: true, ambiguous: true },
+    { source: 'b', target: 'x', heard_by_source: 1, heard_by_target: 1 }, { source: 'x', target: 'c', heard_by_target: 1 },
+    // Direction unknown: the flag alone proves nothing.
+    { source: 'b', target: 'c', bidirectional: true },
+    { source: 'a', target: 'd', heard_by_source: 1, heard_by_target: 1, ambiguous: true },
     // Co-located, still linked.
-    { source: 'e', target: 'f', bidirectional: true },
+    { source: 'e', target: 'f', heard_by_target: 1 },
   ]);
   const members = ns.filter(n => n.public_key !== 'x');
   const keys = gs => JSON.parse(JSON.stringify(gs.map(g => g.map(n => n.public_key))));
@@ -252,7 +279,7 @@ test('the click box drops a stale carrying member and tags carrying only for lis
   assert.ok(!/Listed<\/a>/.test(nj.replace(/Unlisted<\/a>/g, '')), 'the listed repeater is not a east-side member: ' + nj);
   assert.ok(/Unlisted<\/a> <span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(nj), nj);
   const ph = SC.scopePopupHtml(['metro'], nodes);
-  assert.ok(/Listed<\/a> <span class="mc-scope-tag"[^>]*>allowed<\/span><span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(ph), ph);
+  assert.ok(/Listed<\/a> <span class="mc-scope-tag"[^>]*>reported<\/span><span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(ph), ph);
 });
 
 test('colorsFor hands out colours in name order, whatever order the scopes come in', () => {
@@ -373,17 +400,36 @@ const EAST = Object.assign({ public_key: 'e1' }, offset(40.0, -75.3, 20000, 0));
 const NORTH = Object.assign({ public_key: 'n1' }, offset(40.0, -75.3, 0, 6000));
 const FAR = Object.assign({ public_key: 'f1' }, offset(40.0, -75.3, -30000, 0));
 const plain = (m) => JSON.parse(JSON.stringify(Array.from(m)));
-const two = (a, b) => ({ source: a, target: b, bidirectional: true });
+// Neighbor-graph edges as the API serves them: heard_by_target counts the
+// target receiving the source, heard_by_source the reverse.
+const two = (a, b) => ({ source: a, target: b, bidirectional: true, heard_by_source: 1, heard_by_target: 1 });
+const heard = (a, b) => ({ source: a, target: b, bidirectional: false, heard_by_source: 0, heard_by_target: 1 }); // b heard a
 const RAY = (deg) => Math.round(deg / 5) % 72;   // 72 rays of 5°
 
-test('the radius is the 75th percentile of two-way link distances x 1.1 (Treebeard: ~13.9 km)', () => {
-  // Treebeard's 17 real two-way links, distances in km, all bearings east so
-  // only the distances matter here.
+test('the radius is the 75th percentile of the distances it was heard over x 1.1 (Treebeard: ~13.9 km)', () => {
+  // Treebeard heard over its 17 real links, distances in km, all bearings
+  // east so only the distances matter here.
   const km = [0.05, 0.9, 1.7, 1.8, 2.1, 2.1, 2.1, 2.2, 2.3, 7.3, 10.0, 10.0, 12.6, 14.9, 15.1, 15.1, 33.2];
   const others = km.map((d, i) => Object.assign({ public_key: 'o' + i }, offset(HOME.lat, HOME.lon, d * 1000, 0)));
-  const r = SC.linkReach([HOME].concat(others), others.map(o => two('h0', o.public_key)));
+  const r = SC.linkReach([HOME].concat(others), others.map(o => heard('h0', o.public_key)));
   const R = r.radius.get('h0');
   assert.ok(Math.abs(R - 13860) < 60, 'radius ' + R);
+});
+
+test('a one-way link counts only for the end that was heard', () => {
+  // EAST heard HOME: that proves how far HOME's signal goes, not EAST's.
+  const r = SC.linkReach([HOME, EAST], [heard('h0', 'e1')]);
+  assert.strictEqual(r.radius.get('h0'), 20000, 'heard over 20 km x 1.1, clamped');
+  assert.ok(!r.radius.has('e1'), 'the listener gets no radius from it');
+  assert.strictEqual((r.links.get('h0') || []).length, 1, 'a lobe toward the listener');
+  assert.ok(!r.links.has('e1'), 'no lobe from the listener back');
+  assert.deepStrictEqual(plain(r.partners.get('h0')).map(p => p.lon.toFixed(3)), [EAST.lon.toFixed(3)], 'the listener raises the antenna estimate');
+  assert.ok(!r.partners.has('e1'));
+  assert.deepStrictEqual(plain(r.peers.get('h0')), ['e1'], 'still joins the two for grouping');
+  assert.deepStrictEqual(plain(r.peers.get('e1')), ['h0']);
+  // The reverse direction, as heard_by_source.
+  const back = SC.linkReach([HOME, EAST], [{ source: 'h0', target: 'e1', heard_by_source: 4 }]);
+  assert.ok(back.radius.has('e1') && !back.radius.has('h0'), 'heard_by_source: the source heard the target');
 });
 
 test('the radius is clamped to 1-20 km; a node with no links gets 1 km', () => {
@@ -395,15 +441,19 @@ test('the radius is clamped to 1-20 km; a node with no links gets 1 km', () => {
   assert.strictEqual(SC.noLinkRadius, 1000);
 });
 
-test('ambiguous, one-way, self links and links to unplaced nodes prove nothing', () => {
+test('ambiguous links, links of unknown direction, self links and links to unplaced nodes prove nothing', () => {
   const r = SC.linkReach([HOME, EAST, { public_key: 'u1' }], [
-    { source: 'h0', target: 'e1', bidirectional: true, ambiguous: true },
-    { source: 'h0', target: 'e1', bidirectional: false },
+    { source: 'h0', target: 'e1', bidirectional: true, heard_by_source: 1, heard_by_target: 1, ambiguous: true },
+    // bidirectional without direction counts (as the server once sent every
+    // edge, and still does for edges restored at startup) is not evidence.
+    { source: 'h0', target: 'e1', bidirectional: true },
+    { source: 'h0', target: 'e1', bidirectional: true, heard_by_source: 0, heard_by_target: 0 },
     { source: 'h0', target: 'e1' },
     two('h0', 'h0'), two('h0', 'u1'), two('h0', 'missing'), null,
   ]);
   assert.strictEqual(r.radius.size, 0);
   assert.strictEqual(r.links.size, 0);
+  assert.strictEqual(r.peers.size, 0);
 });
 
 test('a link lobe is its distance x 1.1 within one ray of its bearing, tapering to nothing at 11.25°', () => {
@@ -931,7 +981,7 @@ test('links are loaded once shown, and change the shape', () => {
   assert.strictEqual(loads, 1);
   const before = rec.polygons[rec.polygons.length - 1];
   assert.ok(reachToward(before.rings, HOME, 90) < 1100 + SC.areaMarginM, 'floor circle (and margin) before links arrive');
-  resolve([{ source: 'h0', target: 'e1', bidirectional: true }]);
+  resolve([{ source: 'h0', target: 'e1', bidirectional: true, heard_by_source: 1, heard_by_target: 1 }]);
   return Promise.resolve().then(() => Promise.resolve()).then(() => {
     const after = rec.polygons[rec.polygons.length - 1];
     assert.ok(reachToward(after.rings, HOME, 90) > 18000, 'lobe after links arrive: ' + reachToward(after.rings, HOME, 90));
@@ -982,7 +1032,7 @@ test('a new link recomputes only the scopes whose members it touches', () => {
   const o = SC.createOverlay(L, map, {});
   o.setVisible(true); o.setNodes(NODES); o.setLinks([]);
   const base = o.stats().computed;
-  o.setLinks([{ source: 'a4', target: 'a3', bidirectional: true }]); // touches ct (a4) and nyc and li (a3)
+  o.setLinks([{ source: 'a4', target: 'a3', bidirectional: true, heard_by_source: 1, heard_by_target: 1 }]); // touches ct (a4) and nyc and li (a3)
   assert.strictEqual(o.stats().computed, base + 3);
 });
 
@@ -1326,10 +1376,85 @@ test('the map config sets the terrain source before any terrain is asked for', (
   const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadMapConfig: () => new Promise(r => { resolve = r; }) }, sync));
   o.setVisible(true);
   o.setNodes([T_NODES[0]]);
-  resolve({ terrainTiles: { disabled: true } });
+  resolve({ terrainTiles: { url: 'https://t.example.org/{z}/{x}/{y}.png' } });
   return tick().then(tick).then(() => {
-    assert.deepStrictEqual(order[0], ['source', { disabled: true }]);
+    assert.deepStrictEqual(order[0], ['source', { url: 'https://t.example.org/{z}/{x}/{y}.png' }]);
     assert.ok(order.findIndex(x => x[0] === 'ask') > 0, 'asked for terrain before the source was set: ' + JSON.stringify(order));
+  });
+});
+
+// Frames run by hand, so provider calls can be counted per frame.
+function manualFrames() {
+  const queue = [];
+  return {
+    raf: (fn) => queue.push(fn),
+    run(n) {
+      let p = Promise.resolve();
+      for (let i = 0; i < n; i++) p = p.then(() => { queue.splice(0).forEach(f => f()); }).then(tick);
+      return p;
+    },
+  };
+}
+
+test('terrain off: the overlay asks the provider nothing, frame after frame', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain({ state: 'off' });
+  let calls = 0;
+  t.extentsFor = () => { calls++; return Promise.resolve(new Map()); };
+  const frames = manualFrames();
+  const o = SC.createOverlay(L, map, { terrain: t, raf: frames.raf, loadMapConfig: () => Promise.resolve({ terrainTiles: { disabled: true } }) });
+  o.setVisible(true);
+  o.setLinks([two('h0', 'e1')]);
+  o.setNodes(T_NODES);
+  return tick().then(() => frames.run(10)).then(() => {
+    assert.strictEqual(calls, 0, calls + ' provider calls in 10 frames');
+  });
+});
+
+test('a member the provider does not answer is asked once, not every frame', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain();
+  let calls = 0;
+  t.extentsFor = () => { calls++; return Promise.resolve(new Map()); };
+  const frames = manualFrames();
+  const o = SC.createOverlay(L, map, { terrain: t, raf: frames.raf });
+  o.setVisible(true);
+  o.setLinks([two('h0', 'e1')]);
+  o.setNodes(T_NODES);
+  return tick().then(() => frames.run(10)).then(() => {
+    assert.strictEqual(calls, 1, calls + ' provider calls in 10 frames');
+  });
+});
+
+test('after destroy, nothing is drawn or asked: late answers and queued frames are dropped', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const t = fakeTerrain();
+  let calls = 0, answer = null;
+  t.extentsFor = (items, onP) => {
+    calls++;
+    return new Promise(r => { answer = () => { items.forEach(it => onP(it.pk, new Float64Array(SC.sectors).fill(500))); r(); }; });
+  };
+  const frames = manualFrames();
+  let linkLoads = 0;
+  const o = SC.createOverlay(L, map, { terrain: t, raf: frames.raf, loadLinks: () => { linkLoads++; return [two('h0', 'e1')]; } });
+  o.setVisible(true);
+  o.setNodes(T_NODES);
+  return tick().then(() => frames.run(1)).then(() => {
+    assert.ok(calls >= 1 && answer, 'terrain was asked for');
+    const asked = calls, loadsBefore = linkLoads;
+    const drawn = rec.polygons.length;
+    o.destroy();
+    answer();
+    return tick().then(() => frames.run(5)).then(() => {
+      assert.strictEqual(calls, asked, (calls - asked) + ' provider calls after destroy');
+      assert.strictEqual(rec.polygons.length, drawn, 'drew after destroy');
+      o.setNodes(T_NODES.slice(0, 1));
+      return frames.run(2);
+    }).then(() => {
+      assert.strictEqual(calls, asked, 'setNodes after destroy asked the provider');
+      assert.strictEqual(rec.polygons.length, drawn, 'setNodes after destroy drew');
+      assert.strictEqual(linkLoads, loadsBefore, 'setNodes after destroy reloaded the links');
+    });
   });
 });
 
@@ -1431,7 +1556,7 @@ test('clicking inside outlines lists each scope\'s repeaters with why they are t
   const order = ['Amon', 'Nowhere', 'Treebeard', 'Carrier'].map(n => phl.indexOf(n));
   assert.ok(order.every((v, i) => v > 0 && (i === 0 || v > order[i - 1])), 'order ' + order);
   assert.ok(/Treebeard<\/a> <span class="mc-scope-tag"[^>]*>default<\/span><span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(html), 'Treebeard tags');
-  assert.ok(/Nowhere<\/a> <span class="mc-scope-tag"[^>]*>allowed<\/span><span class="mc-scope-tag"[^>]*>no position<\/span>/.test(html), 'unplaced node tags');
+  assert.ok(/Nowhere<\/a> <span class="mc-scope-tag"[^>]*>reported<\/span><span class="mc-scope-tag"[^>]*>no position<\/span>/.test(html), 'unplaced node tags');
   assert.ok(html.includes('href="#/nodes/p1"'), 'node link');
   assert.ok(html.includes('Amon &lt;b&gt;Sul&lt;/b&gt;') && !html.includes('<b>Sul'), 'name not escaped');
 });
@@ -1856,7 +1981,7 @@ function perfMesh() {
     const q = offset(a.lat, a.lon, km * 1000 * Math.sin(t), km * 1000 * Math.cos(t));
     const b = { public_key: 'x' + i, lat: q.lat, lon: q.lon };
     nodes.push(b);
-    edges.push({ source: a.public_key, target: b.public_key, bidirectional: true });
+    edges.push({ source: a.public_key, target: b.public_key, bidirectional: true, heard_by_source: 1, heard_by_target: 1 });
   }
   return { nodes, edges };
 }

@@ -3,7 +3,7 @@
  * pages.
  *
  * Each region scope gets an outline of the area its nodes are proven to reach,
- * following their two-way links (the neighbor graph), one solid area per
+ * following who is known to hear whom (the neighbor graph), one area per
  * linked group of the nodes seen carrying its traffic (transported_scopes)
  * or configured for it (default_scope, configured_scope, declared_regions):
  * groups with no link between them get separate areas.
@@ -87,8 +87,8 @@ function serveTiles(page, mode) {
 // Default, about 2.1 km. Nothing links SF Two to either, so #sf is two
 // groups, [SF One, SF Default] and [SF Two], each with its own area.
 const EDGES = [
-  { source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bidirectional: true, avg_snr: 4, ambiguous: false },
-  { source: pk('a1'), target: pk('a5'), weight: 20, score: 0.9, bidirectional: true, avg_snr: 8, ambiguous: false },
+  { source: pk('a2'), target: pk('a3'), weight: 12, score: 0.8, bidirectional: true, heard_by_source: 3, heard_by_target: 3, avg_snr: 4, ambiguous: false },
+  { source: pk('a1'), target: pk('a5'), weight: 20, score: 0.9, bidirectional: true, heard_by_source: 3, heard_by_target: 3, avg_snr: 8, ambiguous: false },
 ];
 
 (async () => {
@@ -632,7 +632,7 @@ const EDGES = [
   });
 
   await step('linked to Oakland, it extends #bay\'s one area across the gap', async () => {
-    const link = { source: pk('a3'), target: pk('a6'), weight: 6, score: 0.6, bidirectional: true, avg_snr: 2, ambiguous: false };
+    const link = { source: pk('a3'), target: pk('a6'), weight: 6, score: 0.6, bidirectional: true, heard_by_source: 3, heard_by_target: 3, avg_snr: 2, ambiguous: false };
     const { ctx3, p3, probe } = await bayEdgePage(EDGES.concat([link]));
     await p3.waitForFunction(() => document.querySelectorAll('path.mc-scope-area[data-scope="bay"]').length === 1, null, { timeout: 5000 });
     const r = await probe();

@@ -100,7 +100,7 @@ const tick = () => new Promise(r => setTimeout(r, 0));
   ];
   clockData = [{ pubkey: 'AA', severity: 'ok', recentMedianSkewSec: 2 }];
   graphData = { edges: [
-    { source: 'AA', target: 'BB', score: 0.66, weight: 88, avg_snr: 7.5, bidirectional: true, ambiguous: true },
+    { source: 'AA', target: 'BB', score: 0.66, weight: 88, avg_snr: 7.5, bidirectional: true, heard_by_source: 40, heard_by_target: 48, ambiguous: true },
     { source: 'AA', target: 'CC', score: 0.9, weight: 5 },
   ] };
   el = makeEl();
@@ -140,8 +140,18 @@ const tick = () => new Promise(r => setTimeout(r, 0));
   el = makeEl();
   await M.renderMyRepeatersTab(el);
   const h2 = el.innerHTML;
-  // Affinity arrow is always ↔ (undirected); never →.
-  assert(/&harr;/.test(h2) && !/&rarr;/.test(h2), 'affinity link always renders ↔, never →');
+  // The arrow shows which way the link was heard (heard_by_source/target).
+  assert(/&harr;/.test(h2) && !/&rarr;/.test(h2), 'a link heard both ways renders ↔, not →');
+  const arrowFor = async (edge) => {
+    graphData = { edges: [Object.assign({ source: 'AA', target: 'BB', score: 0.5, weight: 9 }, edge)] };
+    const e = makeEl();
+    await M.renderMyRepeatersTab(e);
+    return e.innerHTML;
+  };
+  assert(/&rarr;/.test(await arrowFor({ heard_by_target: 3 })), 'only the target heard the source: →');
+  assert(/&larr;/.test(await arrowFor({ heard_by_source: 3 })), 'only the source heard the target: ←');
+  const unknown = await arrowFor({});
+  assert(/&ndash;/.test(unknown) && !/&harr;/.test(unknown), 'direction unknown: a dash, never ↔');
   // Ambiguous marker is a ph-question icon with aria-label, not a "(?)" string.
   assert(/ph-question/.test(h2) && /aria-label="Path attribution ambiguous"/.test(h2) && !/\(\?\)/.test(h2),
     'ambiguous affinity edge uses a ph-question icon, not "(?)"');
