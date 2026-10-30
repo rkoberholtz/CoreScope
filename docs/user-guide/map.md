@@ -56,7 +56,7 @@ Click a node marker, then click **Show Route** in the popup to see the paths pac
 
 ## Region contours
 
-**Region contours** outlines where each MeshCore region scope reaches. Turn it on under **Region Scope** in the map controls. Each scope gets one coloured area per group of its repeaters joined by two-way links. Two groups with no known link between them get separate areas, because a scoped flood only crosses between them through a repeater that forwards the scope.
+**Region contours** outlines where each MeshCore region scope reaches. Turn it on under **Region Scope** in the map controls. Each scope gets one coloured area per group of its repeaters joined by links, heard in either direction. Two groups with no known link between them get separate areas, because a scoped flood only crosses between them through a repeater that forwards the scope.
 
 - **Hover** an area to name the scopes under the cursor.
 - **Click** an area to list the repeaters configured for each scope or seen carrying its traffic, and how many separate groups a split scope has.
@@ -69,9 +69,9 @@ The overlay needs no configuration to appear, but what it can show depends on wh
 
 Each repeater's reach is worked out in 72 directions:
 
-- **Range** comes from its proven two-way links: the 75th percentile of their distances × 1.1, kept between 1 and 20 km. A repeater with no links gets 1 km.
-- **Terrain** trims the range where line of sight over elevation data ends. Elevation is fetched by your browser (see [`mapDefaults.terrainTiles`](configuration.md#region-contours)); the antenna height is 10 m, raised up to 60 m where the repeater's links need more, unless you set it with [`mapDefaults.antennaHeights`](configuration.md#region-contours).
-- **Links** to repeaters in the same area always stretch the reach out to them: evidence beats the model.
+- **Range** comes from how far other nodes are known to have heard it: the 75th percentile of those distances × 1.1, kept between 1 and 20 km. A link counts only in the direction it was heard, because hearing a repeater proves how far its signal goes, not how far the listener's does. A repeater nobody is known to hear gets 1 km.
+- **Terrain** trims the range where line of sight over elevation data ends. Elevation is fetched by your browser (see [`mapDefaults.terrainTiles`](configuration.md#region-contours)); the antenna height is 10 m, raised up to 60 m where the nodes that heard the repeater need more, unless you set it with [`mapDefaults.antennaHeights`](configuration.md#region-contours).
+- **Repeaters in the same area that heard it** always stretch the reach out to them: evidence beats the model.
 - Every repeater keeps at least 1 km of reach, and every area is grown by a 2 km margin with rounded corners, so no member is closer than 3 km to the edge.
 
 Repeaters without a GPS position can't be placed and aren't drawn.
@@ -93,7 +93,7 @@ Scoped packets carry a code derived from the region name, not the name itself. C
 
 - **No repeater reports it and it isn't in `hashRegions`.** Add the name to `hashRegions`, or turn on `autoRegionKeys` (which only helps once some repeater has reported the name).
 - **Its repeaters have no GPS position.**
-- **The instance restarted in the last few minutes.** The link graph is rebuilt about 5 minutes after startup; until then areas may be split into more groups than usual. Reload the page after that.
+- **The instance restarted in the last few minutes.** The link graph is rebuilt about 5 minutes after startup; until then link directions aren't known, so ranges are smaller and areas may be split into more groups than usual. Reload the page after that.
 - **A newer report replaced the old one.** The newest report for a repeater wins, so a region removed from a repeater's list drops out of its area.
 
 ### Known limits

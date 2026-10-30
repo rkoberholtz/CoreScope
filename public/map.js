@@ -531,7 +531,7 @@
             <label for="mcRegionFilter" class="sr-only">Show nodes with evidence for a region scope</label>
             <select id="mcRegionFilter" title="Show nodes that declare a region scope or were seen carrying its traffic">${regionFilterOptionsHtml([], filters.regionScope)}</select>
             <div id="mcRegionHint" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
-            <label for="mcScopeContours" title="Outline where each region scope reaches: each repeater's range from its two-way links, trimmed by line of sight over terrain and stretched to proven links within its area. Each area covers the repeaters configured for the scope or seen carrying its traffic; groups of them with no two-way link between them get separate areas. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Region contours</label>
+            <label for="mcScopeContours" title="Outline where each region scope reaches: each repeater's range from how far other repeaters are known to hear it, trimmed by line of sight over terrain and stretched to repeaters in its area that heard it. Each area covers the repeaters configured for the scope or seen carrying its traffic; groups of them with no known link between them get separate areas. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Region contours</label>
             <div id="mcScopeView" class="mc-scope-view" hidden></div>
             <div id="mcScopeList" class="mc-scope-list" hidden></div>
           </fieldset>

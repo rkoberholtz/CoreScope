@@ -19,8 +19,8 @@
    Antenna height above ground is the input that matters most, and adverts
    do not carry it. In order of preference:
      set:     the operator's figure (mapDefaults.antennaHeights in config)
-     links:   raised from its proven two-way links: for each, the lowest
-              antenna that gives the link line of sight over the terrain
+     links:   raised from the repeaters known to hear it: for each, the
+              lowest antenna that gives the link line of sight over the terrain
               between them (far end at 10 m); the 75th percentile of those,
               when that is more than 10 m, up to 60 m. Links only prove a
               lower bound, so they never lower it below the default.
@@ -221,7 +221,7 @@
   //   extentsFor([{ pk, lat, lon, R, antennaM?, links? }], onProgress)
   //       → Promise<Map pk → ext>; onProgress(pk, ext, { antennaM, source })
   //       antennaM: the operator's height (source 'set'); otherwise it is
-  //       estimated from links ([{ lat, lon }] of its two-way partners)
+  //       estimated from links ([{ lat, lon }] of the nodes that heard it)
   //   status()  'ok' | 'unavailable' (a tile failed) | 'idle'
   function createTerrainProvider(opts) {
     opts = opts || {};
