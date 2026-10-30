@@ -134,6 +134,47 @@ See [Channels](channels.md) for details.
 
 Initial map center and zoom level.
 
+### Region contours
+
+Two optional `mapDefaults` settings tune the [region contours](map.md#region-contours) overlay:
+
+```json
+"mapDefaults": {
+  "center": [37.45, -122.0],
+  "zoom": 9,
+  "antennaHeights": {
+    "a1b2c3d4": 20,
+    "e5f60718": 35
+  },
+  "terrainTiles": false
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `mapDefaults.antennaHeights` | — | Metres above ground of repeater antennas you know, keyed by public key or a unique hex prefix of at least 8 characters. Used instead of the overlay's estimate (10 m, raised up to 60 m where a repeater's links need more). Heights outside 1–200 m and non-hex keys are ignored. |
+| `mapDefaults.terrainTiles` | AWS Terrain Tiles | Where the browser fetches elevation (Terrarium PNGs). `false` turns terrain off, so no elevation requests leave the browser. A URL template containing `{z}`, `{x}` and `{y}` names another source; anything else means the default. |
+
+## Region names
+
+```json
+"hashRegions": ["#metro", "#downtown"],
+"autoRegionKeys": { "enabled": true }
+```
+
+Scoped (transport-route) packets carry a code derived from the region name, not the name itself, so the ingestor can only tell which region a packet belongs to if it knows the name.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `hashRegions` | — | Region names used in your network. A missing leading `#` is added. Traffic for a region not listed (or derived, below) is stored as an unknown scope. |
+| `autoRegionKeys.enabled` | `false` | Also derive names from the regions repeaters report they are configured for (observer `/neighbors` reports, and [declared regions](../client-regions.md) where enabled). |
+| `autoRegionKeys.maxDerived` | `256` | Cap on derived names. |
+| `autoRegionKeys.refreshMinutes` | `15` | How often the derived names are rebuilt. |
+
+`autoRegionKeys` is a top-level block next to `hashRegions`. Nested anywhere else it is silently ignored.
+
+These names decide what a repeater's default scope and its seen-carrying traffic can count as, both on the [region contours](map.md#what-puts-a-repeater-in-a-region) and on the Map page's region scope filter. A region list a repeater reports itself needs no names configured.
+
 ## Regions
 
 ```json
@@ -143,7 +184,7 @@ Initial map center and zoom level.
 }
 ```
 
-Named regions for the region filter dropdown. The `defaultRegion` field sets which region is selected by default.
+Named regions for the region filter dropdown. The `defaultRegion` field sets which region is selected by default. These are observer IATA codes, not MeshCore region scopes; for scopes see [Region names](#region-names).
 
 ## Cache TTL
 
