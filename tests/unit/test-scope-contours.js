@@ -137,17 +137,41 @@ test('a node listing a scope twice counts once', () => {
   assert.strictEqual(g.get('a').configuredOnly.length, 0);
 });
 
-test('configuredScopes reads default_scope, configured_scope and declared_regions, and says which', () => {
-  const m = SC.configuredScopes({ default_scope: '#phl', configured_scope: '#phl, #us-pa,*,,us', declared_regions: ['us', 'nj'] });
-  const plainMap = JSON.parse(JSON.stringify(Array.from(m)));
-  assert.deepStrictEqual(plainMap, [
-    ['phl', { default: true, allowed: true, declared: false }],
-    ['us-pa', { default: false, allowed: true, declared: false }],
-    ['us', { default: false, allowed: true, declared: true }],
-    ['nj', { default: false, allowed: false, declared: true }],
+test('configuredScopes reads default_scope and the reported list, and says which', () => {
+  // A server without declared_regions: configured_scope is the list.
+  const m = SC.configuredScopes({ default_scope: '#metro', configured_scope: '#metro, #us-pa,*,,us' });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(Array.from(m))), [
+    ['metro', { default: true, reported: true }],
+    ['us-pa', { default: false, reported: true }],
+    ['us', { default: false, reported: true }],
   ]);
   assert.strictEqual(SC.configuredScopes({}).size, 0);
   assert.strictEqual(SC.configuredScopes(null).size, 0);
+});
+
+// declared_regions is the server's newest answer across configured_scope and
+// the companions' regions queries. Adding the raw configured_scope to it
+// brought back regions a newer answer had dropped.
+test('declared_regions is the newest list: an older configured_scope does not add to it', () => {
+  const n = { role: 'repeater', configured_scope: '#metro,#us-pa', declared_regions: ['us-pa'], transported_scopes: ['#metro'] };
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(Array.from(SC.configuredScopes(n)))), [['us-pa', { default: false, reported: true }]]);
+  assert.strictEqual(SC.carriedScopes(n).size, 0, 'carrying #metro is older than the list that dropped it');
+  const g = SC.groupNodesByScope([Object.assign({ public_key: 'r', lat: 1, lon: 1 }, n)]);
+  assert.strictEqual(g.has('metro'), false, 'the dropped region makes no area');
+});
+
+// A truncated answer names only part of the list, so a region missing from
+// it may still be configured: it adds what it names and rules nothing out.
+test('a truncated list adds its regions but does not override carrying or the default scope', () => {
+  const n = { role: 'repeater', default_scope: '#c', declared_regions: ['a'], declared_regions_truncated: true, transported_scopes: ['#b'] };
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(Array.from(SC.configuredScopes(n)))), [
+    ['c', { default: true, reported: false }],
+    ['a', { default: false, reported: true }],
+  ]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(Array.from(SC.carriedScopes(n)))), ['b']);
+  const whole = Object.assign({}, n, { declared_regions_truncated: undefined });
+  assert.strictEqual(SC.carriedScopes(whole).size, 0, 'the same list, complete, rules #b out');
+  assert.strictEqual(SC.configuredScopes(whole).has('c'), false, 'and the default it leaves out');
 });
 
 test('a node configured by default_scope or configured_scope is a configured-only member unless it carries the scope', () => {
@@ -179,9 +203,11 @@ test('a reported list overrides carrying a scope it does not name', () => {
   assert.strictEqual(g.get('east-side').configuredOnly.length, 0);
 });
 
-test('either reported list keeps a carried scope, and default_scope alone does not', () => {
+test('the reported list keeps a carried scope, and default_scope alone does not', () => {
   const c = n => JSON.parse(JSON.stringify(Array.from(SC.carriedScopes(n))));
-  assert.deepStrictEqual(c({ configured_scope: '*,#a', declared_regions: ['b'], transported_scopes: ['#a', '#b', '#c'] }), ['a', 'b']);
+  assert.deepStrictEqual(c({ configured_scope: '*,#a', transported_scopes: ['#a', '#b', '#c'] }), ['a']);
+  assert.deepStrictEqual(c({ configured_scope: '*,#a', declared_regions: ['b'], transported_scopes: ['#a', '#b', '#c'] }), ['b'],
+    'declared_regions, the newest list, wins over configured_scope');
   assert.deepStrictEqual(c({ default_scope: '#c', configured_scope: '*,#a', transported_scopes: ['#c'] }), [],
     'the default region need not allow floods, so it does not vouch for carrying');
   assert.deepStrictEqual(c({ default_scope: '#c', transported_scopes: ['#c'] }), ['c'], 'no list: carrying stands');
@@ -213,9 +239,9 @@ test('default_scope makes a member only of a repeater, or of a node whose role i
 test('a default scope the repeater\'s own list leaves out does not count', () => {
   const m = n => JSON.parse(JSON.stringify(Array.from(SC.configuredScopes(n))));
   assert.deepStrictEqual(m({ role: 'repeater', default_scope: '#c', configured_scope: '*,#a' }),
-    [['a', { default: false, allowed: true, declared: false }]]);
+    [['a', { default: false, reported: true }]]);
   assert.deepStrictEqual(m({ role: 'repeater', default_scope: '#a', declared_regions: ['a'] }),
-    [['a', { default: true, allowed: false, declared: true }]], 'on the list: still tagged default');
+    [['a', { default: true, reported: true }]], 'on the list: still tagged default');
   assert.strictEqual(SC.configuredScopes({ role: 'repeater', default_scope: '#c', configured_scope: '*' }).size, 0);
 });
 
@@ -253,7 +279,7 @@ test('the click box drops a stale carrying member and tags carrying only for lis
   assert.ok(!/Listed<\/a>/.test(nj.replace(/Unlisted<\/a>/g, '')), 'the listed repeater is not a east-side member: ' + nj);
   assert.ok(/Unlisted<\/a> <span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(nj), nj);
   const ph = SC.scopePopupHtml(['metro'], nodes);
-  assert.ok(/Listed<\/a> <span class="mc-scope-tag"[^>]*>allowed<\/span><span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(ph), ph);
+  assert.ok(/Listed<\/a> <span class="mc-scope-tag"[^>]*>reported<\/span><span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(ph), ph);
 });
 
 test('colorsFor hands out colours in name order, whatever order the scopes come in', () => {
@@ -1455,7 +1481,7 @@ test('clicking inside outlines lists each scope\'s repeaters with why they are t
   const order = ['Amon', 'Nowhere', 'Treebeard', 'Carrier'].map(n => phl.indexOf(n));
   assert.ok(order.every((v, i) => v > 0 && (i === 0 || v > order[i - 1])), 'order ' + order);
   assert.ok(/Treebeard<\/a> <span class="mc-scope-tag"[^>]*>default<\/span><span class="mc-scope-tag"[^>]*>carrying<\/span>/.test(html), 'Treebeard tags');
-  assert.ok(/Nowhere<\/a> <span class="mc-scope-tag"[^>]*>allowed<\/span><span class="mc-scope-tag"[^>]*>no position<\/span>/.test(html), 'unplaced node tags');
+  assert.ok(/Nowhere<\/a> <span class="mc-scope-tag"[^>]*>reported<\/span><span class="mc-scope-tag"[^>]*>no position<\/span>/.test(html), 'unplaced node tags');
   assert.ok(html.includes('href="#/nodes/p1"'), 'node link');
   assert.ok(html.includes('Amon &lt;b&gt;Sul&lt;/b&gt;') && !html.includes('<b>Sul'), 'name not escaped');
 });

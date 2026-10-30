@@ -2,8 +2,8 @@
 
    For each MeshCore region scope, outline the general area its nodes reach,
    from every node that is configured for it (configuredScopes: its default
-   scope, the regions an observer reported it allows, or its own declared
-   list) or whose full pubkey appears in the path of traffic for it
+   scope, or the newest region list it reported, through an observer or a
+   companion's regions query) or whose full pubkey appears in the path of traffic for it
    (transported_scopes, #1751/#1902): one area per group of those members
    joined by links heard either way (linkedGroups). A scoped flood crosses
    from one group to another only through a repeater that forwards the
@@ -19,7 +19,7 @@
    it to allow floods (the auto-created default does), so it counts only
    for a repeater, and only while its reported list, if any, names it.
    Being seen carrying a scope is the only way in for a repeater whose
-   configuration is unknown; once a repeater has reported its list,
+   configuration is unknown; once a repeater has reported a complete list,
    carrying counts only for regions on it (carriedScopes). The click box
    says which evidence each member has.
 
@@ -142,27 +142,25 @@
     return [lat, lon];
   }
 
-  // configuredScopes returns Map scope → { default, allowed, declared }: the
-  // region scopes a node is configured for, from the three sources the API
-  // carries, and which of them say so.
-  //   default_scope     the scope its own adverts go out under (its
-  //                     firmware default, "region default"). Counted only
-  //                     for a repeater (or a node of unknown role) and, once
-  //                     it has reported a list, only if the list names it:
-  //                     only simple_repeater checks a scoped flood against
-  //                     its regions (allowPacketForward). A companion
-  //                     (isRepeatEn) or a room server (disable_fwd) forwards
-  //                     regardless, so its default says nothing about that.
-  //   configured_scope  the comma-separated regions an observer reported it
-  //                     allows (#1865); '*' is the flood wildcard, not a region
-  //   declared_regions  its own answer to a companion's regions query (#1862)
+  // configuredScopes returns Map scope → { default, reported }: the region
+  // scopes a node is configured for, and which evidence says so.
+  //   default   default_scope, the scope its own adverts go out under (its
+  //             firmware default, "region default"). Counted only for a
+  //             repeater (or a node of unknown role) and, once it has
+  //             reported a complete list, only if the list names it: only
+  //             simple_repeater checks a scoped flood against its regions
+  //             (allowPacketForward). A companion (isRepeatEn) or a room
+  //             server (disable_fwd) forwards regardless, so its default
+  //             says nothing about that.
+  //   reported  on the newest region list it reported (reportedRegions);
+  //             '*' is the flood wildcard, not a region.
   function configuredScopes(n) {
     var out = new Map();
     function add(r, key) {
       r = normRegion(String(r).trim());
       if (!r || r === '*') return;
       var e = out.get(r);
-      if (!e) { e = { default: false, allowed: false, declared: false }; out.set(r, e); }
+      if (!e) { e = { default: false, reported: false }; out.set(r, e); }
       e[key] = true;
     }
     if (!n) return out;
@@ -171,28 +169,44 @@
       var list = reportedList(n);
       if (!list || list.has(def)) add(def, 'default');
     }
-    if (n.configured_scope) String(n.configured_scope).split(',').forEach(function (r) { add(r, 'allowed'); });
-    (Array.isArray(n.declared_regions) ? n.declared_regions : []).forEach(function (r) { add(r, 'declared'); });
+    var rep = reportedRegions(n);
+    if (rep) rep.regions.forEach(function (r) { add(r, 'reported'); });
     return out;
   }
 
-  // reportedList returns the Set of regions a node has reported it allows
-  // (configured_scope and declared_regions together), or null when it has
-  // reported neither. An empty or '*'-only answer is a list: it names nothing.
+  // reportedRegions returns the newest region list a node reported, as
+  // { regions, partial }, or null when it has reported none. The server's
+  // declared_regions is already the newest answer across both collectors
+  // (configured_scope from observer /neighbors reports, and companions'
+  // regions queries; AllCurrentDeclaredRegions), so configured_scope is read
+  // only from a server that does not send declared_regions: adding the two
+  // would bring back a region the newer answer dropped. partial: the answer
+  // was cut off (declared_regions_truncated), so a region missing from it may
+  // still be configured.
+  function reportedRegions(n) {
+    if (!n) return null;
+    if (Array.isArray(n.declared_regions)) return { regions: n.declared_regions, partial: n.declared_regions_truncated === true };
+    if (n.configured_scope != null) return { regions: String(n.configured_scope).split(','), partial: false };
+    return null;
+  }
+
+  // reportedList returns the Set of regions on a node's newest complete
+  // list, or null when it has reported none or only a partial one: a list
+  // can rule a region out only when it is whole. An empty or '*'-only answer
+  // is a list: it names nothing.
   function reportedList(n) {
-    if (!n || (n.configured_scope == null && !Array.isArray(n.declared_regions))) return null;
+    var rep = reportedRegions(n);
+    if (!rep || rep.partial) return null;
     var out = new Set();
-    function add(r) {
+    rep.regions.forEach(function (r) {
       r = normRegion(String(r).trim());
       if (r && r !== '*') out.add(r);
-    }
-    if (n.configured_scope != null) String(n.configured_scope).split(',').forEach(add);
-    (Array.isArray(n.declared_regions) ? n.declared_regions : []).forEach(add);
+    });
     return out;
   }
 
   // carriedScopes returns the scopes a node has been seen carrying. A node
-  // that has reported its list keeps only the scopes on it: the firmware
+  // that has reported a complete list keeps only the scopes on it: the firmware
   // forwards a scoped flood only for a region on that list
   // (RegionMap::findMatch returns NULL for any other transport code), so
   // carrying anything else was seen before the list changed. transported_scopes
@@ -512,8 +526,7 @@
         var n = m.node, pk = String(n.public_key || '');
         var tags = '';
         if (m.conf && m.conf.default) tags += tagHtml('default', 'Its own adverts go out scoped to this region');
-        if (m.conf && m.conf.allowed) tags += tagHtml('allowed', 'An observer reported it allows this region');
-        if (m.conf && m.conf.declared) tags += tagHtml('declared', 'It lists this region when asked');
+        if (m.conf && m.conf.reported) tags += tagHtml('reported', 'Its newest reported region list names this region');
         if (m.carrying) tags += tagHtml('carrying', 'Seen relaying this region\'s traffic');
         if (!m.placed) tags += tagHtml('no position', 'Has no position, so it is not part of the outline');
         return '<li><a href="#/nodes/' + encodeURIComponent(pk) + '">' + escapeHtml(n.name || pk.slice(0, 8)) + '</a> ' + tags + '</li>';

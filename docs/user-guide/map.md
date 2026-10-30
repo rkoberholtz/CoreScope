@@ -82,10 +82,11 @@ A repeater belongs to a scope's area when there is evidence for it, from one of 
 
 | Evidence | Where it comes from | Needs config |
 |----------|---------------------|--------------|
-| Reported region list | Observers that publish a `/neighbors` report ask nearby repeaters for their scopes; the names arrive in plain text. | No |
-| Declared regions | Companions answer region-discovery requests ([Client regions](../client-regions.md)). | `clientRegions.enabled` |
+| Reported region list | The newest list the repeater reported, from either of two collectors. Observers that publish a `/neighbors` report ask nearby repeaters for their scopes, and companions answer region-discovery requests ([Client regions](../client-regions.md)). The names arrive in plain text. | No, for `/neighbors` reports; `clientRegions.enabled` for companions |
 | Default scope | The scope a repeater's own adverts go out under. Counts only for repeaters, and only while its reported list (if any) names it. | Region names |
 | Seen carrying | The repeater's full public key appears in the path of scoped traffic. Counts only for scopes on its reported list, once it has one. | Region names |
+
+Only the newest reported list counts, whichever collector it came from, so a region removed from a repeater's list drops out of its area. A list marked as cut short (truncated) adds the regions it names but rules nothing out: a scope the repeater was seen carrying, or its default scope, still counts.
 
 Scoped packets carry a code derived from the region name, not the name itself. CoreScope can only tell which region a packet belongs to if it knows the name, from [`hashRegions`](configuration.md#region-names) or [`autoRegionKeys`](configuration.md#region-names). Traffic for a name it doesn't know is stored as an unknown scope and counts as evidence for nothing.
 
@@ -94,7 +95,7 @@ Scoped packets carry a code derived from the region name, not the name itself. C
 - **No repeater reports it and it isn't in `hashRegions`.** Add the name to `hashRegions`, or turn on `autoRegionKeys` (which only helps once some repeater has reported the name).
 - **Its repeaters have no GPS position.**
 - **The instance restarted in the last few minutes.** The link graph is rebuilt about 5 minutes after startup; until then link directions aren't known, so ranges are smaller and areas may be split into more groups than usual. Reload the page after that.
-- **A newer report replaced the old one.** The newest report for a repeater wins, so a region removed from a repeater's list drops out of its area.
+- **A newer report replaced the old one.** The newest reported list wins, so a region removed from a repeater's list drops out of its area.
 
 ### Known limits
 
