@@ -782,7 +782,35 @@ func (s *Server) handleConfigMap(w http.ResponseWriter, r *http.Request) {
 	if tt := s.cfg.MapDefaults.TerrainTiles; tt.Disabled || tt.URL != "" {
 		resp.TerrainTiles = &TerrainTilesResponse{Disabled: tt.Disabled, URL: tt.URL}
 	}
+	resp.Contours = cleanContours(s.cfg.MapDefaults.Contours)
 	writeJSON(w, resp)
+}
+
+// cleanContours passes on the mapDefaults.contours fields that are in
+// range, so a typo leaves that one setting at the overlay's default rather
+// than drawing nonsense. nil when none is usable, so the response omits it.
+func cleanContours(c ContoursConfig) *ContoursResponse {
+	in := func(v *float64, lo, hi float64) *float64 {
+		if v == nil || !(*v >= lo && *v <= hi) {
+			return nil
+		}
+		x := *v
+		return &x
+	}
+	out := ContoursResponse{
+		BudgetPercentile: in(c.BudgetPercentile, 50, 100),
+		DefaultBudgetDb:  in(c.DefaultBudgetDb, 90, 150),
+		MaxReachKm:       in(c.MaxReachKm, 1, 50),
+		MarginKm:         in(c.MarginKm, 0, 5),
+		ReceiverHeightM:  in(c.ReceiverHeightM, 0.5, 100),
+	}
+	if c.ReachRule == "farthest" || c.ReachRule == "first" {
+		out.ReachRule = c.ReachRule
+	}
+	if out == (ContoursResponse{}) {
+		return nil
+	}
+	return &out
 }
 
 // Antenna heights outside this range are not heights above ground anyone

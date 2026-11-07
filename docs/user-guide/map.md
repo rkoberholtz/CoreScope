@@ -69,11 +69,11 @@ The overlay needs no configuration to appear, but what it can show depends on wh
 
 Each repeater's reach is worked out in 72 directions:
 
-- **With terrain**, the reach in each direction is the farthest point where the path loss stays within what the repeater is known to manage. Path loss is free-space loss plus the loss over the worst ridge in the way, using elevation data your browser fetches (see [`mapDefaults.terrainTiles`](configuration.md#region-contours)). What the repeater manages is learned from the nodes known to have heard it: the 90th percentile of the loss over their paths, or 120 dB when fewer than two are known. A hilltop beyond a valley is reached, and the valley before it is drawn as reached too. Reach goes out to 30 km. Antennas count as 10 m above ground unless you set a repeater's height with [`mapDefaults.antennaHeights`](configuration.md#region-contours).
+- **With terrain**, the reach in each direction is the farthest point where the path loss stays within what the repeater is known to manage. Path loss is free-space loss plus the loss over the worst ridge in the way, using elevation data your browser fetches (see [`mapDefaults.terrainTiles`](configuration.md#region-contours)). What the repeater manages is learned from the nodes known to have heard it: the 90th percentile of the loss over their paths, or 120 dB when fewer than two are known. A hilltop beyond a valley is reached, and the valley before it is drawn as reached too. Reach goes out to 30 km. Antennas count as 10 m above ground unless you set their heights with [`mapDefaults.antennaHeights`](configuration.md#region-contours). All of this can be made more conservative with [`mapDefaults.contours`](configuration.md#region-contours).
 - **Without terrain** (turned off, or the tiles can't be fetched), the reach is a circle: 1.1 × the 75th percentile of the distances it was heard over, kept between 1 and 20 km. A repeater nobody is known to hear gets 1 km.
 - A link counts only in the direction it was heard, because hearing a repeater proves how far its signal goes, not how far the listener's does.
 - **Repeaters in the same area that heard it** always stretch the reach out to them: evidence beats the model.
-- Every repeater keeps at least 1 km of reach, and every area is grown by a 2 km margin with rounded corners.
+- Every repeater keeps at least 1 km of reach, and every area is grown by a margin with rounded corners: 2 km unless set with `mapDefaults.contours.marginKm`.
 
 Repeaters without a GPS position can't be placed and aren't drawn.
 
@@ -114,7 +114,8 @@ Scoped packets carry a code derived from the region name, not the name itself. C
 - Being seen carrying a scope never expires for a repeater that has never reported a list, so on an instance that keeps packets for a long time an old scope can linger.
 - **Detailed** is drawn on a grid: its edge can sit about 0.3 km past the hull on 30 km reaches, and its margin round a repeater can fall up to about 150 m short of 2 km.
 - The terrain is bare earth: buildings and trees aren't in it.
-- The loss budget, the 120 dB default, the 30 km limit, the radius rule, floor, margin, wrap gap, default view and pulse duration are fixed for now.
+- The defaults catch the most known receptions, but those are heard by fixed repeaters and observers, mostly on rooftops, which hear past ridges that someone on the ground doesn't. If the areas look too big where you know the coverage, see [`mapDefaults.contours`](configuration.md#region-contours).
+- The radius rule, floor, wrap gap, default view and pulse duration are fixed for now.
 
 ### Links
 

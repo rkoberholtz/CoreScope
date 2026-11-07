@@ -287,7 +287,7 @@
   //           of close neighbours alike.
   //   links:  Map pk → [{ pk, bearing, len }], each partner that heard it,
   //           its bearing and its distance × 1.1, for lobeOf.
-  //   partners: Map pk → [{ lat, lon }] of the nodes that heard it, on
+  //   partners: Map pk → [{ lat, lon, pk }] of the nodes that heard it, on
   //           which the terrain provider calibrates its loss budget.
   //   peers:  Map pk → [pk] of the other ends, heard either way, co-located
   //           ones included, for linkedGroups.
@@ -296,7 +296,7 @@
     (nodes || []).forEach(function (n) { var p = position(n); if (p && n.public_key) pos.set(n.public_key, p); });
     var dists = new Map(), links = new Map(), partners = new Map(), peers = new Map();
     function peer(pk, other) { var l = peers.get(pk); if (l) l.push(other); else peers.set(pk, [other]); }
-    function partner(pk, p) { var l = partners.get(pk); if (l) l.push({ lat: p[0], lon: p[1] }); else partners.set(pk, [{ lat: p[0], lon: p[1] }]); }
+    function partner(pk, p, other) { var l = partners.get(pk), q = { lat: p[0], lon: p[1], pk: other }; if (l) l.push(q); else partners.set(pk, [q]); }
     function link(pk, other, bearing, len) {
       var l = links.get(pk), k = { pk: other, bearing: bearing, len: len };
       if (l) l.push(k); else links.set(pk, [k]);
@@ -313,11 +313,11 @@
       var d = Math.sqrt(dx * dx + dy * dy), fwd = Math.atan2(dx, dy);
       peer(e.source, e.target); peer(e.target, e.source);
       if (srcHeard) {
-        dist(e.source, d); partner(e.source, b);
+        dist(e.source, d); partner(e.source, b, e.target);
         if (d > 0) link(e.source, e.target, fwd, d * LINK_MARGIN);
       }
       if (tgtHeard) {
-        dist(e.target, d); partner(e.target, a);
+        dist(e.target, d); partner(e.target, a, e.source);
         if (d > 0) link(e.target, e.source, fwd + Math.PI, d * LINK_MARGIN);
       }
     });
@@ -621,15 +621,24 @@
     function radiusOf(n) { return (reach && reach.radius.get(n.public_key)) || NO_LINK_RADIUS_M; }
     // The operator's antenna height for a node: its pubkey, or the longest
     // configured prefix of it.
-    function heightOf(n) {
+    function heightOf(n) { return heightOfKey(n.public_key); }
+    function heightOfKey(key) {
       if (!heights) return 0;
-      var pk = String(n.public_key || '').toLowerCase(), best = '', m = 0;
+      var pk = String(key || '').toLowerCase(), best = '', m = 0;
       Object.keys(heights).forEach(function (k) {
         if (k.length > best.length && pk.indexOf(k) === 0) { best = k; m = heights[k]; }
       });
       return m;
     }
-    function partnersOf(n) { return (reach && reach.partners.get(n.public_key)) || []; }
+    // The nodes that heard it, each at its configured antenna height when
+    // there is one: a listener on a mast taken for 10 m makes its path look
+    // lossier than it was, and the budget too big.
+    function partnersOf(n) {
+      return ((reach && reach.partners.get(n.public_key)) || []).map(function (b) {
+        var h = heightOfKey(b.pk);
+        return h ? { lat: b.lat, lon: b.lon, antennaM: h } : { lat: b.lat, lon: b.lon };
+      });
+    }
     // The terrain request for a node: its position, radius, the operator's
     // antenna height if set, and the nodes that heard it (its loss budget).
     // A result is only used while it still matches, so one computed for a
@@ -637,7 +646,7 @@
     function terrainKey(n) {
       var p = position(n), h = heightOf(n);
       return p[0] + ',' + p[1] + '|' + Math.round(radiusOf(n)) + '|' + (h ? 'a' + h : '') +
-        'L' + partnersOf(n).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4); }).sort().join(';');
+        'L' + partnersOf(n).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4) + (b.antennaM ? '^' + b.antennaM : ''); }).sort().join(';');
     }
 
     // A node's shape in one area (area: Set of its members' pubkeys): lobes
@@ -712,6 +721,15 @@
         var h = (cfg && cfg.antennaHeights) || {}, clean = {};
         Object.keys(h).forEach(function (k) { if (h[k] > 0) clean[String(k).toLowerCase()] = Number(h[k]); });
         if (opts.terrain && opts.terrain.setSource) opts.terrain.setSource((cfg && cfg.terrainTiles) || null);
+        // How optimistic the reach is: the provider takes the settings
+        // before it is asked anything (requestTerrain waits for heights).
+        var c = (cfg && cfg.contours) || null;
+        if (opts.terrain && opts.terrain.setParams) opts.terrain.setParams(c);
+        var m = c && typeof c.marginKm === 'number' && c.marginKm >= 0 && c.marginKm <= 5 ? c.marginKm * 1000 : null;
+        if (m != null && opts.marginM == null && m !== marginM) {
+          marginM = m;
+          cache.clear(); groupCache.clear();
+        }
         heights = clean;
       }, function () { heights = {}; }).then(queueRender);
     }
@@ -824,8 +842,11 @@
         shapes.forEach(function (byArea) { byArea.forEach(function (e) { used.add(e.key); }); });
         Array.from(edgeCache.keys()).forEach(function (k) { if (!used.has(k)) edgeCache.delete(k); });
       }
+      // The map config holds the margin too, so it is loaded with or
+      // without terrain.
+      if (visible && opts.loadMapConfig && heights === null) loadHeights();
       if (visible) requestTerrain(members);
-      var info = { terrain: opts.terrain ? opts.terrain.status() : 'off', terrainUrl: opts.terrain && opts.terrain.sourceUrl ? opts.terrain.sourceUrl() : null, view: view };
+      var info = { terrain: opts.terrain ? opts.terrain.status() : 'off', terrainUrl: opts.terrain && opts.terrain.sourceUrl ? opts.terrain.sourceUrl() : null, view: view, marginM: marginM };
       listeners.forEach(function (fn) { fn(list, visible, info); });
     }
 
@@ -989,11 +1010,13 @@
 
   // ── Scope list ───────────────────────────────────────────────────────────
 
-  // What an area is, per view.
-  var AREA_NOTE = {
-    hull: 'Each area spans the farthest reach of its repeaters, at least ' + ((DEFAULT_FLOOR_M + AREA_MARGIN_M) / 1000) + ' km round each.',
-    detailed: 'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least ' + ((DEFAULT_FLOOR_M + AREA_MARGIN_M) / 1000) + ' km round each.',
-  };
+  // areaNote: what an area is, per view, with the margin it is drawn with.
+  function areaNote(view, marginM) {
+    var round = ((DEFAULT_FLOOR_M + (marginM != null ? marginM : AREA_MARGIN_M)) / 1000) + ' km round each.';
+    return view === 'detailed' ?
+      'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least ' + round :
+      'Each area spans the farthest reach of its repeaters, at least ' + round;
+  }
   var TERRAIN_NOTE = 'A repeater\'s range is how far its signal is expected to carry over the terrain, calibrated on the nodes known to hear it, and stretched to repeaters in its area that heard it. ' +
     'Antenna heights are the operator\'s where set, otherwise 10 m. ';
   var TERRAIN_SOURCE = 'Terrain: AWS Terrain Tiles (Mapzen; SRTM, USGS 3DEP and others), bare earth: buildings and trees are not in it.';
@@ -1024,7 +1047,7 @@
       '<div class="filter-group mc-scope-list-actions"><button type="button" class="btn" data-scope-all>All</button> ' +
       '<button type="button" class="btn" data-scope-none>None</button></div>' +
       rows +
-      '<div class="mc-scope-hint">' + AREA_NOTE[(info && info.view) || VIEWS[0]] + ' ' +
+      '<div class="mc-scope-hint">' + areaNote((info && info.view) || VIEWS[0], info && info.marginM) + ' ' +
       terrainNote(info) + ' Click an outline to list its repeaters.</div>';
   }
 
@@ -1129,6 +1152,7 @@
     linkReach: linkReach,
     linkedGroups: linkedGroups,
     lobeOf: lobeOf,
+    areaNote: areaNote,
     reachFor: reachFor,
     noLinkRadius: NO_LINK_RADIUS_M,
     shapeFor: shapeFor,

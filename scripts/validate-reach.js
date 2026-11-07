@@ -16,12 +16,23 @@
  * Read-only: GET requests to the instance, and elevation tiles from the
  * terrain source it is configured with.
  *
- *   node scripts/validate-reach.js [BASE_URL] [--local]
+ *   node scripts/validate-reach.js [BASE_URL] [--local] [settings]
  *
  * BASE_URL defaults to http://localhost:3000. --local evaluates this
  * checkout's public/terrain-reach.js, scope-geometry.js and
  * scope-contours.js in the page instead of the instance's own, so a model
  * change can be checked on live data before it is deployed.
+ *
+ * The reach is checked with the defaults and with the instance's
+ * mapDefaults.contours, each setting overridable to try values before
+ * putting them in config:
+ *   --budget-pct 75   --default-budget 115   --max-reach 20
+ *   --rule first      --margin 0.5           --receiver 2
+ * The hold-out can only count misses: a reception outside the drawn reach.
+ * Coverage drawn where nobody is known to listen goes unseen, so a more
+ * conservative setting always scores lower here; weigh that against what
+ * you know of where coverage ends. Listeners are mostly fixed repeaters,
+ * so a low --receiver scores lower still.
  */
 'use strict';
 const fs = require('fs');
@@ -29,8 +40,15 @@ const path = require('path');
 const { chromium } = require('playwright');
 
 const args = process.argv.slice(2);
-const BASE = (args.find((a) => !a.startsWith('--')) || 'http://localhost:3000').replace(/\/$/, '');
+const BASE = (args.find((a) => /^https?:\/\//.test(a)) || 'http://localhost:3000').replace(/\/$/, '');
 const LOCAL = args.includes('--local');
+const arg = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
+const num = (name) => (arg(name) != null ? Number(arg(name)) : undefined);
+const OVERRIDES = {
+  budgetPercentile: num('--budget-pct'), defaultBudgetDb: num('--default-budget'), maxReachKm: num('--max-reach'),
+  reachRule: arg('--rule'), marginKm: num('--margin'), receiverHeightM: num('--receiver'),
+};
+Object.keys(OVERRIDES).forEach((k) => OVERRIDES[k] === undefined && delete OVERRIDES[k]);
 const MODULES = ['terrain-reach.js', 'scope-geometry.js', 'scope-contours.js'];
 
 (async () => {
@@ -45,17 +63,23 @@ const MODULES = ['terrain-reach.js', 'scope-geometry.js', 'scope-contours.js'];
         await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8') });
       }
     }
-    const r = await page.evaluate(holdOut);
-    report(r);
+    const cfg = await page.evaluate(() => fetch('/api/config/map').then((r) => r.json()).catch(() => ({})));
+    const chosen = Object.assign({}, cfg.contours || {}, OVERRIDES);
+    const runs = [['defaults', {}]];
+    if (Object.keys(chosen).length) runs.push([(Object.keys(OVERRIDES).length ? 'chosen' : 'this instance') + ': ' + JSON.stringify(chosen), chosen]);
+    const results = [];
+    for (const [label, contours] of runs) results.push([label, await page.evaluate(holdOut, contours)]);
+    report(results);
   } finally {
     await browser.close();
   }
 })().catch((e) => { console.error(e); process.exit(1); });
 
 // Runs in the page. Returns one row per held-out reception.
-async function holdOut() {
+async function holdOut(contours) {
   const SC = window.ScopeContours, TR = window.TerrainReach, N = SC.sectors;
   const FLOOR = 1000;
+  const MARGIN = typeof contours.marginKm === 'number' ? contours.marginKm * 1000 : 2000;
   const get = async (u) => { const res = await fetch(u); if (!res.ok) throw new Error(u + ': ' + res.status); return res.json(); };
   const nodes = (await get('/api/nodes?limit=100000')).nodes || [];
   const edges = (await get('/api/analytics/neighbor-graph')).edges || [];
@@ -63,6 +87,7 @@ async function holdOut() {
   const heights = cfg.antennaHeights || {};
   const terrain = TR.createTerrainProvider({ storage: null, yieldFn: () => Promise.resolve() });
   terrain.setSource(cfg.terrainTiles || null);
+  terrain.setParams(contours);
 
   const pos = new Map();
   nodes.forEach((n) => {
@@ -104,33 +129,37 @@ async function holdOut() {
     const lr = SC.linkReach(nodes, held);
     const R = lr.radius.get(r.tx) || FLOOR;
     const p = pos.get(r.tx), h = heightOf(r.tx);
-    const it = { pk: r.tx + '#' + k, lat: p[0], lon: p[1], R, links: lr.partners.get(r.tx) || [] };
+    const links = (lr.partners.get(r.tx) || []).map((b) => (heightOf(b.pk || '') ? { lat: b.lat, lon: b.lon, antennaM: heightOf(b.pk) } : { lat: b.lat, lon: b.lon }));
+    const it = { pk: r.tx + '#' + k, lat: p[0], lon: p[1], R, links };
     if (h) it.antennaM = h;
     const t = (await terrain.extentsFor([it])).get(it.pk) || null;
     const radius = SC.reachFor(R, null, null, FLOOR), model = SC.reachFor(R, t, null, FLOOR);
-    rows.push({ d: r.d, radius: along(radius, r.brg), model: along(model, r.brg), areaRadius: areaOf(radius, 2000), areaModel: areaOf(model, 2000) });
+    rows.push({ d: r.d, radius: along(radius, r.brg), model: along(model, r.brg), areaRadius: areaOf(radius, MARGIN), areaModel: areaOf(model, MARGIN) });
   }
-  return { rows, receptions: recs.length, terrain: terrain.status(), base: location.origin };
+  return { rows, receptions: recs.length, terrain: terrain.status(), base: location.origin, margin: MARGIN };
 }
 
-function report({ rows, receptions, terrain, base }) {
-  const MARGIN = 2000, n = rows.length;
-  const ds = rows.map((x) => x.d).sort((a, b) => a - b);
+function report(results) {
   const pct = (v) => (100 * v).toFixed(0) + '%';
-  // Area of a circle round every repeater that catches the same share.
-  const circleAreaFor = (rate) => {
-    const r = ds[Math.max(0, Math.min(n - 1, Math.ceil(rate * n) - 1))];
-    return Math.PI * Math.max(r, MARGIN) ** 2;
-  };
-  console.log(`${base}: ${receptions} directed receptions, ${n} held out (both ends placed, >100 m apart); terrain ${terrain}`);
-  console.log('"inside": within the reach plus the 2 km margin; link lobes left out, since each is a known reception\n');
-  console.log('model'.padEnd(34) + 'inside'.padStart(7) + 'mean km²'.padStart(10) + 'same-area circle'.padStart(18) + 'skill'.padStart(7) + 'circle needs'.padStart(14));
-  for (const [key, label] of [['radius', 'distance radius only'], ['model', 'overlay reach (terrain if on)']]) {
-    const inside = rows.filter((x) => x.d <= x[key] + MARGIN).length / n;
-    const meanA = rows.reduce((s, x) => s + x[key === 'radius' ? 'areaRadius' : 'areaModel'], 0) / n;
-    const r0 = Math.sqrt(meanA / Math.PI), circle = rows.filter((x) => x.d <= r0).length / n;
-    const skill = 100 * (inside - circle), more = 100 * (circleAreaFor(inside) / meanA - 1);
-    console.log(label.padEnd(34) + pct(inside).padStart(7) + (meanA / 1e6).toFixed(0).padStart(10) + pct(circle).padStart(18) +
-      ((skill >= 0 ? '+' : '') + skill.toFixed(0)).padStart(7) + ((more >= 0 ? '+' : '') + more.toFixed(0) + '%').padStart(14));
+  const first = results[0][1];
+  console.log(`${first.base}: ${first.receptions} directed receptions, ${first.rows.length} held out (both ends placed, >100 m apart); terrain ${first.terrain}`);
+  console.log('"inside": within the reach plus the margin; link lobes left out, since each is a known reception\n');
+  console.log('settings / model'.padEnd(34) + 'inside'.padStart(7) + 'mean km²'.padStart(10) + 'same-area circle'.padStart(18) + 'skill'.padStart(7) + 'circle needs'.padStart(14));
+  for (const [label, { rows, margin }] of results) {
+    const n = rows.length, ds = rows.map((x) => x.d).sort((a, b) => a - b);
+    // Area of a circle round every repeater that catches the same share.
+    const circleAreaFor = (rate) => {
+      const r = ds[Math.max(0, Math.min(n - 1, Math.ceil(rate * n) - 1))];
+      return Math.PI * Math.max(r, margin) ** 2;
+    };
+    console.log(label);
+    for (const [key, name] of [['radius', '  distance radius only'], ['model', '  overlay reach (terrain if on)']]) {
+      const inside = rows.filter((x) => x.d <= x[key] + margin).length / n;
+      const meanA = rows.reduce((s, x) => s + x[key === 'radius' ? 'areaRadius' : 'areaModel'], 0) / n;
+      const r0 = Math.sqrt(meanA / Math.PI), circle = rows.filter((x) => x.d <= r0).length / n;
+      const skill = 100 * (inside - circle), more = 100 * (circleAreaFor(inside) / meanA - 1);
+      console.log(name.padEnd(34) + pct(inside).padStart(7) + (meanA / 1e6).toFixed(0).padStart(10) + pct(circle).padStart(18) +
+        ((skill >= 0 ? '+' : '') + skill.toFixed(0)).padStart(7) + ((more >= 0 ? '+' : '') + more.toFixed(0) + '%').padStart(14));
+    }
   }
 }
