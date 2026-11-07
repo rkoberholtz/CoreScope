@@ -148,10 +148,17 @@ const tick = () => new Promise(r => setTimeout(r, 0));
     await M.renderMyRepeatersTab(e);
     return e.innerHTML;
   };
-  assert(/&rarr;/.test(await arrowFor({ heard_by_target: 3 })), 'only the target heard the source: →');
-  assert(/&larr;/.test(await arrowFor({ heard_by_source: 3 })), 'only the source heard the target: ←');
+  const fwd = await arrowFor({ heard_by_target: 3 }), back = await arrowFor({ heard_by_source: 3 });
+  assert(/&rarr;/.test(fwd), 'only the target heard the source: →');
+  assert(/&larr;/.test(back), 'only the source heard the target: ←');
   const unknown = await arrowFor({});
   assert(/&ndash;/.test(unknown) && !/&harr;/.test(unknown), 'direction unknown: a dash, never ↔');
+  // The arrow names both ends, for the pointer and for screen readers alike.
+  assert(/role="img" aria-label="Silent Rptr heard Active Rptr, not the other way" title="Silent Rptr heard Active Rptr, not the other way"/.test(fwd),
+    'one-way arrow is labelled with who heard whom');
+  assert(/aria-label="Active Rptr heard Silent Rptr, not the other way"/.test(back), 'reverse arrow labelled the other way round');
+  assert(/aria-label="Active Rptr and Silent Rptr heard each other"/.test(h2), 'two-way arrow labelled');
+  assert(/aria-label="Not yet known which of Active Rptr and Silent Rptr heard the other"/.test(unknown), 'unknown direction labelled');
   // Ambiguous marker is a ph-question icon with aria-label, not a "(?)" string.
   assert(/ph-question/.test(h2) && /aria-label="Path attribution ambiguous"/.test(h2) && !/\(\?\)/.test(h2),
     'ambiguous affinity edge uses a ph-question icon, not "(?)"');

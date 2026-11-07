@@ -2682,13 +2682,16 @@
 
   // linkArrow shows which way a neighbor-graph link was heard: ↔ both ways,
   // → when only the target heard the source, ← the reverse, and a plain
-  // dash when the direction is unknown (edges restored at startup).
-  function linkArrow(e) {
+  // dash when the direction is unknown (edges restored at startup). The
+  // label names both ends (src, tgt: display names, not yet escaped), for
+  // the tooltip and screen readers alike.
+  function linkArrow(e, src, tgt) {
     const st = e.heard_by_target > 0, ts = e.heard_by_source > 0;
-    if (st && ts) return '<span title="Heard both ways">&harr;</span>';
-    if (st) return '<span title="Only the second heard the first">&rarr;</span>';
-    if (ts) return '<span title="Only the first heard the second">&larr;</span>';
-    return '<span title="Direction not known yet">&ndash;</span>';
+    const span = (label, glyph) => `<span role="img" aria-label="${esc(label)}" title="${esc(label)}">${glyph}</span>`;
+    if (st && ts) return span(`${src} and ${tgt} heard each other`, '&harr;');
+    if (st) return span(`${tgt} heard ${src}, not the other way`, '&rarr;');
+    if (ts) return span(`${src} heard ${tgt}, not the other way`, '&larr;');
+    return span(`Not yet known which of ${src} and ${tgt} heard the other`, '&ndash;');
   }
 
   async function renderMyRepeatersTab(el) {
@@ -2808,10 +2811,10 @@
           affinityHtml = `<table class="analytics-table">
             <thead><tr><th scope="col">Link</th><th scope="col" style="text-align:right">Affinity</th><th scope="col" style="text-align:right">Packets</th><th scope="col" style="text-align:right">Avg SNR</th></tr></thead>
             <tbody>${myEdges.map(e => {
-              const arrow = linkArrow(e);
+              const src = nameByPk[e.source] || e.source.slice(0, 12), tgt = nameByPk[e.target] || e.target.slice(0, 12);
               const snr = (e.avg_snr != null) ? e.avg_snr.toFixed(1) + ' dB' : '—';
               return `<tr>
-                <td>${esc(nameByPk[e.source] || e.source.slice(0, 12))} ${arrow} ${esc(nameByPk[e.target] || e.target.slice(0, 12))}${e.ambiguous ? ' <svg class="ph-icon" role="img" aria-label="Path attribution ambiguous"><title>Path attribution ambiguous</title><use href="/icons/phosphor-sprite.svg#ph-question"/></svg>' : ''}</td>
+                <td>${esc(src)} ${linkArrow(e, src, tgt)} ${esc(tgt)}${e.ambiguous ? ' <svg class="ph-icon" role="img" aria-label="Path attribution ambiguous"><title>Path attribution ambiguous</title><use href="/icons/phosphor-sprite.svg#ph-question"/></svg>' : ''}</td>
                 <td style="text-align:right">${pct(e.score)}</td>
                 <td style="text-align:right">${e.weight != null ? e.weight : '—'}</td>
                 <td style="text-align:right">${snr}</td>
