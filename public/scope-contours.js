@@ -24,14 +24,18 @@
    says which evidence each member has.
 
    A node's reach, in 72 directions (reachFor):
-     max( min(R, terrain cut), link lobe, 1 km floor )
-   - R, how far it regularly reaches, comes from the links in the neighbor
-     graph over which another node heard it (linkReach; every observation
-     proves one direction only): the 75th percentile of their distances
-     × 1.1, 1-20 km; 1 km for a node nobody is known to hear.
-   - The terrain cut is where line of sight over elevation data ends in that
-     direction (terrain-reach.js). Real radios reach roughly a circle, trimmed
-     where a ridge or valley shadows the ground.
+     max( terrain reach, or R without terrain; link lobe; 1 km floor )
+   - The terrain reach is the farthest point in that direction whose path
+     loss over the elevation data (free space plus diffraction over the
+     worst ridge) stays within the loss the repeater is known to survive:
+     the 90th percentile over the paths to the nodes that heard it, up to
+     30 km (terrain-reach.js). A line-of-sight cut did worse than a plain
+     circle; this beats one (scripts/validate-reach.js).
+   - R, used where there is no terrain (turned off, or tiles failed), comes
+     from the links in the neighbor graph over which another node heard it
+     (linkReach; every observation proves one direction only): the 75th
+     percentile of their distances × 1.1, 1-20 km; 1 km for a node nobody
+     is known to hear.
    - Each repeater in the same area that heard it still stretches that
      bearing out past it: full length within 5° (one ray) of it, so the
      partner is inside even between two rays, tapering to nothing at
@@ -283,8 +287,8 @@
   //           of close neighbours alike.
   //   links:  Map pk → [{ pk, bearing, len }], each partner that heard it,
   //           its bearing and its distance × 1.1, for lobeOf.
-  //   partners: Map pk → [{ lat, lon }] of the nodes that heard it, from
-  //           which the terrain provider estimates its antenna height.
+  //   partners: Map pk → [{ lat, lon }] of the nodes that heard it, on
+  //           which the terrain provider calibrates its loss budget.
   //   peers:  Map pk → [pk] of the other ends, heard either way, co-located
   //           ones included, for linkedGroups.
   function linkReach(nodes, edges) {
@@ -380,13 +384,14 @@
   }
 
   // reachFor combines the three into per-sector reach:
-  //   max( min(R, terrain cut), link lobe, floor )
-  // terrain is null when there is none (yet, or the tiles failed): the
-  // radius then stands unclipped.
+  //   max( terrain reach, or R without it; link lobe; floor )
+  // terrain is null when there is none (yet, or terrain is off): the radius
+  // then stands all round. The terrain reach is calibrated on the node's
+  // own receptions, so the radius does not cap it.
   function reachFor(R, terrain, lobe, floorM) {
     var out = new Float64Array(SECTORS);
     for (var i = 0; i < SECTORS; i++) {
-      var v = terrain ? Math.min(R, terrain[i]) : R;
+      var v = terrain ? terrain[i] : R;
       if (lobe && lobe[i] > v) v = lobe[i];
       out[i] = v > floorM ? v : floorM;
     }
@@ -503,8 +508,8 @@
   // scope is drawn as when more than one (groupsOf(scope), when given). Each
   // name's swatch is colourOf(scope), the overlay's colour for it; without
   // one, colours are handed out over the scopes given. The
-  // terrain model's antenna height is an estimate, not a fact about the
-  // operator's mast, so it is left out.
+  // terrain model's antenna height is the 10 m default unless the operator
+  // set it, not a fact about the mast, so it is left out.
   // Scopes whose lists are the same (the same repeaters, listed for the same
   // reasons) share one section: a few repeaters that each carry many scopes
   // would otherwise list themselves once per scope. Sorted by name, case
@@ -625,14 +630,14 @@
       return m;
     }
     function partnersOf(n) { return (reach && reach.partners.get(n.public_key)) || []; }
-    // The terrain request for a node: its position, radius, and what its
-    // antenna height comes from. A result is only used while it still
-    // matches, so one computed for a node list that has since moved on is
-    // ignored.
+    // The terrain request for a node: its position, radius, the operator's
+    // antenna height if set, and the nodes that heard it (its loss budget).
+    // A result is only used while it still matches, so one computed for a
+    // node list that has since moved on is ignored.
     function terrainKey(n) {
       var p = position(n), h = heightOf(n);
-      return p[0] + ',' + p[1] + '|' + Math.round(radiusOf(n)) + '|' +
-        (h ? 'a' + h : 'L' + partnersOf(n).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4); }).sort().join(';'));
+      return p[0] + ',' + p[1] + '|' + Math.round(radiusOf(n)) + '|' + (h ? 'a' + h : '') +
+        'L' + partnersOf(n).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4); }).sort().join(';');
     }
 
     // A node's shape in one area (area: Set of its members' pubkeys): lobes
@@ -663,7 +668,7 @@
     function requestTerrain(members) {
       if (!opts.terrain || destroyed) return;
       // Wait for the map config: the operator's heights, so a set height is
-      // never first computed as an estimate, and the terrain source.
+      // never first computed as the default, and the terrain source.
       if (opts.loadMapConfig && heights === null) { loadHeights(); return; }
       // Terrain is off on this instance: there is nothing to ask for.
       if (opts.terrain.status && opts.terrain.status() === 'off') return;
@@ -674,7 +679,8 @@
         terrainAsked.add(ask);
         var p = position(n), h = heightOf(n);
         var it = { pk: n.public_key, lat: p[0], lon: p[1], R: radiusOf(n), key: k };
-        if (h) it.antennaM = h; else it.links = partnersOf(n);
+        it.links = partnersOf(n);
+        if (h) it.antennaM = h;
         items.push(it);
       });
       if (!items.length) return;
@@ -988,8 +994,8 @@
     hull: 'Each area spans the farthest reach of its repeaters, at least ' + ((DEFAULT_FLOOR_M + AREA_MARGIN_M) / 1000) + ' km round each.',
     detailed: 'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least ' + ((DEFAULT_FLOOR_M + AREA_MARGIN_M) / 1000) + ' km round each.',
   };
-  var TERRAIN_NOTE = 'A repeater\'s range comes from how far other repeaters are known to hear it, trimmed by line of sight over terrain and stretched to repeaters in its area that heard it. ' +
-    'Antenna heights are the operator\'s where set; otherwise 10 m, raised where those links need more. ';
+  var TERRAIN_NOTE = 'A repeater\'s range is how far its signal is expected to carry over the terrain, calibrated on the nodes known to hear it, and stretched to repeaters in its area that heard it. ' +
+    'Antenna heights are the operator\'s where set, otherwise 10 m. ';
   var TERRAIN_SOURCE = 'Terrain: AWS Terrain Tiles (Mapzen; SRTM, USGS 3DEP and others), bare earth: buildings and trees are not in it.';
   var NO_TERRAIN_NOTE = 'Terrain unavailable: a repeater\'s range comes from how far other repeaters are known to hear it, stretched to repeaters in its area that heard it, with no terrain trimming.';
   var TERRAIN_OFF_NOTE = 'Terrain is off on this instance: a repeater\'s range comes from how far other repeaters are known to hear it, stretched to repeaters in its area that heard it, with no terrain trimming.';

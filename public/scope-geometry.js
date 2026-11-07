@@ -29,6 +29,13 @@
   // more vertices per cluster than MAX_VERTICES (the cell grows instead).
   var MIN_CELL_M = 150;
   var MAX_VERTICES = 100000;
+  // And no coarser than this: the margin and the closing are grown on the
+  // grid, so a cell must stay well under the 2 km margin. A cell set by a
+  // big uniform reach alone (a fifth of 30 km is 6 km) drew Detailed over
+  // 3 km past the hull. The grid's margin still varies by up to ~150 m
+  // round a 1 km floor with where the vertices fall (measured over random
+  // shapes, the same before this cap); 500 m happened to fall worse.
+  var MAX_CELL_M = 450;
 
   // reachAt interpolates a shape's reach at a bearing between the two nearest
   // sector centres.
@@ -359,8 +366,9 @@
     // big reaches is not drawn as a coarse polygon. Finer cells cost the
     // square. A cluster holding a big shape needs no finer than 1/40 of it:
     // a 20 km reach is still ~80 cells across, at zooms where a pixel is
-    // 60-150 m. The vertex cap coarsens it for a sprawling cluster.
-    var cell = Math.max(MIN_CELL_M, maxExt / 40, Math.min(minExt / 2.5, Math.max(minExt / 5, 500)));
+    // 60-150 m. MAX_CELL_M caps all of these, and the vertex cap coarsens it
+    // for a sprawling cluster.
+    var cell = Math.min(MAX_CELL_M, Math.max(MIN_CELL_M, maxExt / 40, Math.min(minExt / 2.5, Math.max(minExt / 5, 500))));
     var span = function (c) {
       // Whole cells, so a margin keeps the vertices where the detailed
       // view's grid has them and both trace an edge alike.

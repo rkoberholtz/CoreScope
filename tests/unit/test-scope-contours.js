@@ -423,7 +423,7 @@ test('a one-way link counts only for the end that was heard', () => {
   assert.ok(!r.radius.has('e1'), 'the listener gets no radius from it');
   assert.strictEqual((r.links.get('h0') || []).length, 1, 'a lobe toward the listener');
   assert.ok(!r.links.has('e1'), 'no lobe from the listener back');
-  assert.deepStrictEqual(plain(r.partners.get('h0')).map(p => p.lon.toFixed(3)), [EAST.lon.toFixed(3)], 'the listener raises the antenna estimate');
+  assert.deepStrictEqual(plain(r.partners.get('h0')).map(p => p.lon.toFixed(3)), [EAST.lon.toFixed(3)], 'the listener calibrates the loss budget');
   assert.ok(!r.partners.has('e1'));
   assert.deepStrictEqual(plain(r.peers.get('h0')), ['e1'], 'still joins the two for grouping');
   assert.deepStrictEqual(plain(r.peers.get('e1')), ['h0']);
@@ -466,12 +466,12 @@ test('a link lobe is its distance x 1.1 within one ray of its bearing, tapering 
   assert.ok(Math.abs(e[RAY(270)] - 22000) < 150, 'the far end gets the reverse lobe');
 });
 
-test('reachFor: min(radius, terrain), stretched by lobes, never under the floor', () => {
+test('reachFor: terrain reach when there is one, else the radius; stretched by lobes, never under the floor', () => {
   const cut = new Float64Array(SC.sectors).fill(8000);
   cut[RAY(270)] = 300; cut[RAY(180)] = 100;
   const lobe = new Float64Array(SC.sectors); lobe[RAY(90)] = 22000;
   const out = plain(SC.reachFor(5000, cut, lobe, 250));
-  assert.strictEqual(out[RAY(0)], 5000, 'radius caps terrain');
+  assert.strictEqual(out[RAY(0)], 8000, 'terrain reach is calibrated on its own: the radius does not cap it');
   assert.strictEqual(out[RAY(270)], 300, 'terrain cuts');
   assert.strictEqual(out[RAY(180)], 250, 'floor holds');
   assert.strictEqual(out[RAY(90)], 22000, 'a proven link stretches past the radius');
@@ -479,10 +479,10 @@ test('reachFor: min(radius, terrain), stretched by lobes, never under the floor'
 });
 
 test('the hull spans a terrain notch from the directions either side of it', () => {
-  // One member, radius 8 km, terrain cut to 2 km from 225° to 315°: the
+  // One member, reach 8 km, terrain cut to 2 km from 225° to 315°: the
   // area's west edge is the chord between 220° and 320°, 8 km x sin 40°
   // west, not the 2 km cut. A general area, as chosen.
-  const cut = new Float64Array(SC.sectors).fill(30000);
+  const cut = new Float64Array(SC.sectors).fill(8000);
   for (let d = 225; d <= 315; d += 5) cut[RAY(d)] = 2000;
   const rings = SC.scopeHull([SC.shapeFor(HOME, SC.reachFor(8000, cut, null, 1000), 1000)]);
   const west = reachToward(rings, HOME, 270), north = reachToward(rings, HOME, 0);
@@ -683,8 +683,8 @@ test('distant clusters keep full resolution', () => {
   }
 });
 
-test('the outline follows the reach: cut by terrain west, radius north, a lobe east', () => {
-  const cut = new Float64Array(SC.sectors).fill(30000);
+test('the outline follows the reach: short to the west, 8 km north, a lobe east', () => {
+  const cut = new Float64Array(SC.sectors).fill(8000);
   for (let d = 225; d <= 315; d += 5) cut[RAY(d)] = 2000;
   const lobe = plain(SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0')));
   const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(8000, cut, lobe, 1000), 1000)]);
@@ -1153,7 +1153,7 @@ test('an answer for a node that has since moved is ignored', () => {
   });
 });
 
-test('without a set height, the request carries the link partners to estimate it from', () => {
+test('the request carries the nodes that heard it, which set its loss budget', () => {
   const { L, map } = fakeLeaflet();
   const t = fakeTerrain();
   const seen = [];
@@ -1165,11 +1165,12 @@ test('without a set height, the request carries the link partners to estimate it
   return tick().then(() => {
     const h = seen.filter(it => it.pk === 'h0').pop();
     assert.ok(h && !h.antennaM, 'no height was set');
+    assert.strictEqual(typeof h.R, 'number', 'the radius, for when terrain is missing');
     assert.deepStrictEqual(JSON.parse(JSON.stringify(h.links)), [{ lat: EAST.lat, lon: EAST.lon }]);
   });
 });
 
-test('an operator height (longest matching prefix) is sent instead, and requests wait for it', () => {
+test('an operator height (longest matching prefix) is sent too, and requests wait for it', () => {
   const { L, map } = fakeLeaflet();
   const t = fakeTerrain();
   const seen = [];
@@ -1184,7 +1185,7 @@ test('an operator height (longest matching prefix) is sent instead, and requests
     const h = seen.pop();
     assert.ok(h, 'never asked');
     assert.strictEqual(h.antennaM, 25, 'the longer prefix should win');
-    assert.ok(!h.links, 'links sent despite a set height');
+    assert.ok(Array.isArray(h.links), 'the budget still needs the links');
   });
 });
 
@@ -1260,7 +1261,7 @@ test('a repeater configured for a scope is a member like one seen carrying it: l
   }
 });
 
-test('a new link changes what the height is estimated from, so it is asked again', () => {
+test('a new link changes what the budget is calibrated on, so it is asked again', () => {
   const { L, map } = fakeLeaflet();
   const t = fakeTerrain();
   const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
@@ -1274,8 +1275,9 @@ test('a new link changes what the height is estimated from, so it is asked again
   });
 });
 
-// The terrain model's antenna height is an estimate, not a fact about the
-// operator's mast, and a viewer cannot change it: the click box leaves it out.
+// The terrain model's antenna height is the 10 m default unless the operator
+// set it, not a fact about the mast, and a viewer cannot change it: the click
+// box leaves it out.
 test('the click box does not show the antenna height the terrain model used', () => {
   const { L, map, rec } = fakeLeaflet();
   const t = fakeTerrain();

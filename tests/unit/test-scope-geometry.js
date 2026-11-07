@@ -123,5 +123,16 @@ test('inRings is even-odd (a hole is outside) and ringsBounds boxes the rings', 
   assert.strictEqual(G.inRings([outer, hole], 2, 2, boxes), true, 'the boxes change no answer');
 });
 
+test('Detailed stays within half a kilometre of the hull, even for a 30 km reach', () => {
+  // The grid the margin is grown on once took its cell from the reach alone
+  // (a fifth of it: 6 km here) and drew the area 3.2 km past the hull.
+  for (const R of [3000, 16000, 30000]) {
+    const s = [circle(O, R)];
+    const far = (rings) => Math.max(...rings.flat().map((p) => metres([O.lat, O.lon], p)));
+    const past = far(G.wrapShapes(s, 15000, 2000)) - far(G.scopeHull(s, 2000));
+    assert.ok(past < 500, R / 1000 + ' km reach: ' + Math.round(past) + ' m past the hull');
+  }
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

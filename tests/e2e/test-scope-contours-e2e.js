@@ -290,7 +290,7 @@ const EDGES = [
     const sfPart = text.split('#sf')[1];
     assert(sfPart.indexOf('SF Default') < sfPart.indexOf('SF One'), 'configured repeater not listed first: ' + sfPart);
     assert(/SF Default\s*default\s*carrying/.test(text), 'tags: ' + text);
-    // The terrain model's antenna heights are an estimate, left out.
+    // The terrain model's antenna heights (the default unless set) are left out.
     assert(!/mast/.test(text), 'antenna height in the click box: ' + text);
     const href = await page.$$eval('.mc-scope-popup .mc-scope-pop-scope', (els) => {
       const sf = els.find((el) => /#sf\b/.test(el.textContent));
@@ -360,6 +360,18 @@ const EDGES = [
     });
     return out;
   });
+  // Terrain answers arrive one repeater at a time and each redraws, so read
+  // the counts once two reads half a second apart agree.
+  const settledCounts = async () => {
+    let prev = JSON.stringify(await fillCounts());
+    for (let i = 0; i < 40; i++) {
+      await page.waitForTimeout(500);
+      const cur = JSON.stringify(await fillCounts());
+      if (cur === prev) return JSON.parse(cur);
+      prev = cur;
+    }
+    throw new Error('outlines never settled: ' + prev);
+  };
   const pickView = async (label, hintRe) => {
     await page.click('#mcScopeView button[data-view="' + label + '"]');
     await page.waitForFunction((src) => new RegExp(src).test(document.querySelector('#mcScopeList').textContent), hintRe.source, { timeout: 5000 });
@@ -378,10 +390,10 @@ const EDGES = [
   let hull = null;
   const pathsD = () => page.$$eval('path.mc-scope-area', (els) => els.map((el) => el.getAttribute('d')).join('|'));
   await step('Detailed redraws every scope inside its convex hull', async () => {
-    hull = await fillCounts();
+    hull = await settledCounts();
     const hullD = await pathsD();
     await pickView('detailed', /narrower than 15 km/);
-    const detailed = await fillCounts();
+    const detailed = await settledCounts();
     assert((await pathsD()) !== hullD, 'Detailed drew the same outlines as Convex Hull');
     const keys = Object.keys(hull);
     assert(keys.length === 3 && keys.every((k) => k in detailed), 'scopes: ' + JSON.stringify([hull, detailed]));
@@ -596,7 +608,10 @@ const EDGES = [
       const json = (body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
       if (path === '/api/nodes') return json({ nodes, total: nodes.length, has_more: false, counts: {} });
       if (path === '/api/analytics/neighbor-graph') return json({ nodes: [], edges, stats: {} });
-      if (path === '/api/config/map') return json({ center: [37.785, -122.35], zoom: 11 });
+      // Terrain off: these steps are about which repeaters share an area,
+      // so each reach is its plain radius (1 km for Bay Edge, nobody known
+      // to hear it), not the default loss budget's ~16 km.
+      if (path === '/api/config/map') return json({ center: [37.785, -122.35], zoom: 11, terrainTiles: { disabled: true } });
       return json({});
     });
     await p3.goto(BASE + '/#/map?contours=1', { waitUntil: 'load' });
@@ -619,7 +634,6 @@ const EDGES = [
 
   await step('a configured repeater with no link to the rest of its scope gets an area of its own; the gap is not drawn', async () => {
     const { ctx3, p3, probe } = await bayEdgePage(EDGES);
-    // Wait for terrain: the first draw is floor circles.
     await p3.waitForFunction(() => document.querySelectorAll('path.mc-scope-area[data-scope="bay"]').length === 2, null, { timeout: 5000 });
     const r = await probe();
     assert(r.paths === 2 && r.south.inside === 1 && r.south.onMap, 'Bay Edge not in an area of its own: ' + JSON.stringify(r));

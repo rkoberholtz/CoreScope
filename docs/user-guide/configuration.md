@@ -152,7 +152,7 @@ Two optional `mapDefaults` settings tune the [region contours](map.md#region-con
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `mapDefaults.antennaHeights` | — | Metres above ground of repeater antennas you know, keyed by public key or a unique hex prefix of at least 8 characters. Used instead of the overlay's estimate (10 m, raised up to 60 m where a repeater's links need more). Heights outside 1–200 m and non-hex keys are ignored. |
+| `mapDefaults.antennaHeights` | — | Metres above ground of repeater antennas you know, keyed by public key or a unique hex prefix of at least 8 characters. Used instead of the 10 m default when working out the path loss over the terrain. Heights outside 1–200 m and non-hex keys are ignored. |
 | `mapDefaults.terrainTiles` | AWS Terrain Tiles | Where the browser fetches elevation (Terrarium PNGs). `false` turns terrain off, so no elevation requests leave the browser. A URL template containing `{z}`, `{x}` and `{y}` names another source; anything else means the default. |
 
 ## Region names

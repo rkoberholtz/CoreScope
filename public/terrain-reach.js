@@ -1,59 +1,58 @@
-/* Terrain line-of-sight reach for the region-scope contours (scope-contours.js).
+/* Terrain path-loss reach for the region-scope contours (scope-contours.js).
 
    For a repeater, walk outward along 72 rays (every 5°) over an elevation
-   model and stop where a receiver loses line of sight to the antenna and
-   stays out of it for a while: the first ridge or valley that shadows the
-   ground beyond it. The result is how far, in each direction, people can
-   expect to reach the repeater continuously, before any radio range limit
-   (the caller caps it, and stretches it to proven links).
+   model, and at each step work out the path loss to a receiver there: free
+   space plus the loss behind the worst knife edge on the way (ITU-R P.526,
+   earth curvature with k = 4/3). Each ray reaches the farthest step whose
+   loss is within the repeater's budget, so a hilltop past a valley counts,
+   and the shadow before it is drawn as reached.
+
+   The budget is learned from the repeater's own known receptions: the 90th
+   percentile of the loss over the paths to the nodes known to hear it, when
+   at least two are known, else a default of 120 dB (the mesh-wide 75th
+   percentile on one live mesh). Transmit power, antenna gain, a mast on a
+   roof, the receivers' sensitivity: all of it lands in the budget, so none
+   of it has to be known. A line-of-sight cut did worse than a plain circle
+   the same size, because a fifth to almost half of the real links have no
+   line of sight; the loss budget beat it (scripts/validate-reach.js).
 
    Elevation comes from AWS Terrain Tiles (Terrarium PNG, public, no key,
    CORS open) unless the operator names another Terrarium source or turns
    terrain off (mapDefaults.terrainTiles, setSource). Tiles are fetched only
    around the repeaters asked about, decoded once and kept in a small LRU.
    Results are cached in memory and in localStorage, keyed by repeater,
-   position, radius, source and model parameters, so a reload costs nothing.
-   The persisted cache is capped by size as well as count: localStorage is
-   about 5 MB per site, shared with every other CoreScope setting.
+   position, radius, partners, source and model parameters, so a reload
+   costs nothing. The persisted cache is capped by size as well as count:
+   localStorage is about 5 MB per site, shared with every other CoreScope
+   setting.
 
-   Antenna height above ground is the input that matters most, and adverts
-   do not carry it. In order of preference:
-     set:     the operator's figure (mapDefaults.antennaHeights in config)
-     links:   raised from the repeaters known to hear it: for each, the
-              lowest antenna that gives the link line of sight over the terrain
-              between them (far end at 10 m); the 75th percentile of those,
-              when that is more than 10 m, up to 60 m. Links only prove a
-              lower bound, so they never lower it below the default.
-     default: 10 m, for a repeater whose links need no more, or has none
-
-   Model, hardcoded for now (customizer is a follow-up):
-     receiver 2 m, earth curvature with k = 4/3,
-     an obstruction up to 10 m above the line of sight is tolerated (LoRa
-     diffracts round small ones), and a shadow must last 600 m to end a ray,
-     so the brief shadow just behind a small bump does not.
-   The terrain is bare earth: buildings and trees are not in it. */
+   Model, hardcoded for now (customizer is a follow-up): antennas 10 m above
+   ground at both ends unless the operator sets the repeater's
+   (mapDefaults.antennaHeights), 910 MHz, 120 m steps, out to 30 km. The
+   terrain is bare earth: buildings and trees are not in it. */
 (function () {
   'use strict';
 
-  var ZOOM = 11;            // ~59 m per pixel at 40°N; matches the ray step
+  var ZOOM = 11;            // ~59 m per pixel at 40°N
   var TILE = 256;
   var RAYS = 72;
-  var STEP_M = 60;
-  var ANTENNA_M = 10;        // default, and the far end of a link
-  var EST_MAX_M = 60;
-  var EST_PCT = 0.75;
-  var LINK_MAX_M = 40000;    // longer links are not profiled (tiles)
-  var RX_M = 2;
-  var TOLERANCE_M = 10;
-  var SHADOW_M = 600;
+  var STEP_M = 120;         // two pixels: finer adds cost, not detail
+  var MAX_REACH_M = 30000;
+  var ANTENNA_M = 10;       // default, and the far end of every path
+  var FREQ_HZ = 910e6;
+  var LAMBDA_M = 299792458 / FREQ_HZ;
+  var BUDGET_PCT = 0.9;
+  var MIN_BUDGET_LINKS = 2;
+  var DEFAULT_BUDGET_DB = 120;
+  var LINK_MAX_M = 40000;   // longer links are not profiled (tiles)
   var K = 4 / 3;
   var EARTH_R = 6371008.8;
   var M_PER_DEG = 111320;
   var MAX_TILES = 64;       // decoded tiles held: 64 x 256 KB
   var MAX_ENTRIES = 500;    // persisted results, at most
   var MAX_CHARS = 600000;   // and at most this much of localStorage (~1 KB each)
-  var STORE_KEY = 'meshcore-terrain-reach-v2';
-  var PARAMS = 'z' + ZOOM + 'a' + ANTENNA_M + 'r' + RX_M + 't' + TOLERANCE_M + 's' + SHADOW_M + 'e' + EST_MAX_M + 'p' + EST_PCT;
+  var STORE_KEY = 'meshcore-terrain-reach-v3';
+  var PARAMS = 'z' + ZOOM + 'a' + ANTENNA_M + 'f' + FREQ_HZ + 's' + STEP_M + 'm' + MAX_REACH_M + 'p' + BUDGET_PCT + 'n' + MIN_BUDGET_LINKS + 'd' + DEFAULT_BUDGET_DB;
   var TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
 
   // tileOf returns fractional slippy-map tile coordinates of a point.
@@ -76,61 +75,108 @@
     return out;
   }
 
-  // rayCut walks one ray from (lat, lon) toward bearing (radians, 0 = north,
-  // clockwise) and returns how far a receiver keeps line of sight to the
-  // antenna, up to maxM. sample(lat, lon) gives ground elevation in metres,
-  // NaN where unknown; unknown terrain ends nothing, so the ray runs to maxM.
-  function rayCut(sample, lat, lon, bearing, maxM, antennaM) {
-    var h0 = sample(lat, lon);
-    if (!isFinite(h0)) return maxM;
-    var hA = h0 + (antennaM > 0 ? antennaM : ANTENNA_M);
-    var kR2 = 2 * K * EARTH_R;
+  // knifeEdgeLoss is the loss behind one knife edge, in dB, for the
+  // Fresnel-Kirchhoff parameter v (ITU-R P.526): none while the path clears
+  // the edge by a good part of the first Fresnel zone, 6 dB grazing.
+  function knifeEdgeLoss(v) {
+    return v <= -0.78 ? 0 : 6.9 + 20 * Math.log10(Math.sqrt((v - 0.1) * (v - 0.1) + 1) + v - 0.1);
+  }
+
+  // freeSpaceLoss over d metres at FREQ_HZ, in dB.
+  function freeSpaceLoss(d) {
+    return 20 * Math.log10(d) + 20 * Math.log10(FREQ_HZ) - 147.55;
+  }
+
+  // worstV: the largest v over the ground points strictly between the ends
+  // of a path. g holds ground heights at spacing step from the transmitter
+  // (g[0]) to the receiver (g[k]), NaN where unknown (it obstructs nothing);
+  // hA, hC are the antennas' absolute heights. The earth's bulge,
+  // s(D - s)/2kR, raises each point. -Infinity with no point between.
+  // The hot loop of the model, O(steps²) per ray: no global lookups in it
+  // (sqrt is held locally, g[m] !== g[m] tests for NaN).
+  var sqrt = Math.sqrt;
+  function worstV(g, k, step, hA, hC) {
+    var D = k * step, kR2 = 2 * K * EARTH_R, v = -Infinity, c = 2 * D / LAMBDA_M;
+    for (var m = 1; m < k; m++) {
+      var gm = g[m];
+      if (gm !== gm) continue;
+      var s = m * step, f = s / D;
+      var h = gm + s * (D - s) / kR2 - (hA + (hC - hA) * f);
+      var x = h * sqrt(c / (s * (D - s)));
+      if (x > v) v = x;
+    }
+    return v;
+  }
+
+  function lossOver(g, k, step, hA, hC) {
+    var v = worstV(g, k, step, hA, hC);
+    return freeSpaceLoss(k * step) + (v > -Infinity ? knifeEdgeLoss(v) : 0);
+  }
+
+  // lossProfile walks one ray from (lat, lon) toward bearing (radians, 0 =
+  // north, clockwise) and returns the path loss to a receiver at each step:
+  // out[k] at k * STEP_M, out[0] = 0. sample(lat, lon) gives ground
+  // elevation in metres, NaN where unknown; unknown ground adds no loss, and
+  // an unknown receiver spot stands at the transmitter's ground height.
+  // O(steps²): every receiver spot looks back over every point before it.
+  function lossProfile(sample, lat, lon, bearing, maxM, antennaM) {
+    var n = Math.floor(maxM / STEP_M), out = new Float32Array(n + 1);
     var dLat = Math.cos(bearing) / M_PER_DEG;
     var dLon = Math.sin(bearing) / (M_PER_DEG * Math.cos(lat * Math.PI / 180));
-    // Ground so far as points (d, t): t is height relative to the antenna,
-    // dropped by the curve. How far the worst of them pokes above the line
-    // to a receiver, max(t_i - s * d_i) for the line's slope s, is attained
-    // on their upper convex hull. Points arrive in order of d, so the hull
-    // grows like a monotone chain, and each query is a binary search.
-    var hd = [], ht = [];
-    var lastSeen = 0, shadowFrom = -1;
-    for (var d = STEP_M; d <= maxM; d += STEP_M) {
-      var h = sample(lat + d * dLat, lon + d * dLon);
-      if (!isFinite(h)) return maxM;
-      var t = h - d * d / kR2 - hA;
-      var s = (t + RX_M) / d;
-      var seen = hd.length === 0 || hullPoke(hd, ht, s) <= TOLERANCE_M;
-      if (seen) { lastSeen = d; shadowFrom = -1; }
-      else {
-        if (shadowFrom < 0) shadowFrom = d;
-        if (d - shadowFrom >= SHADOW_M) return Math.max(lastSeen, STEP_M);
-      }
-      // Add this ground point to the upper hull.
-      var n = hd.length;
-      while (n >= 2 && (hd[n - 1] - hd[n - 2]) * (t - ht[n - 2]) - (ht[n - 1] - ht[n - 2]) * (d - hd[n - 2]) >= 0) {
-        hd.pop(); ht.pop(); n--;
-      }
-      hd.push(d); ht.push(t);
-    }
-    return maxM;
+    var g = new Float64Array(n + 1);
+    for (var k = 0; k <= n; k++) g[k] = sample(lat + k * STEP_M * dLat, lon + k * STEP_M * dLon);
+    var g0 = isFinite(g[0]) ? g[0] : 0;
+    var hA = g0 + (antennaM > 0 ? antennaM : ANTENNA_M);
+    for (k = 1; k <= n; k++) out[k] = lossOver(g, k, STEP_M, hA, (isFinite(g[k]) ? g[k] : g0) + ANTENNA_M);
+    return out;
   }
 
-  // hullPoke returns max over the hull points of t - s * d. Along an upper
-  // hull the edge slopes fall, and the maximum sits at the first vertex
-  // whose outgoing edge is no steeper than s.
-  function hullPoke(hd, ht, s) {
-    var lo = 0, hi = hd.length - 1;
-    while (lo < hi) {
-      var mid = (lo + hi) >> 1;
-      if ((ht[mid + 1] - ht[mid]) / (hd[mid + 1] - hd[mid]) <= s) hi = mid; else lo = mid + 1;
-    }
-    return ht[lo] - s * hd[lo];
+  // pathLoss of one link a → b ({ lat, lon }), the transmitter at a with
+  // antennaM (the default when not given), on the same model. NaN when the
+  // ground at either end is unknown.
+  function pathLoss(sample, a, b, antennaM) {
+    var D = distM(a, b);
+    var k = Math.max(1, Math.round(D / STEP_M)), step = D / k;
+    var g = new Float64Array(k + 1);
+    for (var m = 0; m <= k; m++) g[m] = sample(a.lat + (b.lat - a.lat) * m / k, a.lon + (b.lon - a.lon) * m / k);
+    if (!isFinite(g[0]) || !isFinite(g[k]) || !(D > 0)) return NaN;
+    return lossOver(g, k, step, g[0] + (antennaM > 0 ? antennaM : ANTENNA_M), g[k] + ANTENNA_M);
   }
 
-  // terrainExtents walks RAYS rays; ray i points at bearing i * 360/RAYS.
-  function terrainExtents(sample, lat, lon, maxM, antennaM) {
+  // budgetOf: how much loss a repeater's signal is known to survive, from
+  // the nodes that heard it (links, [{ lat, lon }], within LINK_MAX_M): the
+  // BUDGET_PCT percentile of the loss over their paths, so one freak long
+  // link does not set it. With fewer than MIN_BUDGET_LINKS of them,
+  // DEFAULT_BUDGET_DB. { db, source: 'links' | 'default', links: how many
+  // counted }.
+  function budgetOf(sample, origin, antennaM, links) {
+    var a = { lat: origin.lat, lon: origin.lon }, losses = [];
+    (links || []).forEach(function (b) {
+      if (!b || !(distM(a, b) <= LINK_MAX_M)) return;
+      var l = pathLoss(sample, a, b, antennaM);
+      if (isFinite(l)) losses.push(l);
+    });
+    if (losses.length < MIN_BUDGET_LINKS) return { db: DEFAULT_BUDGET_DB, source: 'default', links: losses.length };
+    losses.sort(function (x, y) { return x - y; });
+    var f = BUDGET_PCT * (losses.length - 1), i = Math.floor(f), t = f - i;
+    var db = i + 1 < losses.length ? losses[i] + (losses[i + 1] - losses[i]) * t : losses[i];
+    return { db: db, source: 'links', links: losses.length };
+  }
+
+  // reachOf: the farthest step of a loss profile within budget, in metres
+  // (0 for none). Spots short of it that are over budget, the shadow behind
+  // a ridge before a hilltop, are taken as reached: the contours draw one
+  // reach per bearing.
+  function reachOf(profile, budget) {
+    for (var k = profile.length - 1; k > 0; k--) if (profile[k] <= budget) return k * STEP_M;
+    return 0;
+  }
+
+  // terrainExtents: reachOf over RAYS rays; ray i points at bearing
+  // i * 360/RAYS.
+  function terrainExtents(sample, lat, lon, maxM, antennaM, budget) {
     var out = new Float64Array(RAYS);
-    for (var i = 0; i < RAYS; i++) out[i] = rayCut(sample, lat, lon, i * 2 * Math.PI / RAYS, maxM, antennaM);
+    for (var i = 0; i < RAYS; i++) out[i] = reachOf(lossProfile(sample, lat, lon, i * 2 * Math.PI / RAYS, maxM, antennaM), budget);
     return out;
   }
 
@@ -138,52 +184,6 @@
     var cos = Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
     var dx = (b.lon - a.lon) * M_PER_DEG * cos, dy = (b.lat - a.lat) * M_PER_DEG;
     return Math.sqrt(dx * dx + dy * dy);
-  }
-
-  // requiredHeight: the lowest antenna height above ground at a that gives
-  // the link a-b line of sight, with b's antenna hB above its ground. The
-  // line from a's antenna to b's must pass within TOLERANCE_M of every
-  // ground point between them, where the ground is raised by the earth's
-  // bulge, d(D-d)/2kR. For a point at d that needs
-  //   A >= (g - tol - B * d/D) / (1 - d/D)
-  // in absolute heights; the most any point needs, minus a's ground.
-  // Negative when a is already clear at ground level; NaN when terrain is
-  // missing.
-  function requiredHeight(sample, a, b, hB) {
-    var D = distM(a, b);
-    var gA = sample(a.lat, a.lon), gB = sample(b.lat, b.lon);
-    if (!isFinite(gA) || !isFinite(gB) || !(D > STEP_M)) return NaN;
-    var B = gB + hB, kR2 = 2 * K * EARTH_R, need = -Infinity;
-    for (var d = STEP_M; d < D - STEP_M / 2; d += STEP_M) {
-      var f = d / D;
-      var g = sample(a.lat + (b.lat - a.lat) * f, a.lon + (b.lon - a.lon) * f);
-      if (!isFinite(g)) return NaN;
-      g += d * (D - d) / kR2;
-      var A = (g - TOLERANCE_M - B * f) / (1 - f);
-      if (A > need) need = A;
-    }
-    return need === -Infinity ? -Infinity : need - gA;
-  }
-
-  // estimateAntenna: the 75th percentile of what its links require, so most
-  // of its proven links have line of sight; one freak long link, or a
-  // reflection the terrain cannot explain, does not set it. A link that works
-  // from a low mast says nothing against a taller one, so the estimate only
-  // ever raises the default 10 m, up to 60 m.
-  // { m, source: 'links' (raised) | 'default', links: how many counted }.
-  function estimateAntenna(sample, lat, lon, links) {
-    var a = { lat: lat, lon: lon }, req = [];
-    (links || []).forEach(function (b) {
-      if (!b || !(distM(a, b) <= LINK_MAX_M)) return;
-      var h = requiredHeight(sample, a, b, ANTENNA_M);
-      if (h === -Infinity || isFinite(h)) req.push(h === -Infinity ? 0 : h);
-    });
-    if (!req.length) return { m: ANTENNA_M, source: 'default', links: 0 };
-    req.sort(function (x, y) { return x - y; });
-    var f = EST_PCT * (req.length - 1), i = Math.floor(f), t = f - i;
-    var p = i + 1 < req.length ? req[i] + (req[i + 1] - req[i]) * t : req[i];
-    if (!(p > ANTENNA_M)) return { m: ANTENNA_M, source: 'default', links: req.length };
-    return { m: Math.round(Math.min(EST_MAX_M, p)), source: 'links', links: req.length };
   }
 
   // ── Tiles ────────────────────────────────────────────────────────────────
@@ -219,9 +219,12 @@
   // fetcher by default), storage (localStorage), yieldFn (between
   // repeaters, so the page stays responsive), maxEntries.
   //   extentsFor([{ pk, lat, lon, R, antennaM?, links? }], onProgress)
-  //       → Promise<Map pk → ext>; onProgress(pk, ext, { antennaM, source })
-  //       antennaM: the operator's height (source 'set'); otherwise it is
-  //       estimated from links ([{ lat, lon }] of the nodes that heard it)
+  //       → Promise<Map pk → ext>; onProgress(pk, ext, { antennaM, source,
+  //       budget, budgetSource })
+  //       antennaM: the operator's height (source 'set'), else the 10 m
+  //       default; links ([{ lat, lon }] of the nodes that heard it) set the
+  //       loss budget (budgetSource 'links', else 'default'); R is the reach
+  //       all round when terrain is missing
   //   status()  'ok' | 'unavailable' (a tile failed) | 'idle'
   function createTerrainProvider(opts) {
     opts = opts || {};
@@ -237,7 +240,7 @@
     var tiles = new Map();     // 'x/y' → Float32Array; LRU order
     var inflight = new Map();  // 'x/y' → Promise
     var sourceGen = 0;         // bumped by every change of source
-    var results = new Map();   // key → { ext: Float64Array, antennaM, source }
+    var results = new Map();   // key → { ext: Float64Array, antennaM, source, budget, budgetSource }
     var order = [];            // persisted keys, oldest first
     var computed = 0, failures = 0, used = false;
     var queue = Promise.resolve();
@@ -251,7 +254,7 @@
         order = Array.isArray(saved.order) ? saved.order.filter(function (k) { return saved.data[k]; }) : Object.keys(saved.data);
         order.forEach(function (k) {
           var d = saved.data[k];
-          results.set(k, { ext: Float64Array.from(d.e), antennaM: d.a, source: d.s });
+          results.set(k, { ext: Float64Array.from(d.e), antennaM: d.a, source: d.s, budget: d.b, budgetSource: d.bs });
         });
       } catch (e) { order = []; }
     })();
@@ -266,7 +269,8 @@
       var data = {}, keep = [], size = 30;
       for (var i = order.length - 1; i >= 0; i--) {
         var k = order[i], r = results.get(k);
-        var d = { e: Array.prototype.map.call(r.ext, function (v) { return Math.round(v / 10) * 10; }), a: r.antennaM, s: r.source };
+        var d = { e: Array.prototype.map.call(r.ext, function (v) { return Math.round(v / 10) * 10; }), a: r.antennaM, s: r.source,
+          b: Math.round(r.budget * 10) / 10, bs: r.budgetSource };
         var n = k.length * 2 + JSON.stringify(d).length + 8;
         if (size + n > maxChars) break;
         size += n; data[k] = d; keep.unshift(k);
@@ -285,11 +289,11 @@
       try { if (storage.removeItem) storage.removeItem(STORE_KEY); } catch (e) { /* denied */ }
     }
 
-    // The antenna part: the operator's height, or the links an estimate
-    // would be drawn from (a link added or lost re-estimates).
+    // What the reach rests on besides position: the operator's height, if
+    // set, and the links the budget is drawn from (a link added or lost
+    // re-calibrates).
     function antennaKey(it) {
-      if (it.antennaM > 0) return 'a' + it.antennaM;
-      return 'L' + (it.links || []).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4); }).sort().join(';');
+      return (it.antennaM > 0 ? 'a' + it.antennaM : '') + 'L' + (it.links || []).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4); }).sort().join(';');
     }
     function keyOf(it) { return it.pk + '@' + it.lat + ',' + it.lon + '|' + Math.round(it.R) + '|' + antennaKey(it) + '|' + PARAMS + (source.url ? '|' + source.url : ''); }
 
@@ -314,18 +318,16 @@
       return p;
     }
 
-    // The tiles a repeater's rays can touch, the box of its radius, and,
-    // when its height is to be estimated, the paths to its partners.
+    // The tiles a repeater's rays can touch, the box of MAX_REACH_M round
+    // it, and the paths to the nodes that heard it, for the budget.
     function tilesFor(it) {
-      var dLat = it.R / M_PER_DEG, dLon = it.R / (M_PER_DEG * Math.cos(it.lat * Math.PI / 180));
+      var dLat = MAX_REACH_M / M_PER_DEG, dLon = MAX_REACH_M / (M_PER_DEG * Math.cos(it.lat * Math.PI / 180));
       var n = it.lat + dLat, s = it.lat - dLat, w = it.lon - dLon, e = it.lon + dLon;
-      if (!(it.antennaM > 0)) {
-        (it.links || []).forEach(function (b) {
-          if (!(distM(it, b) <= LINK_MAX_M)) return;
-          if (b.lat > n) n = b.lat; if (b.lat < s) s = b.lat;
-          if (b.lon < w) w = b.lon; if (b.lon > e) e = b.lon;
-        });
-      }
+      (it.links || []).forEach(function (b) {
+        if (!(distM(it, b) <= LINK_MAX_M)) return;
+        if (b.lat > n) n = b.lat; if (b.lat < s) s = b.lat;
+        if (b.lon < w) w = b.lon; if (b.lon > e) e = b.lon;
+      });
       var a = tileOf(n, w, ZOOM), b = tileOf(s, e, ZOOM);
       var out = [];
       for (var y = Math.floor(a.fy); y <= Math.floor(b.fy); y++) {
@@ -361,17 +363,17 @@
         var set = new Map(), complete = true;
         need.forEach(function (xy, i) { if (arrs[i]) set.set(xy[0] + '/' + xy[1], arrs[i]); else complete = false; });
         computed++;
-        var set_ = it.antennaM > 0;
+        var h = it.antennaM > 0 ? it.antennaM : ANTENNA_M, src = it.antennaM > 0 ? 'set' : 'default';
         if (!complete) {
           // Some terrain is missing: fall back to the radius all round, and
           // keep it out of the cache so a later visit tries the tiles again.
           var flat = new Float64Array(RAYS);
           flat.fill(it.R);
-          return { ext: flat, antennaM: set_ ? it.antennaM : ANTENNA_M, source: set_ ? 'set' : 'default' };
+          return { ext: flat, antennaM: h, source: src, budget: NaN, budgetSource: 'none' };
         }
         var sample = sampler(set);
-        var est = set_ ? { m: it.antennaM, source: 'set' } : estimateAntenna(sample, it.lat, it.lon, it.links);
-        var res = { ext: terrainExtents(sample, it.lat, it.lon, it.R, est.m), antennaM: est.m, source: est.source };
+        var bud = budgetOf(sample, it, h, it.links);
+        var res = { ext: terrainExtents(sample, it.lat, it.lon, MAX_REACH_M, h, bud.db), antennaM: h, source: src, budget: bud.db, budgetSource: bud.source };
         // One entry per repeater: a newer one (it moved, its radius or its
         // links changed) replaces the older, which would only be dead weight.
         order = order.filter(function (k) {
@@ -397,7 +399,7 @@
           (items || []).forEach(function (it) {
             chain = chain.then(function () { return one(it); }).then(function (res) {
               out.set(it.pk, res.ext);
-              if (onProgress) onProgress(it.pk, res.ext, { antennaM: res.antennaM, source: res.source });
+              if (onProgress) onProgress(it.pk, res.ext, { antennaM: res.antennaM, source: res.source, budget: res.budget, budgetSource: res.budgetSource });
               return yieldFn();
             });
           });
@@ -435,9 +437,13 @@
     rays: RAYS,
     tileOf: tileOf,
     decodeTerrarium: decodeTerrarium,
-    rayCut: rayCut,
-    requiredHeight: requiredHeight,
-    estimateAntenna: estimateAntenna,
+    knifeEdgeLoss: knifeEdgeLoss,
+    freeSpaceLoss: freeSpaceLoss,
+    lossProfile: lossProfile,
+    pathLoss: pathLoss,
+    budgetOf: budgetOf,
+    reachOf: reachOf,
+    maxReach: MAX_REACH_M,
     defaultAntenna: ANTENNA_M,
     terrainExtents: terrainExtents,
     createTerrainProvider: createTerrainProvider,

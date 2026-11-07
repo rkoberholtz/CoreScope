@@ -531,7 +531,7 @@
             <label for="mcRegionFilter" class="sr-only">Show nodes with evidence for a region scope</label>
             <select id="mcRegionFilter" title="Show nodes that declare a region scope or were seen carrying its traffic">${regionFilterOptionsHtml([], filters.regionScope)}</select>
             <div id="mcRegionHint" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
-            <label for="mcScopeContours" title="Outline where each region scope reaches: each repeater's range from how far other repeaters are known to hear it, trimmed by line of sight over terrain and stretched to repeaters in its area that heard it. Each area covers the repeaters configured for the scope or seen carrying its traffic; groups of them with no known link between them get separate areas. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Region contours</label>
+            <label for="mcScopeContours" title="Outline where each region scope reaches: each repeater's range is how far its signal is expected to carry over the terrain, calibrated on the nodes known to hear it, and stretched to repeaters in its area that heard it. Each area covers the repeaters configured for the scope or seen carrying its traffic; groups of them with no known link between them get separate areas. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Region contours</label>
             <div id="mcScopeView" class="mc-scope-view" hidden></div>
             <div id="mcScopeList" class="mc-scope-list" hidden></div>
           </fieldset>
@@ -737,8 +737,8 @@
       // api()'s cache, fetched only while the contours are on.
       reachOverlay = window.ScopeContours.createOverlay(L, map, {
         loadLinks: () => api('/analytics/neighbor-graph', { ttl: CLIENT_TTL.analyticsRF }).then(d => (d && d.edges) || []),
-        // Line of sight over elevation tiles trims each repeater's reach;
-        // antenna heights the operator set in config replace the estimate.
+        // Path loss over elevation tiles sets each repeater's reach;
+        // antenna heights the operator set in config replace the 10 m default.
         terrain: window.TerrainReach ? window.TerrainReach.shared() : null,
         loadMapConfig: () => api('/config/map', { ttl: 3600 }),
       });
