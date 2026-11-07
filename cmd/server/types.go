@@ -1083,6 +1083,20 @@ type MapConfigResponse struct {
 	// TerrainTiles: mapDefaults.terrainTiles when it is not the default
 	// source; omitted otherwise.
 	TerrainTiles *TerrainTilesResponse `json:"terrainTiles,omitempty"`
+	// Contours: the usable fields of mapDefaults.contours (see
+	// cleanContours); omitted when none is set.
+	Contours *ContoursResponse `json:"contours,omitempty"`
+}
+
+// ContoursResponse tunes the region contours' reach; a field left out keeps
+// the overlay's default.
+type ContoursResponse struct {
+	BudgetPercentile *float64 `json:"budgetPercentile,omitempty"`
+	DefaultBudgetDb  *float64 `json:"defaultBudgetDb,omitempty"`
+	MaxReachKm       *float64 `json:"maxReachKm,omitempty"`
+	ReachRule        string   `json:"reachRule,omitempty"`
+	MarginKm         *float64 `json:"marginKm,omitempty"`
+	ReceiverHeightM  *float64 `json:"receiverHeightM,omitempty"`
 }
 
 // TerrainTilesResponse tells the region contours to skip terrain

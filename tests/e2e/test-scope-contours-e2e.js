@@ -597,7 +597,7 @@ const EDGES = [
   // Bay Edge: configured for #bay, not seen carrying it, 20 km south of
   // Oakland, past its radius and clear of the map's control panel.
   const BAY_EDGE = { public_key: pk('a6'), name: 'Bay Edge', role: 'repeater', lat: 37.62, lon: -122.25, last_seen: now, hash_size: 1, default_scope: '#bay' };
-  const bayEdgePage = async (edges) => {
+  const bayEdgePage = async (edges, contours) => {
     const ctx3 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const p3 = await ctx3.newPage();
     p3.on('pageerror', (e) => errors.push(e.message));
@@ -611,7 +611,7 @@ const EDGES = [
       // Terrain off: these steps are about which repeaters share an area,
       // so each reach is its plain radius (1 km for Bay Edge, nobody known
       // to hear it), not the default loss budget's ~16 km.
-      if (path === '/api/config/map') return json({ center: [37.785, -122.35], zoom: 11, terrainTiles: { disabled: true } });
+      if (path === '/api/config/map') return json(Object.assign({ center: [37.785, -122.35], zoom: 11, terrainTiles: { disabled: true } }, contours ? { contours } : {}));
       return json({});
     });
     await p3.goto(BASE + '/#/map?contours=1', { waitUntil: 'load' });
@@ -655,6 +655,16 @@ const EDGES = [
     await p3.waitForSelector('.leaflet-tooltip.mc-scope-tip', { timeout: 3000 });
     const text = await p3.$eval('.leaflet-tooltip.mc-scope-tip', (el) => el.textContent);
     assert(/^#bay · 3 nodes$/.test(text.trim()), 'tooltip: ' + text);
+    await ctx3.close();
+  });
+
+  await step('mapDefaults.contours.marginKm draws a tighter area, and the list says so', async () => {
+    // Bay Edge: a 1 km floor (nobody known to hear it, terrain off) with a
+    // 0.5 km margin instead of 2 km, so 2 km south of it is now outside.
+    const { ctx3, p3, probe } = await bayEdgePage(EDGES, { marginKm: 0.5 });
+    await p3.waitForFunction(() => /at least 1\.5 km round each/.test((document.getElementById('mcScopeList') || {}).textContent || ''), null, { timeout: 5000 });
+    const r = await probe();
+    assert(r.paths === 2 && r.south.onMap && r.south.inside === 0, '2 km south of Bay Edge is still inside: ' + JSON.stringify(r));
     await ctx3.close();
   });
 

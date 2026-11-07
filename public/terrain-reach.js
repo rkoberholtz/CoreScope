@@ -26,10 +26,13 @@
    localStorage is about 5 MB per site, shared with every other CoreScope
    setting.
 
-   Model, hardcoded for now (customizer is a follow-up): antennas 10 m above
-   ground at both ends unless the operator sets the repeater's
-   (mapDefaults.antennaHeights), 910 MHz, 120 m steps, out to 30 km. The
-   terrain is bare earth: buildings and trees are not in it. */
+   Model: antennas 10 m above ground at both ends unless the operator sets
+   them (mapDefaults.antennaHeights), 910 MHz, 120 m steps, out to 30 km.
+   The terrain is bare earth: buildings and trees are not in it. The
+   percentile, the default budget, the 30 km, the reach rule and the
+   receiver height the reach is drawn for are settings (setParams, from
+   mapDefaults.contours); the defaults caught the most known receptions,
+   which are heard mostly by rooftop repeaters. */
 (function () {
   'use strict';
 
@@ -117,9 +120,11 @@
   // north, clockwise) and returns the path loss to a receiver at each step:
   // out[k] at k * STEP_M, out[0] = 0. sample(lat, lon) gives ground
   // elevation in metres, NaN where unknown; unknown ground adds no loss, and
-  // an unknown receiver spot stands at the transmitter's ground height.
+  // an unknown receiver spot stands at the transmitter's ground height. The
+  // receiver's antenna is rxM above its ground (ANTENNA_M when not given).
   // O(steps²): every receiver spot looks back over every point before it.
-  function lossProfile(sample, lat, lon, bearing, maxM, antennaM) {
+  function lossProfile(sample, lat, lon, bearing, maxM, antennaM, rxM) {
+    var rx = rxM > 0 ? rxM : ANTENNA_M;
     var n = Math.floor(maxM / STEP_M), out = new Float32Array(n + 1);
     var dLat = Math.cos(bearing) / M_PER_DEG;
     var dLon = Math.sin(bearing) / (M_PER_DEG * Math.cos(lat * Math.PI / 180));
@@ -127,56 +132,71 @@
     for (var k = 0; k <= n; k++) g[k] = sample(lat + k * STEP_M * dLat, lon + k * STEP_M * dLon);
     var g0 = isFinite(g[0]) ? g[0] : 0;
     var hA = g0 + (antennaM > 0 ? antennaM : ANTENNA_M);
-    for (k = 1; k <= n; k++) out[k] = lossOver(g, k, STEP_M, hA, (isFinite(g[k]) ? g[k] : g0) + ANTENNA_M);
+    for (k = 1; k <= n; k++) out[k] = lossOver(g, k, STEP_M, hA, (isFinite(g[k]) ? g[k] : g0) + rx);
     return out;
   }
 
   // pathLoss of one link a → b ({ lat, lon }), the transmitter at a with
-  // antennaM (the default when not given), on the same model. NaN when the
-  // ground at either end is unknown.
-  function pathLoss(sample, a, b, antennaM) {
+  // antennaM and the listener at b with rxM (each the default when not
+  // given), on the same model. NaN when the ground at either end is unknown.
+  function pathLoss(sample, a, b, antennaM, rxM) {
     var D = distM(a, b);
     var k = Math.max(1, Math.round(D / STEP_M)), step = D / k;
     var g = new Float64Array(k + 1);
     for (var m = 0; m <= k; m++) g[m] = sample(a.lat + (b.lat - a.lat) * m / k, a.lon + (b.lon - a.lon) * m / k);
     if (!isFinite(g[0]) || !isFinite(g[k]) || !(D > 0)) return NaN;
-    return lossOver(g, k, step, g[0] + (antennaM > 0 ? antennaM : ANTENNA_M), g[k] + ANTENNA_M);
+    return lossOver(g, k, step, g[0] + (antennaM > 0 ? antennaM : ANTENNA_M), g[k] + (rxM > 0 ? rxM : ANTENNA_M));
   }
 
   // budgetOf: how much loss a repeater's signal is known to survive, from
-  // the nodes that heard it (links, [{ lat, lon }], within LINK_MAX_M): the
-  // BUDGET_PCT percentile of the loss over their paths, so one freak long
-  // link does not set it. With fewer than MIN_BUDGET_LINKS of them,
-  // DEFAULT_BUDGET_DB. { db, source: 'links' | 'default', links: how many
+  // the nodes that heard it (links, [{ lat, lon, antennaM? }], within
+  // LINK_MAX_M, each at its own antenna height when known): the pct
+  // percentile (opts.pct, BUDGET_PCT by default) of the loss over their
+  // paths, so one freak long link does not set it. A listener on a mast
+  // modelled at 10 m would make its path look lossier than it was, and the
+  // budget too big. With fewer than MIN_BUDGET_LINKS of them, opts.defaultDb
+  // (DEFAULT_BUDGET_DB). { db, source: 'links' | 'default', links: how many
   // counted }.
-  function budgetOf(sample, origin, antennaM, links) {
+  function budgetOf(sample, origin, antennaM, links, opts) {
+    var pct = opts && opts.pct >= 0 && opts.pct <= 1 ? opts.pct : BUDGET_PCT;
+    var dflt = opts && opts.defaultDb > 0 ? opts.defaultDb : DEFAULT_BUDGET_DB;
     var a = { lat: origin.lat, lon: origin.lon }, losses = [];
     (links || []).forEach(function (b) {
       if (!b || !(distM(a, b) <= LINK_MAX_M)) return;
-      var l = pathLoss(sample, a, b, antennaM);
+      var l = pathLoss(sample, a, b, antennaM, b.antennaM);
       if (isFinite(l)) losses.push(l);
     });
-    if (losses.length < MIN_BUDGET_LINKS) return { db: DEFAULT_BUDGET_DB, source: 'default', links: losses.length };
+    if (losses.length < MIN_BUDGET_LINKS) return { db: dflt, source: 'default', links: losses.length };
     losses.sort(function (x, y) { return x - y; });
-    var f = BUDGET_PCT * (losses.length - 1), i = Math.floor(f), t = f - i;
+    var f = pct * (losses.length - 1), i = Math.floor(f), t = f - i;
     var db = i + 1 < losses.length ? losses[i] + (losses[i + 1] - losses[i]) * t : losses[i];
     return { db: db, source: 'links', links: losses.length };
   }
 
-  // reachOf: the farthest step of a loss profile within budget, in metres
-  // (0 for none). Spots short of it that are over budget, the shadow behind
-  // a ridge before a hilltop, are taken as reached: the contours draw one
-  // reach per bearing.
-  function reachOf(profile, budget) {
-    for (var k = profile.length - 1; k > 0; k--) if (profile[k] <= budget) return k * STEP_M;
+  // reachOf: how far a loss profile stays within budget, in metres (0 for
+  // none). rule 'farthest' (the default): the farthest step within budget,
+  // the shadows short of it (behind a ridge before a hilltop) taken as
+  // reached, since the contours draw one reach per bearing; it caught the
+  // most real receptions on a live mesh. 'first': the last step before the
+  // first one over budget, the hilltop beyond a shadow left out; more
+  // conservative.
+  function reachOf(profile, budget, rule) {
+    var k;
+    if (rule === 'first') {
+      for (k = 1; k < profile.length && profile[k] <= budget; k++);
+      return (k - 1) * STEP_M;
+    }
+    for (k = profile.length - 1; k > 0; k--) if (profile[k] <= budget) return k * STEP_M;
     return 0;
   }
 
   // terrainExtents: reachOf over RAYS rays; ray i points at bearing
-  // i * 360/RAYS.
-  function terrainExtents(sample, lat, lon, maxM, antennaM, budget) {
+  // i * 360/RAYS. opts: rxM (the receiver height the reach is drawn for),
+  // rule (reachOf's).
+  function terrainExtents(sample, lat, lon, maxM, antennaM, budget, opts) {
+    var rxM = opts && opts.rxM, rule = opts && opts.rule;
     var out = new Float64Array(RAYS);
-    for (var i = 0; i < RAYS; i++) out[i] = reachOf(lossProfile(sample, lat, lon, i * 2 * Math.PI / RAYS, maxM, antennaM), budget);
+    for (var i = 0; i < RAYS; i++) out[i] = reachOf(lossProfile(sample, lat, lon, i * 2 * Math.PI / RAYS, maxM, antennaM, rxM), budget, rule);
     return out;
   }
 
@@ -235,6 +255,9 @@
     var maxChars = opts.maxChars || MAX_CHARS;
     // The tile source: url (a template, null for the default) or off.
     var source = { off: false, url: null };
+    // How optimistic the reach is (setParams, from mapDefaults.contours).
+    var params = defaultParams();
+    var paramsKey = '';
     // Both hold the current source's tiles only: setSource empties them,
     // and a fetch started under an earlier source is never stored.
     var tiles = new Map();     // 'x/y' → Float32Array; LRU order
@@ -293,9 +316,11 @@
     // set, and the links the budget is drawn from (a link added or lost
     // re-calibrates).
     function antennaKey(it) {
-      return (it.antennaM > 0 ? 'a' + it.antennaM : '') + 'L' + (it.links || []).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4); }).sort().join(';');
+      return (it.antennaM > 0 ? 'a' + it.antennaM : '') + 'L' + (it.links || []).map(function (b) {
+        return b.lat.toFixed(4) + ',' + b.lon.toFixed(4) + (b.antennaM > 0 ? '^' + b.antennaM : '');
+      }).sort().join(';');
     }
-    function keyOf(it) { return it.pk + '@' + it.lat + ',' + it.lon + '|' + Math.round(it.R) + '|' + antennaKey(it) + '|' + PARAMS + (source.url ? '|' + source.url : ''); }
+    function keyOf(it) { return it.pk + '@' + it.lat + ',' + it.lon + '|' + Math.round(it.R) + '|' + antennaKey(it) + '|' + PARAMS + paramsKey + (source.url ? '|' + source.url : ''); }
 
     function loadTile(x, y) {
       var k = x + '/' + y;
@@ -321,7 +346,7 @@
     // The tiles a repeater's rays can touch, the box of MAX_REACH_M round
     // it, and the paths to the nodes that heard it, for the budget.
     function tilesFor(it) {
-      var dLat = MAX_REACH_M / M_PER_DEG, dLon = MAX_REACH_M / (M_PER_DEG * Math.cos(it.lat * Math.PI / 180));
+      var dLat = params.maxReachM / M_PER_DEG, dLon = params.maxReachM / (M_PER_DEG * Math.cos(it.lat * Math.PI / 180));
       var n = it.lat + dLat, s = it.lat - dLat, w = it.lon - dLon, e = it.lon + dLon;
       (it.links || []).forEach(function (b) {
         if (!(distM(it, b) <= LINK_MAX_M)) return;
@@ -372,8 +397,9 @@
           return { ext: flat, antennaM: h, source: src, budget: NaN, budgetSource: 'none' };
         }
         var sample = sampler(set);
-        var bud = budgetOf(sample, it, h, it.links);
-        var res = { ext: terrainExtents(sample, it.lat, it.lon, MAX_REACH_M, h, bud.db), antennaM: h, source: src, budget: bud.db, budgetSource: bud.source };
+        var bud = budgetOf(sample, it, h, it.links, { pct: params.budgetPct, defaultDb: params.defaultBudgetDb });
+        var ext = terrainExtents(sample, it.lat, it.lon, params.maxReachM, h, bud.db, { rxM: params.receiverM, rule: params.reachRule });
+        var res = { ext: ext, antennaM: h, source: src, budget: bud.db, budgetSource: bud.source };
         // One entry per repeater: a newer one (it moved, its radius or its
         // links changed) replaces the older, which would only be dead weight.
         order = order.filter(function (k) {
@@ -411,6 +437,18 @@
       // setSource({ disabled }) turns terrain off; setSource({ url }) names a
       // Terrarium URL template; anything else is the default source. As
       // /api/config/map serves mapDefaults.terrainTiles.
+      // setParams takes mapDefaults.contours as /api/config/map serves it:
+      // budgetPercentile (50-100), defaultBudgetDb (90-150), maxReachKm
+      // (1-50), reachRule ('farthest' | 'first'), receiverHeightM (0.5-100).
+      // Anything missing or out of range keeps its default. Results are
+      // cached under the settings, so a change computes afresh.
+      setParams: function (c) {
+        params = paramsFrom(c);
+        var d = defaultParams();
+        paramsKey = Object.keys(d).every(function (k) { return params[k] === d[k]; }) ? '' :
+          '|p' + params.budgetPct + 'd' + params.defaultBudgetDb + 'm' + params.maxReachM + 'r' + params.reachRule + 'h' + params.receiverM;
+      },
+      params: function () { return Object.assign({}, params); },
       setSource: function (src) {
         var next = { off: !!(src && src.disabled), url: (src && typeof src.url === 'string' && src.url) || null };
         if (next.off !== source.off || next.url !== source.url) {
@@ -423,6 +461,23 @@
       sourceUrl: function () { return source.url; },
       stats: function () { return { computed: computed, tiles: tiles.size, cached: results.size }; },
     };
+  }
+
+  function defaultParams() {
+    return { budgetPct: BUDGET_PCT, defaultBudgetDb: DEFAULT_BUDGET_DB, maxReachM: MAX_REACH_M, reachRule: 'farthest', receiverM: ANTENNA_M };
+  }
+  // paramsFrom: mapDefaults.contours (the server has range-checked it; this
+  // checks again, so a hand-made object cannot draw nonsense).
+  function paramsFrom(c) {
+    var p = defaultParams();
+    if (!c) return p;
+    var inR = function (v, lo, hi) { return typeof v === 'number' && v >= lo && v <= hi; };
+    if (inR(c.budgetPercentile, 50, 100)) p.budgetPct = c.budgetPercentile / 100;
+    if (inR(c.defaultBudgetDb, 90, 150)) p.defaultBudgetDb = c.defaultBudgetDb;
+    if (inR(c.maxReachKm, 1, 50)) p.maxReachM = c.maxReachKm * 1000;
+    if (c.reachRule === 'farthest' || c.reachRule === 'first') p.reachRule = c.reachRule;
+    if (inR(c.receiverHeightM, 0.5, 100)) p.receiverM = c.receiverHeightM;
+    return p;
   }
 
   var sharedProvider = null;
