@@ -100,14 +100,18 @@ type Config struct {
 	MapDefaults struct {
 		Center []float64 `json:"center"`
 		Zoom   int       `json:"zoom"`
-		// AntennaHeights: metres above ground of repeater antennas the
-		// operator knows, by pubkey or unique hex prefix (>= 8 chars). The
-		// region contours use it in place of their estimate.
+		// AntennaHeights: metres above ground of antennas the operator
+		// knows, by pubkey or unique hex prefix (>= 8 chars). The region
+		// contours use them at both ends of a path, in place of 10 m.
 		AntennaHeights map[string]float64 `json:"antennaHeights,omitempty"`
 		// TerrainTiles: where the region contours fetch elevation from
 		// (Terrarium PNGs). false turns terrain off; a URL template with
 		// {z}, {x} and {y} names another source; unset is AWS Terrain Tiles.
 		TerrainTiles TerrainTiles `json:"terrainTiles,omitempty"`
+		// Contours: how optimistic the region contours' reach is
+		// (cleanContours has the ranges); unset fields keep the overlay's
+		// defaults.
+		Contours ContoursConfig `json:"contours,omitempty"`
 	} `json:"mapDefaults"`
 
 	Regions map[string]string `json:"regions"`
@@ -1318,6 +1322,17 @@ func (c *Config) RegionFallbackMaxHops() int {
 		return *c.RegionFallback.MaxHops
 	}
 	return regionFallbackMaxHopsDefault
+}
+
+// ContoursConfig is mapDefaults.contours. Pointers, so a field set to 0
+// (a margin of 0 km) is told apart from one not set.
+type ContoursConfig struct {
+	BudgetPercentile *float64 `json:"budgetPercentile,omitempty"`
+	DefaultBudgetDb  *float64 `json:"defaultBudgetDb,omitempty"`
+	MaxReachKm       *float64 `json:"maxReachKm,omitempty"`
+	ReachRule        string   `json:"reachRule,omitempty"`
+	MarginKm         *float64 `json:"marginKm,omitempty"`
+	ReceiverHeightM  *float64 `json:"receiverHeightM,omitempty"`
 }
 
 // TerrainTiles is mapDefaults.terrainTiles: Disabled for false, URL for a

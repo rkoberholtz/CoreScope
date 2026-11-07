@@ -2155,6 +2155,60 @@ func TestConfigMapTerrainTiles(t *testing.T) {
 	}
 }
 
+// mapDefaults.contours tunes how optimistic the region contours are. Each
+// field is passed on only when it is in range, and the block is left out
+// when nothing usable is set, so the overlay's defaults stand.
+func TestConfigMapContours(t *testing.T) {
+	get := func(raw string) string {
+		var cfg Config
+		if err := json.Unmarshal([]byte(`{"mapDefaults":{"contours":`+raw+`}}`), &cfg); err != nil {
+			t.Fatalf("%s: config failed to load: %v", raw, err)
+		}
+		db := setupTestDB(t)
+		seedTestData(t, db)
+		cfg.Port = 3000
+		srv := NewServer(db, &cfg, NewHub())
+		router := mux.NewRouter()
+		srv.RegisterRoutes(router)
+		req := httptest.NewRequest("GET", "/api/config/map", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		return w.Body.String()
+	}
+	all := get(`{"budgetPercentile": 75, "defaultBudgetDb": 115, "maxReachKm": 20, "reachRule": "first", "marginKm": 0.5, "receiverHeightM": 2}`)
+	want := `"contours":{"budgetPercentile":75,"defaultBudgetDb":115,"maxReachKm":20,"reachRule":"first","marginKm":0.5,"receiverHeightM":2}`
+	if !strings.Contains(all, want) {
+		t.Errorf("all set:\n got %s\nwant %s", all, want)
+	}
+	// A margin of 0 is a setting, not an absence.
+	if body := get(`{"marginKm": 0}`); !strings.Contains(body, `"contours":{"marginKm":0}`) {
+		t.Errorf("margin 0: %s", body)
+	}
+	// Out of range or unknown: dropped one by one, the rest kept.
+	mixed := get(`{"budgetPercentile": 30, "defaultBudgetDb": 200, "maxReachKm": 0, "reachRule": "longest", "marginKm": 9, "receiverHeightM": 2}`)
+	if !strings.Contains(mixed, `"contours":{"receiverHeightM":2}`) {
+		t.Errorf("mixed: %s", mixed)
+	}
+	for _, raw := range []string{`{}`, `{"budgetPercentile": 101, "reachRule": ""}`} {
+		if body := get(raw); strings.Contains(body, "contours") {
+			t.Errorf("%s: nothing usable, the block should be left out: %s", raw, body)
+		}
+	}
+}
+
+func TestConfigMapOmitsContoursWhenUnset(t *testing.T) {
+	_, router := setupTestServer(t)
+	req := httptest.NewRequest("GET", "/api/config/map", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if strings.Contains(w.Body.String(), "contours") {
+		t.Errorf("contours present without config: %s", w.Body.String())
+	}
+}
+
 func TestHandlerErrorPaths(t *testing.T) {
 	// Create a DB that will error on queries by dropping the view/tables
 	db := setupTestDB(t)

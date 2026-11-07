@@ -425,6 +425,7 @@ test('a one-way link counts only for the end that was heard', () => {
   assert.strictEqual((r.links.get('h0') || []).length, 1, 'a lobe toward the listener');
   assert.ok(!r.links.has('e1'), 'no lobe from the listener back');
   assert.deepStrictEqual(plain(r.partners.get('h0')).map(p => p.lon.toFixed(3)), [EAST.lon.toFixed(3)], 'the listener calibrates the loss budget');
+  assert.strictEqual(r.partners.get('h0')[0].pk, 'e1', 'with its key, to look up its antenna height');
   assert.ok(!r.partners.has('e1'));
   assert.deepStrictEqual(plain(r.peers.get('h0')), ['e1'], 'still joins the two for grouping');
   assert.deepStrictEqual(plain(r.peers.get('e1')), ['h0']);
@@ -1071,6 +1072,8 @@ function fakeTerrain(opts) {
   t.status = () => t.state;
   t.sources = [];
   t.setSource = (src) => t.sources.push(src);
+  t.paramsSet = [];
+  t.setParams = (c) => t.paramsSet.push({ c, before: t.calls.length });
   t.sourceUrl = () => opts.url || null;
   t.extentsFor = (items, onProgress) => {
     t.calls.push(items.map(it => ({ pk: it.pk, R: Math.round(it.R) })));
@@ -1187,6 +1190,59 @@ test('an operator height (longest matching prefix) is sent too, and requests wai
     assert.ok(h, 'never asked');
     assert.strictEqual(h.antennaM, 25, 'the longer prefix should win');
     assert.ok(Array.isArray(h.links), 'the budget still needs the links');
+  });
+});
+
+test('the listeners carry their configured antenna heights to the budget', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain();
+  const seen = [];
+  t.extentsFor = ((orig) => (items, onP) => { items.forEach(it => seen.push(it)); return orig(items, onP); })(t.extentsFor);
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadMapConfig: () => Promise.resolve({ antennaHeights: { e1: 37 } }) }, sync));
+  o.setVisible(true);
+  o.setLinks([two('h0', 'e1'), two('h0', 'n1')]);
+  o.setNodes([T_NODES[0], EAST, NORTH]);
+  return tick().then(tick).then(() => {
+    const h = seen.filter(it => it.pk === 'h0').pop();
+    assert.ok(h, 'never asked');
+    const byLon = new Map(h.links.map(b => [b.lon.toFixed(4), b.antennaM]));
+    assert.strictEqual(byLon.get(EAST.lon.toFixed(4)), 37, 'EAST at its configured 37 m');
+    assert.strictEqual(byLon.get(NORTH.lon.toFixed(4)), undefined, 'NORTH at the default');
+  });
+});
+
+test('mapDefaults.contours goes to the terrain provider before it is asked anything', () => {
+  const { L, map } = fakeLeaflet();
+  const t = fakeTerrain();
+  const contours = { budgetPercentile: 75, reachRule: 'first', receiverHeightM: 2 };
+  const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadMapConfig: () => Promise.resolve({ contours }) }, sync));
+  o.setVisible(true);
+  o.setNodes([T_NODES[0]]);
+  return tick().then(tick).then(() => {
+    assert.strictEqual(t.paramsSet.length, 1, 'setParams calls: ' + t.paramsSet.length);
+    assert.deepStrictEqual(t.paramsSet[0], { c: contours, before: 0 });
+    assert.ok(t.calls.length > 0, 'never asked');
+  });
+});
+
+test('mapDefaults.contours.marginKm sets the margin in both views, terrain or not, and the hint says so', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, Object.assign({ loadMapConfig: () => Promise.resolve({ contours: { marginKm: 0.5 } }) }, sync));
+  let hint = '';
+  o.onChange((items, visible, info) => { hint = JSON.stringify(info); });
+  const lone = { public_key: 'z1', lat: 45.0, lon: -100.0, transported_scopes: ['#solo'] };
+  o.setNodes([lone]); o.setVisible(true);
+  return tick().then(tick).then(() => {
+    for (const view of ['hull', 'detailed']) {
+      o.setView(view);
+      const rings = rec.polygons[rec.polygons.length - 1].rings;
+      assertAround(rings, lone, 1450, view);
+      const out = offset(lone.lat, lone.lon, 1900, 0);
+      assert.ok(!SC.inRings(rings, out.lat, out.lon), view + ': the 2 km margin is still drawn');
+    }
+    assert.ok(/"marginM":500/.test(hint), 'info: ' + hint);
+    assert.ok(/at least 1\.5 km round each/.test(SC.areaNote('hull', 500)), SC.areaNote('hull', 500));
+    assert.ok(/at least 3 km round each/.test(SC.areaNote('detailed')), 'default: ' + SC.areaNote('detailed'));
   });
 });
 

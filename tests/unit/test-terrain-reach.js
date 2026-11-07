@@ -177,6 +177,59 @@ test('terrainExtents walks 72 rays; the ridge side is short, the open side long'
   assert.ok(ext[18] > 4000, 'east ' + ext[18]);         // 90° = ray 18: free space to 105 dB is ~4.5 km
 });
 
+console.log('\n=== terrain-reach.js: heights and settings ===');
+
+test('a receiver lower to the ground loses more: the reach is drawn for receiverHeightM', () => {
+  const k = Math.round(10000 / STEP);
+  const at10 = TR.lossProfile(flat, O.lat, O.lon, deg(90), 12000, 10)[k];
+  const at2 = TR.lossProfile(flat, O.lat, O.lon, deg(90), 12000, 10, 2)[k];
+  // The earth's bulge reaches further into a low receiver's Fresnel zone.
+  assert.ok(at2 > at10 + 1, '2 m ' + at2 + ' vs 10 m ' + at10);
+  assert.strictEqual(TR.lossProfile(flat, O.lat, O.lon, deg(90), 12000, 10, 10)[k], at10, 'the default is 10 m');
+});
+
+test('pathLoss takes the listener\'s height: one on a mast behind the ridge loses less', () => {
+  const b = at(-4800, 0);
+  const low = TR.pathLoss(ridgeWest, O, b, 10), high = TR.pathLoss(ridgeWest, O, b, 10, 150);
+  assert.ok(high < low - 5, 'listener at 10 m ' + low + ', at 150 m ' + high);
+  assert.strictEqual(TR.pathLoss(ridgeWest, O, b, 10, 10), low, 'the default is 10 m');
+});
+
+test('budgetOf uses each listener\'s own height when it has one', () => {
+  // Three listeners behind the ridge, one of them on a 150 m mast.
+  const plain = [at(-4800, 0), at(-4800, 1000), at(-4800, -1000)];
+  const tall = plain.map((b, i) => (i === 0 ? Object.assign({ antennaM: 150 }, b) : b));
+  const p = TR.budgetOf(ridgeWest, O, 10, plain, { pct: 1 }).db, t = TR.budgetOf(ridgeWest, O, 10, tall, { pct: 0 }).db;
+  assert.ok(t < TR.budgetOf(ridgeWest, O, 10, plain, { pct: 0 }).db - 5, 'tall listener ' + t);
+  assert.ok(p >= TR.budgetOf(ridgeWest, O, 10, tall, { pct: 1 }).db, 'never raised');
+});
+
+test('budgetOf: the percentile and the default are settings', () => {
+  const links = [at(1000, 0), at(0, 2000), at(-3000, 0), at(0, -4000)];
+  const losses = links.map((b) => TR.pathLoss(flat, O, b)).sort((x, y) => x - y);
+  close(TR.budgetOf(flat, O, 10, links, { pct: 0.5 }).db, (losses[1] + losses[2]) / 2, 1e-9, 'median');
+  close(TR.budgetOf(flat, O, 10, links, { pct: 1 }).db, losses[3], 1e-9, 'max');
+  const one = TR.budgetOf(flat, O, 10, [at(1000, 0)], { defaultDb: 110 });
+  assert.deepStrictEqual([one.db, one.source], [110, 'default']);
+});
+
+test('reachOf rule "first" stops at the first spot over budget; "farthest" (the default) reaches past it', () => {
+  const L = Float32Array.from([0, 90, 130, 95, 140]);
+  assert.strictEqual(TR.reachOf(L, 100, 'first'), 1 * STEP);
+  assert.strictEqual(TR.reachOf(L, 100, 'farthest'), 3 * STEP);
+  assert.strictEqual(TR.reachOf(L, 100), 3 * STEP);
+  assert.strictEqual(TR.reachOf(L, 200, 'first'), 4 * STEP);
+});
+
+test('with rule "first" the hilltop past a valley is not reached', () => {
+  const t = terrain((x) => (x < -1850 && x > -2150 ? 150 : (x < -9000 && x > -11000 ? 300 : 50)));
+  const L = TR.lossProfile(t, O.lat, O.lon, deg(270), 14000);
+  const budget = L[Math.round(10000 / STEP)] + 1;
+  const ext = TR.terrainExtents(t, O.lat, O.lon, 14000, 10, budget, { rule: 'first' });
+  assert.ok(ext[54] < 3000, 'west ' + ext[54]);
+  assert.ok(TR.terrainExtents(t, O.lat, O.lon, 14000, 10, budget)[54] >= 10000, 'farthest still reaches it');
+});
+
 console.log('\n=== terrain-reach.js: provider ===');
 
 // Fake tile fetcher: renders a terrain function into z11 tiles, as the
@@ -285,6 +338,38 @@ test('a link added or lost re-calibrates the budget', () => {
   return p.extentsFor([Object.assign({ links: [at(3000, 0)] }, base)])
     .then(() => p.extentsFor([Object.assign({ links: [at(3000, 0), at(0, 3000)] }, base)]))
     .then(() => assert.strictEqual(p.stats().computed, 2));
+});
+
+test('setParams: each setting changes the reach, invalid ones are ignored, and a change computes afresh', () => {
+  const f = tileFetcher((x) => (x < -1850 && x > -2150 ? 150 : 50));
+  const p = TR.createTerrainProvider({ fetchTile: f.fetchTile, storage: memStore(), yieldFn: immediate });
+  const links = [at(0, 6000), at(5000, 0), at(0, -3000)];
+  const it = { pk: 'a', lat: O.lat, lon: O.lon, R: 6000, links };
+  const run = () => p.extentsFor([it]).then((m) => Array.from(m.get('a')));
+  let base;
+  return run().then((e) => {
+    base = e;
+    p.setParams({ budgetPercentile: 50 });
+    return run();
+  }).then((e) => {
+    assert.ok(e[18] < base[18], 'a lower percentile shrinks the open side: ' + e[18] + ' vs ' + base[18]);
+    p.setParams({ receiverHeightM: 2 });
+    return run();
+  }).then((e) => {
+    assert.ok(e[18] < base[18], 'a 2 m receiver shrinks the open side: ' + e[18] + ' vs ' + base[18]);
+    p.setParams({ maxReachKm: 3, defaultBudgetDb: 200 });
+    return p.extentsFor([{ pk: 'b', lat: O.lat, lon: O.lon, R: 6000 }]);
+  }).then((m) => {
+    assert.ok(Array.from(m.get('b')).every((v) => v <= 3000), 'capped at 3 km: ' + Math.max(...m.get('b')));
+    p.setParams({ budgetPercentile: 5, reachRule: 'longest', maxReachKm: -1, receiverHeightM: 0 });
+    const q = p.params();
+    assert.deepStrictEqual([q.budgetPct, q.reachRule, q.maxReachM, q.receiverM], [0.9, 'farthest', 30000, 10], 'invalid settings keep the defaults');
+    return run();
+  }).then((e) => {
+    assert.deepStrictEqual(e, base, 'back to the defaults, the first result again');
+    // One entry per repeater: each change of settings computed it afresh.
+    assert.strictEqual(p.stats().computed, 5, 'computed ' + p.stats().computed);
+  });
 });
 
 test('two requests for the same tile share one fetch', () => {
