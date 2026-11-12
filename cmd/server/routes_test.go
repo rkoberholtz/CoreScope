@@ -2042,122 +2042,11 @@ func TestConfigMapWithCustomDefaults(t *testing.T) {
 	}
 }
 
-// The region contours read per-repeater antenna heights from here. Keys are
-// pubkeys or unique hex prefixes (>= 8 chars), lowercased; anything that is
-// not hex or not a plausible height above ground is dropped.
-func TestConfigMapAntennaHeights(t *testing.T) {
-	db := setupTestDB(t)
-	seedTestData(t, db)
-	cfg := &Config{Port: 3000}
-	cfg.MapDefaults.AntennaHeights = map[string]float64{
-		"78E60E1AF2FAE339": 25, // prefix, uppercase: kept, lowercased
-		"0351561ed221d125d5ecc40b751c33c9935357453e7a2ae90b056f8570cc01fb": 8.5, // full key
-		"abc":               12,  // too short to identify a node
-		"not-a-hex-key-xyz": 12,  // not hex
-		"aaaaaaaabbbbbbbb":  0,   // not a height
-		"ccccccccdddddddd":  500, // not a height above ground
-	}
-	hub := NewHub()
-	srv := NewServer(db, cfg, hub)
-	router := mux.NewRouter()
-	srv.RegisterRoutes(router)
-
-	req := httptest.NewRequest("GET", "/api/config/map", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	var body MapConfigResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]float64{
-		"78e60e1af2fae339": 25,
-		"0351561ed221d125d5ecc40b751c33c9935357453e7a2ae90b056f8570cc01fb": 8.5,
-	}
-	if len(body.AntennaHeights) != len(want) {
-		t.Fatalf("antennaHeights = %v, want %v", body.AntennaHeights, want)
-	}
-	for k, v := range want {
-		if body.AntennaHeights[k] != v {
-			t.Errorf("antennaHeights[%s] = %v, want %v", k, body.AntennaHeights[k], v)
-		}
-	}
-}
-
-func TestConfigMapOmitsAntennaHeightsWhenUnset(t *testing.T) {
-	_, router := setupTestServer(t)
-	req := httptest.NewRequest("GET", "/api/config/map", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	if strings.Contains(w.Body.String(), "antennaHeights") {
-		t.Errorf("antennaHeights present without config: %s", w.Body.String())
-	}
-}
-
-// mapDefaults.terrainTiles takes false (no terrain), a Terrarium URL
-// template, or nothing (the default source). Anything else falls back to
-// the default rather than failing the whole config.
-func TestTerrainTilesConfigParses(t *testing.T) {
-	cases := []struct {
-		in       string
-		disabled bool
-		url      string
-	}{
-		{`false`, true, ""},
-		{`true`, false, ""},
-		{`"https://tiles.example.org/terrarium/{z}/{x}/{y}.png"`, false, "https://tiles.example.org/terrarium/{z}/{x}/{y}.png"},
-		{`"  http://10.0.0.5/t/{z}/{x}/{y}.png "`, false, "http://10.0.0.5/t/{z}/{x}/{y}.png"},
-		{`"ftp://tiles.example.org/{z}/{x}/{y}.png"`, false, ""}, // not http(s)
-		{`"https://tiles.example.org/{z}/{x}.png"`, false, ""},   // no {y}
-		{`""`, false, ""},
-		{`12`, false, ""},
-		{`{"url": "x"}`, false, ""},
-	}
-	for _, c := range cases {
-		var cfg Config
-		if err := json.Unmarshal([]byte(`{"mapDefaults":{"terrainTiles":`+c.in+`}}`), &cfg); err != nil {
-			t.Fatalf("%s: config failed to load: %v", c.in, err)
-		}
-		got := cfg.MapDefaults.TerrainTiles
-		if got.Disabled != c.disabled || got.URL != c.url {
-			t.Errorf("%s: got %+v, want disabled=%v url=%q", c.in, got, c.disabled, c.url)
-		}
-	}
-}
-
-func TestConfigMapTerrainTiles(t *testing.T) {
-	get := func(tt TerrainTiles) string {
-		db := setupTestDB(t)
-		seedTestData(t, db)
-		cfg := &Config{Port: 3000}
-		cfg.MapDefaults.TerrainTiles = tt
-		srv := NewServer(db, cfg, NewHub())
-		router := mux.NewRouter()
-		srv.RegisterRoutes(router)
-		req := httptest.NewRequest("GET", "/api/config/map", nil)
-		w := httptest.NewRecorder()
-		router.ServeHTTP(w, req)
-		if w.Code != 200 {
-			t.Fatalf("expected 200, got %d", w.Code)
-		}
-		return w.Body.String()
-	}
-	if body := get(TerrainTiles{Disabled: true}); !strings.Contains(body, `"terrainTiles":{"disabled":true}`) {
-		t.Errorf("disabled: %s", body)
-	}
-	if body := get(TerrainTiles{URL: "https://tiles.example.org/{z}/{x}/{y}.png"}); !strings.Contains(body, `"terrainTiles":{"url":"https://tiles.example.org/{z}/{x}/{y}.png"}`) {
-		t.Errorf("url: %s", body)
-	}
-	if body := get(TerrainTiles{}); strings.Contains(body, "terrainTiles") {
-		t.Errorf("default source should leave the field out: %s", body)
-	}
-}
-
-// mapDefaults.contours tunes how optimistic the region contours are. Each
-// field is passed on only when it is in range, and the block is left out
-// when nothing usable is set, so the overlay's defaults stand.
+// mapDefaults.contours sizes the region contours: one octagon radius for
+// the mesh, the width of the band between two linked repeaters, and the
+// operator's own radius for a repeater. Each value is passed on only when it
+// is usable, and the block is left out when nothing is, so the overlay's
+// defaults stand.
 func TestConfigMapContours(t *testing.T) {
 	get := func(raw string) string {
 		var cfg Config
@@ -2178,24 +2067,59 @@ func TestConfigMapContours(t *testing.T) {
 		}
 		return w.Body.String()
 	}
-	all := get(`{"budgetPercentile": 75, "defaultBudgetDb": 115, "maxReachKm": 20, "reachRule": "first", "marginKm": 0.5, "receiverHeightM": 2}`)
-	want := `"contours":{"budgetPercentile":75,"defaultBudgetDb":115,"maxReachKm":20,"reachRule":"first","marginKm":0.5,"receiverHeightM":2}`
-	if !strings.Contains(all, want) {
-		t.Errorf("all set:\n got %s\nwant %s", all, want)
+	contours := func(raw string) *ContoursResponse {
+		var body MapConfigResponse
+		if err := json.Unmarshal([]byte(get(raw)), &body); err != nil {
+			t.Fatalf("%s: response: %v", raw, err)
+		}
+		return body.Contours
 	}
-	// A margin of 0 is a setting, not an absence.
-	if body := get(`{"marginKm": 0}`); !strings.Contains(body, `"contours":{"marginKm":0}`) {
-		t.Errorf("margin 0: %s", body)
+
+	all := contours(`{"radiusKm": 6, "tubeWidthKm": 1.5, "radii": {
+		"78E60E1AF2FAE339": 2,
+		"0351561ed221d125d5ecc40b751c33c9935357453e7a2ae90b056f8570cc01fb": 12.5,
+		"abc": 3,
+		"not-a-hex-key-xyz": 3,
+		"aaaaaaaabbbbbbbb": 0,
+		"ccccccccdddddddd": 500
+	}}`)
+	if all == nil || all.RadiusKm == nil || *all.RadiusKm != 6 || all.TubeWidthKm == nil || *all.TubeWidthKm != 1.5 {
+		t.Fatalf("all set: %+v", all)
 	}
-	// Out of range or unknown: dropped one by one, the rest kept.
-	mixed := get(`{"budgetPercentile": 30, "defaultBudgetDb": 200, "maxReachKm": 0, "reachRule": "longest", "marginKm": 9, "receiverHeightM": 2}`)
-	if !strings.Contains(mixed, `"contours":{"receiverHeightM":2}`) {
+	// Keys are pubkeys or unique hex prefixes (>= 8 chars), lowercased; one
+	// too short to name a node, not hex, or with a radius out of range is
+	// dropped.
+	wantRadii := map[string]float64{
+		"78e60e1af2fae339": 2,
+		"0351561ed221d125d5ecc40b751c33c9935357453e7a2ae90b056f8570cc01fb": 12.5,
+	}
+	if len(all.Radii) != len(wantRadii) {
+		t.Fatalf("radii = %v, want %v", all.Radii, wantRadii)
+	}
+	for k, v := range wantRadii {
+		if all.Radii[k] != v {
+			t.Errorf("radii[%s] = %v, want %v", k, all.Radii[k], v)
+		}
+	}
+
+	// Out of range: dropped one by one, the rest kept.
+	mixed := get(`{"radiusKm": 400, "tubeWidthKm": 0.5, "radii": {"abc": 3}}`)
+	if !strings.Contains(mixed, `"contours":{"tubeWidthKm":0.5}`) {
 		t.Errorf("mixed: %s", mixed)
 	}
-	for _, raw := range []string{`{}`, `{"budgetPercentile": 101, "reachRule": ""}`} {
+	if body := get(`{"radiusKm": 0.5, "tubeWidthKm": 10}`); !strings.Contains(body, `"contours":{"radiusKm":0.5,"tubeWidthKm":10}`) {
+		t.Errorf("the limits themselves are in range: %s", body)
+	}
+	for _, raw := range []string{`{}`, `{"radiusKm": 0.4, "tubeWidthKm": 0.1}`, `{"radiusKm": 31, "radii": {}}`} {
 		if body := get(raw); strings.Contains(body, "contours") {
 			t.Errorf("%s: nothing usable, the block should be left out: %s", raw, body)
 		}
+	}
+	// Settings of the reach model this replaced no longer mean anything: a
+	// config that still has them loads, and they are not served.
+	old := get(`{"budgetPercentile": 75, "maxReachKm": 20, "reachRule": "first", "marginKm": 0.5, "radiusKm": 3}`)
+	if !strings.Contains(old, `"contours":{"radiusKm":3}`) {
+		t.Errorf("old fields: %s", old)
 	}
 }
 
@@ -2206,6 +2130,32 @@ func TestConfigMapOmitsContoursWhenUnset(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if strings.Contains(w.Body.String(), "contours") {
 		t.Errorf("contours present without config: %s", w.Body.String())
+	}
+}
+
+// A config written for the terrain model (antenna heights, an elevation
+// source) still loads; neither is served any more.
+func TestConfigMapIgnoresRetiredTerrainSettings(t *testing.T) {
+	var cfg Config
+	raw := `{"mapDefaults":{"center":[40,-75],"zoom":10,"antennaHeights":{"78e60e1af2fae339":25},"terrainTiles":false}}`
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("config failed to load: %v", err)
+	}
+	db := setupTestDB(t)
+	seedTestData(t, db)
+	cfg.Port = 3000
+	srv := NewServer(db, &cfg, NewHub())
+	router := mux.NewRouter()
+	srv.RegisterRoutes(router)
+	req := httptest.NewRequest("GET", "/api/config/map", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	body := w.Body.String()
+	if w.Code != 200 || !strings.Contains(body, `"zoom":10`) {
+		t.Fatalf("map config: %d %s", w.Code, body)
+	}
+	if strings.Contains(body, "antennaHeights") || strings.Contains(body, "terrainTiles") {
+		t.Errorf("retired settings served: %s", body)
 	}
 }
 

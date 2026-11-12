@@ -1,13 +1,10 @@
-/* Region contours for the map and live pages: where each region scope reaches.
+/* Region contours for the map and live pages: where each region scope is.
 
-   For each MeshCore region scope, outline the general area its nodes reach,
-   from every node that is configured for it (configuredScopes: its default
-   scope, or the newest region list it reported, through an observer or a
-   companion's regions query) or whose full pubkey appears in the path of traffic for it
-   (transported_scopes, #1751/#1902): one area per group of those members
-   joined by links heard either way (linkedGroups). A scoped flood crosses
-   from one group to another only through a repeater that forwards the
-   scope, so an area never spans a gap no such link is known to bridge. A repeater
+   For each MeshCore region scope, mark every node that is configured for it
+   (configuredScopes: its default scope, or the newest region list it
+   reported, through an observer or a companion's regions query) or whose
+   full pubkey appears in the path of traffic for it (transported_scopes,
+   #1751/#1902). A repeater
    forwards a scoped flood when the scope is in its region map without the
    deny-flood flag (firmware simple_repeater: onRecvPacket's
    region_map.findMatch(pkt, REGION_DENY_FLOOD), allowPacketForward). Its
@@ -23,98 +20,59 @@
    carrying counts only for regions on it (carriedScopes). The click box
    says which evidence each member has.
 
-   A node's reach, in 72 directions (reachFor):
-     max( terrain reach, or R without terrain; link lobe; 1 km floor )
-   - The terrain reach is the farthest point in that direction whose path
-     loss over the elevation data (free space plus diffraction over the
-     worst ridge) stays within the loss the repeater is known to survive:
-     the 90th percentile over the paths to the nodes that heard it, up to
-     30 km (terrain-reach.js). A line-of-sight cut did worse than a plain
-     circle; this beats one (scripts/validate-reach.js).
-   - R, used where there is no terrain (turned off, or tiles failed), comes
-     from the links in the neighbor graph over which another node heard it
-     (linkReach; every observation proves one direction only): the 75th
-     percentile of their distances × 1.1, 1-20 km; 1 km for a node nobody
-     is known to hear.
-   - Each repeater in the same area that heard it still stretches that
-     bearing out past it: full length within 5° (one ray) of it, so the
-     partner is inside even between two rays, tapering to nothing at
-     ±11.25°. Evidence always beats the model. A link to a repeater outside
-     the area (a hilltop site 60 km off) stretches nothing: it proves the
-     site heard it, not that the ground between them is covered.
-   Interpolating between the 72 directions keeps the shape smooth.
+   The area is schematic, drawn from what is known and nothing more:
+   - an octagon of a fixed radius round every member: one radius for the
+     whole mesh (4 km unless mapDefaults.contours.radiusKm says otherwise),
+     or the member's own from mapDefaults.contours.radii, set by an operator
+     who knows the site;
+   - a narrow band between two members that hear each other (a link in the
+     neighbor graph heard in either direction, never an ambiguous one) when
+     their octagons do not already meet. It is narrower than an octagon on
+     purpose: a link proves the far end heard the near one, not that the
+     ground between them is covered.
+   How far a repeater really reaches is not modelled. Earlier versions
+   estimated it from terrain, path loss and link distances; held against the
+   receptions the mesh actually logged, that did little better than a
+   circle of the same area and drew a precise-looking edge the data could
+   not support.
 
-   Each group's outline is drawn in one of two views (setView), each built
-   from its members' reach shapes and each containing every member's whole shape,
-   then grown by a 2 km margin with rounded corners, so no member is closer
-   to the border than 3 km (the 1 km floor and the margin), and a linked
-   repeater at a corner is never on the line:
-   - hull: the convex hull (scopeHull), everything between their farthest
-     edges included. The default.
-   - detailed: shrink-wrapped (wrapShapes): their combined reach with every
-     gap, bay and notch narrower than 15 km filled, between repeaters and
-     between one repeater's spokes alike; groups further apart stay separate
-     areas.
-   Outlines are cached per view and scope, and recomputed only when its
-   members, their positions, their reach or their links change; a group's
-   outline is shared by every scope with the same group.
+   A scope's shapes are filled as one area and outlined once round the
+   outside (scope-geometry.js). They are cached by what they are built from
+   (members, positions, radii, links), so scopes with the same members share
+   one, and nothing is rebuilt until one of those changes.
 
    Hover and click are hit-tested from the map's own events, not from the
-   outlines: the live map draws canvases above them, and overlapping scopes
+   areas: the live map draws canvases above them, and overlapping scopes
    should all be named. Hover names the scopes under the cursor; a click
    lists the repeaters configured for or carrying each of them, and how many
-   separate groups a split scope has. The outlines take no pointer events,
-   so they never block a click on anything else.
+   separate groups (linkedGroups: members no known link joins) a scope has.
+   The areas take no pointer events, so they never block a click on
+   anything else.
 
-   The radius rule, floor, margin, terrain model, wrap gap, default view and
-   pulse duration are fixed for now; exposing them in the customizer is a
-   follow-up. */
+   The radius, the band width and the pulse duration are set in config.json
+   or fixed for now; exposing them in the customizer is a follow-up. */
 (function () {
   'use strict';
 
-  // No reach is ever drawn closer than this, whatever the terrain says: a
-  // repeater that carries a scope always has at least this much of the
-  // region round it, edge repeaters included. Within ~1 km a LoRa signal
-  // from a mast mostly gets round nearby terrain anyway.
-  var DEFAULT_FLOOR_M = 1000;
-  // Radius rule (linkReach): 75th percentile of the distances a node was
-  // heard over, × LINK_MARGIN, clamped; a node nobody is known to hear gets
-  // NO_LINK_RADIUS_M.
-  var RADIUS_PCT = 0.75;
-  var MIN_RADIUS_M = 1000;
-  var MAX_RADIUS_M = 20000;
-  var NO_LINK_RADIUS_M = 1000;
+  // The octagon radius when the operator sets none, and the limits a
+  // configured one is held to (the server applies the same).
+  var DEFAULT_RADIUS_M = 4000;
+  var MIN_RADIUS_M = 500;
+  var MAX_RADIUS_M = 30000;
+  // A link band's full width when the operator sets none: this fraction of
+  // the radius, so it reads as a link, not as an area.
+  var TUBE_RATIO = 1 / 3;
+  var MIN_TUBE_M = 200;
+  var MAX_TUBE_M = 10000;
   var DEFAULT_PULSE_MS = 1500;
-  // Every area is drawn this much past its members' reach, round its
-  // corners too: a little generous, so a repeater at a corner or just past
-  // a lobe's tip is not left on the line. With the floor, every member has
-  // at least 3 km of area round it.
-  var AREA_MARGIN_M = 2000;
-  // From scope-geometry.js, loaded first: 72 rays of 5°, the same as
-  // terrain-reach.js walks.
+  // From scope-geometry.js, loaded first.
   var G = window.ScopeGeometry;
-  if (!G) throw new Error('scope-contours.js needs scope-geometry.js loaded first');
-  var SECTORS = G.sectors;
-  var SECTOR_RAD = G.sectorRad;
-  // A proven link's lobe is at full length within one ray of its bearing,
-  // so both rays either side of it reach the partner, and tapers to nothing
-  // this far either side of it.
-  var LOBE_HALF_RAD = 11.25 * Math.PI / 180;
-  // A link proves the far node hears this one; the outline is drawn a little
-  // past it so the linked node sits inside rather than on the edge.
-  var LINK_MARGIN = 1.1;
   var PANE = 'mcScopeContoursPane';
-  // Under overlayPane (400) and markerPane (600): outlines never cover a
+  // Under overlayPane (400) and markerPane (600): areas never cover a
   // route line or a node marker.
   var PANE_Z = 350;
   var PALETTE_SIZE = 8;
-  var M_PER_DEG = G.mPerDeg;
   var HIDDEN_KEY = 'meshcore-scope-contours-hidden';
-  var VIEW_KEY = 'meshcore-scope-contours-view';
-  // Area views, the default first.
-  var VIEWS = ['hull', 'detailed'];
-  // The widest gap the wrap view fills (scope-geometry.js).
-  var WRAP_GAP_M = G.wrapGapM;
 
   // normRegion mirrors the server's normScope (scope_audit.go): strip one
   // leading '#', nothing else, so the map, the audit and the live feed spell
@@ -259,83 +217,33 @@
     return out;
   }
 
-  // ── Reach ────────────────────────────────────────────────────────────────
+  // ── Links ────────────────────────────────────────────────────────────────
 
-  function angleDiff(a, b) {
-    var d = (a - b) % (2 * Math.PI);
-    if (d > Math.PI) d -= 2 * Math.PI;
-    if (d < -Math.PI) d += 2 * Math.PI;
-    return Math.abs(d);
-  }
-
-  // percentile of an ascending array, interpolating between ranks.
-  function percentile(sorted, p) {
-    var f = p * (sorted.length - 1), i = Math.floor(f), t = f - i;
-    return i + 1 < sorted.length ? sorted[i] + (sorted[i + 1] - sorted[i]) * t : sorted[i];
-  }
-
-  // linkReach reads what the neighbor graph proves about each node's reach.
-  // A link counts in the direction it was heard: heard_by_target means the
-  // target received the source, which proves how far the source's signal
-  // goes, not the target's. Only links between two placed nodes count, with
-  // at least one direction seen (bidirectional alone proves nothing), never
-  // an ambiguous one (a hop prefix that could be several nodes).
-  // O(links × SECTORS).
-  //   radius: Map pk → R, how far the node regularly reaches: the 75th
-  //           percentile of the distances it was heard over × 1.1, clamped
-  //           to 1-20 km. It ignores one exceptional long link and a crowd
-  //           of close neighbours alike.
-  //   links:  Map pk → [{ pk, bearing, len }], each partner that heard it,
-  //           its bearing and its distance × 1.1, for lobeOf.
-  //   partners: Map pk → [{ lat, lon, pk }] of the nodes that heard it, on
-  //           which the terrain provider calibrates its loss budget.
-  //   peers:  Map pk → [pk] of the other ends, heard either way, co-located
-  //           ones included, for linkedGroups.
-  function linkReach(nodes, edges) {
-    var pos = new Map();
-    (nodes || []).forEach(function (n) { var p = position(n); if (p && n.public_key) pos.set(n.public_key, p); });
-    var dists = new Map(), links = new Map(), partners = new Map(), peers = new Map();
+  // memberLinks reads the neighbor graph as Map pk → [pk]: for each node,
+  // the nodes it has a link with. A link counts when at least one direction
+  // of it was heard (bidirectional alone proves nothing), both ends are
+  // placed, and it is not ambiguous (a hop prefix that could be several
+  // nodes). O(links).
+  function memberLinks(nodes, edges) {
+    var placed = new Set();
+    (nodes || []).forEach(function (n) { if (n.public_key && position(n)) placed.add(n.public_key); });
+    var peers = new Map();
     function peer(pk, other) { var l = peers.get(pk); if (l) l.push(other); else peers.set(pk, [other]); }
-    function partner(pk, p, other) { var l = partners.get(pk), q = { lat: p[0], lon: p[1], pk: other }; if (l) l.push(q); else partners.set(pk, [q]); }
-    function link(pk, other, bearing, len) {
-      var l = links.get(pk), k = { pk: other, bearing: bearing, len: len };
-      if (l) l.push(k); else links.set(pk, [k]);
-    }
-    function dist(pk, d) { var l = dists.get(pk); if (l) l.push(d); else dists.set(pk, [d]); }
     (edges || []).forEach(function (e) {
       if (!e || e.ambiguous || e.source === e.target) return;
-      var srcHeard = e.heard_by_target > 0, tgtHeard = e.heard_by_source > 0;
-      if (!srcHeard && !tgtHeard) return;
-      var a = pos.get(e.source), b = pos.get(e.target);
-      if (!a || !b) return;
-      var cos = Math.cos(((a[0] + b[0]) / 2) * Math.PI / 180);
-      var dx = (b[1] - a[1]) * M_PER_DEG * cos, dy = (b[0] - a[0]) * M_PER_DEG;
-      var d = Math.sqrt(dx * dx + dy * dy), fwd = Math.atan2(dx, dy);
+      if (!(e.heard_by_target > 0) && !(e.heard_by_source > 0)) return;
+      if (!placed.has(e.source) || !placed.has(e.target)) return;
       peer(e.source, e.target); peer(e.target, e.source);
-      if (srcHeard) {
-        dist(e.source, d); partner(e.source, b, e.target);
-        if (d > 0) link(e.source, e.target, fwd, d * LINK_MARGIN);
-      }
-      if (tgtHeard) {
-        dist(e.target, d); partner(e.target, a, e.source);
-        if (d > 0) link(e.target, e.source, fwd + Math.PI, d * LINK_MARGIN);
-      }
     });
-    var radius = new Map();
-    dists.forEach(function (l, pk) {
-      l.sort(function (x, y) { return x - y; });
-      var r = percentile(l, RADIUS_PCT) * LINK_MARGIN;
-      radius.set(pk, Math.min(MAX_RADIUS_M, Math.max(MIN_RADIUS_M, r)));
-    });
-    return { radius: radius, links: links, partners: partners, peers: peers };
+    return peers;
   }
 
   // linkedGroups splits a scope's members into groups joined by links,
-  // heard either way, between members (peers, from linkReach; null: no links yet), in
+  // heard either way, between members (peers, from memberLinks; null: no links yet), in
   // member order. A scoped flood crosses from one group to another only
   // through a repeater that forwards the scope, so a link through a
-  // non-member joins nothing, and each group gets an area of its own: one
-  // hull over all of them would paint the gap between as reached.
+  // non-member joins nothing. Nothing is drawn between two groups; the click
+  // box says how many a scope has.
   // Union-find, O(members + their links).
   function linkedGroups(members, peers) {
     var idx = new Map();
@@ -360,62 +268,6 @@
     });
     return out;
   }
-
-  // lobeOf stretches each of a node's links (from linkReach) along its own
-  // bearing out to its distance × 1.1: at full length on the rays within 5°
-  // of it, so interpolating between them still reaches past the partner,
-  // then tapering to nothing at ±11.25°. Float64Array(SECTORS), or null
-  // with no links. The overlay passes only the links to partners in the
-  // same area: a link proves the partner heard the node, not that the
-  // ground between them is covered, so a lobe toward a hilltop repeater in
-  // another area would only inflate this one.
-  function lobeOf(links) {
-    if (!links || !links.length) return null;
-    var e = new Float64Array(SECTORS);
-    links.forEach(function (k) {
-      for (var i = 0; i < SECTORS; i++) {
-        var off = angleDiff(i * SECTOR_RAD, k.bearing);
-        if (off >= LOBE_HALF_RAD) continue;
-        var v = off <= SECTOR_RAD ? k.len : k.len * (1 - (off - SECTOR_RAD) / (LOBE_HALF_RAD - SECTOR_RAD));
-        if (v > e[i]) e[i] = v;
-      }
-    });
-    return e;
-  }
-
-  // reachFor combines the three into per-sector reach:
-  //   max( terrain reach, or R without it; link lobe; floor )
-  // terrain is null when there is none (yet, or terrain is off): the radius
-  // then stands all round. The terrain reach is calibrated on the node's
-  // own receptions, so the radius does not cap it.
-  function reachFor(R, terrain, lobe, floorM) {
-    var out = new Float64Array(SECTORS);
-    for (var i = 0; i < SECTORS; i++) {
-      var v = terrain ? terrain[i] : R;
-      if (lobe && lobe[i] > v) v = lobe[i];
-      out[i] = v > floorM ? v : floorM;
-    }
-    return out;
-  }
-
-  // shapeFor builds the reach shape of one node: its position plus
-  // per-sector reach (ext; null for a plain circle of floorM).
-  function shapeFor(n, ext, floorM) {
-    var p = position(n);
-    var e = new Float64Array(SECTORS);
-    var max = floorM, min = Infinity;
-    for (var i = 0; i < SECTORS; i++) {
-      e[i] = ext && ext[i] > floorM ? ext[i] : floorM;
-      if (e[i] > max) max = e[i];
-      if (e[i] < min) min = e[i];
-    }
-    return { lat: p[0], lon: p[1], ext: e, maxExt: max, minExt: min, uniform: max === min };
-  }
-
-  // Hulls, the margin, the distance field and hit testing live in
-  // scope-geometry.js (window.ScopeGeometry): pure geometry on reach shapes.
-  var shapeEdge = G.shapeEdge, hullOfEdges = G.hullOfEdges, convexHull = G.convexHull, scopeHull = G.scopeHull,
-    roundOut = G.roundOut, contourShapes = G.contourShapes, wrapShapes = G.wrapShapes, ringsBounds = G.ringsBounds, inRings = G.inRings;
 
   // ── Pulse ────────────────────────────────────────────────────────────────
 
@@ -444,18 +296,6 @@
   }
 
   // ── Overlay ──────────────────────────────────────────────────────────────
-
-  // shapeKey identifies a member's shape: its pubkey and a 32-bit FNV-1a
-  // hash of its position and its reach rounded to the metre. A string of 72
-  // numbers per member was a measured 8% of a rebuild.
-  function shapeKey(n, s) {
-    var h = 2166136261;
-    function mix(v) { h = Math.imul(h ^ (v | 0), 16777619); }
-    mix(Math.round(s.lat * 1e6)); mix(Math.round(s.lon * 1e6));
-    if (s.uniform) mix(Math.round(s.ext[0]));
-    else for (var i = 0; i < SECTORS; i++) mix(Math.round(s.ext[i]));
-    return n.public_key + ':' + (h >>> 0).toString(36) + (s.uniform ? 'u' : '');
-  }
 
   function plural(n) { return n + (n === 1 ? ' node' : ' nodes'); }
 
@@ -501,15 +341,13 @@
   // about what CoreScope knows, not what the repeater is.
   var KNOWN_TITLE = 'Its region list or default scope has been reported';
   var CARRY_TITLE = 'Seen relaying this scope\'s traffic, so it forwards it';
-  var GROUPS_TITLE = 'No known link joins these groups of its repeaters, so each has its own area and the gap between them is not shown as reached';
+  var GROUPS_TITLE = 'No known link joins these groups of its repeaters, so nothing is drawn between them';
 
   // scopePopupHtml: one section per scope under the click, each listing its
   // repeaters with why they are listed, and how many separate areas the
   // scope is drawn as when more than one (groupsOf(scope), when given). Each
   // name's swatch is colourOf(scope), the overlay's colour for it; without
-  // one, colours are handed out over the scopes given. The
-  // terrain model's antenna height is the 10 m default unless the operator
-  // set it, not a fact about the mast, so it is left out.
+  // one, colours are handed out over the scopes given.
   // Scopes whose lists are the same (the same repeaters, listed for the same
   // reasons) share one section: a few repeaters that each carry many scopes
   // would otherwise list themselves once per scope. Sorted by name, case
@@ -555,28 +393,35 @@
     }).join('') + '</div>';
   }
 
+  // clampNum: v when it is a number within [lo, hi], else null.
+  function clampNum(v, lo, hi) {
+    return typeof v === 'number' && v >= lo && v <= hi ? v : null;
+  }
+
   // createOverlay owns the layer, the cache, hover and the pulses for one
-  // Leaflet map. opts: floorM, marginM (AREA_MARGIN_M), pulseMs, loadLinks (() => Promise of neighbor
-  // graph edges), terrain (a terrain-reach.js provider: extentsFor and
-  // status, setSource), loadMapConfig (() => Promise of /api/config/map:
-  // antennaHeights, { pubkey or prefix: metres } the operator set, and
-  // terrainTiles, the elevation source), and setTimeout/clearTimeout/raf
-  // for tests.
-  //   setNodes(nodes)   new node list; recomputes changed scopes when visible
-  //   setLinks(edges)   neighbor graph edges the reach shapes follow
+  // Leaflet map. opts: radiusM and tubeWidthM (fixed, for tests; otherwise
+  // the defaults until the map config says), pulseMs, loadLinks (() =>
+  // Promise of neighbor graph edges), loadMapConfig (() => Promise of
+  // /api/config/map, whose contours holds radiusKm, tubeWidthKm and radii,
+  // { pubkey or prefix: km }; nothing is drawn until it has answered, so an
+  // area never jumps from the default radius to the configured one), and
+  // setTimeout/clearTimeout/raf for tests.
+  //   setNodes(nodes)   new node list; rebuilds changed scopes when visible
+  //   setLinks(edges)   neighbor graph edges the bands follow
   //   setVisible(bool)  adds or removes the layer; computes lazily
   //   setOnly(scope)    draw one scope ('' = all)
   //   setHidden(names)  scopes not to draw
-  //   setView(view)     'hull' or 'detailed' (opts.view: the first)
-  //   view()            the current view
-  //   scopes()          [{ scope, colour, observed, configured, hidden }]
+  //   scopes()          [{ scope, colour, nodes, carrying, hidden }]
   //   onChange(fn)      called after each render; returns an unsubscribe
   //   pulse(scope)      briefly highlight one scope (live page)
   //   destroy()         drop listeners and pending work
   function createOverlay(L, map, opts) {
     opts = opts || {};
-    var floorM = opts.floorM || DEFAULT_FLOOR_M;
-    var marginM = opts.marginM != null ? opts.marginM : AREA_MARGIN_M;
+    var radiusM = opts.radiusM || DEFAULT_RADIUS_M;
+    var tubeWidthM = opts.tubeWidthM || 0; // 0: TUBE_RATIO of the radius
+    var radii = {};        // operator radii, { key or prefix: metres }
+    var radiiKeys = [];
+    var configState = opts.loadMapConfig ? 'needed' : 'done'; // → 'asked' → 'done'
     var raf = opts.raf || (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : function (fn) { return setTimeout(fn, 16); });
     if (!map.getPane(PANE)) map.createPane(PANE).style.zIndex = String(PANE_Z);
     // Its own SVG renderer: the live map prefers canvas, which would ignore
@@ -587,25 +432,19 @@
     var popup = L.popup({ className: 'mc-scope-popup', maxWidth: 340, autoPanPadding: [24, 24] });
     var nodes = [];
     var links = null;
-    var reach = null;       // linkReach(nodes, links), rebuilt when either changes
-    var shapes = new Map(); // pubkey → Map(area partners → { shape, key, edge }), rebuilt with reach
-    var edgeCache = new Map(); // shape key → sampled edge, kept across rebuilds while used
-    var terrain = new Map(); // pubkey → { key, ext } from the terrain provider
-    var heights = null;      // operator antenna heights, { key: metres }; null until loaded
-    var terrainAsked = new Set(); // pk|key requested and not yet answered
-    var renderQueued = false;
+    var peers = null;      // memberLinks(nodes, links), rebuilt when either changes
     var destroyed = false; // destroy(): nothing is drawn or asked for after it
     var visible = false;
     var only = '';
     var hidden = new Set();
-    var view = VIEWS.indexOf(opts.view) >= 0 ? opts.view : VIEWS[0];
-    var cache = new Map(); // view|scope → { sig, parts, gkeys }; every view kept, so switching back is free
-    // view|member shape keys → rings of one linked group, shared between
-    // scopes: a repeater in ten scopes with no member links is outlined
-    // once, not ten times. Kept while a drawn scope uses it.
-    var groupCache = new Map();
-    var drawn = new Map(); // scope → [polygon]
-    var hits = [];         // [{ scope, polys, rings, boxes, bounds, text }] for hover
+    // What an area is built from → { polys, multi, lines, boxes, bounds },
+    // shared between scopes with the same members. Kept while a drawn scope
+    // uses it.
+    var cache = new Map();
+    var used = new Set();
+    var drawn = new Map();  // scope → [fill, line]
+    var groups = new Map(); // scope → how many linked groups, for the click box
+    var hits = [];          // [{ scope, layers, rings, boxes, bounds, text }] for hover
     var list = [];
     var listeners = [];
     var computed = 0;
@@ -618,191 +457,113 @@
       onEnd: function (s) { setClass(drawn.get(s) || [], 'is-pulsing', false); },
     });
 
-    function radiusOf(n) { return (reach && reach.radius.get(n.public_key)) || NO_LINK_RADIUS_M; }
-    // The operator's antenna height for a node: its pubkey, or the longest
-    // configured prefix of it.
-    function heightOf(n) { return heightOfKey(n.public_key); }
-    function heightOfKey(key) {
-      if (!heights) return 0;
-      var pk = String(key || '').toLowerCase(), best = '', m = 0;
-      Object.keys(heights).forEach(function (k) {
-        if (k.length > best.length && pk.indexOf(k) === 0) { best = k; m = heights[k]; }
-      });
-      return m;
-    }
-    // The nodes that heard it, each at its configured antenna height when
-    // there is one: a listener on a mast taken for 10 m makes its path look
-    // lossier than it was, and the budget too big.
-    function partnersOf(n) {
-      return ((reach && reach.partners.get(n.public_key)) || []).map(function (b) {
-        var h = heightOfKey(b.pk);
-        return h ? { lat: b.lat, lon: b.lon, antennaM: h } : { lat: b.lat, lon: b.lon };
-      });
-    }
-    // The terrain request for a node: its position, radius, the operator's
-    // antenna height if set, and the nodes that heard it (its loss budget).
-    // A result is only used while it still matches, so one computed for a
-    // node list that has since moved on is ignored.
-    function terrainKey(n) {
-      var p = position(n), h = heightOf(n);
-      return p[0] + ',' + p[1] + '|' + Math.round(radiusOf(n)) + '|' + (h ? 'a' + h : '') +
-        'L' + partnersOf(n).map(function (b) { return b.lat.toFixed(4) + ',' + b.lon.toFixed(4) + (b.antennaM ? '^' + b.antennaM : ''); }).sort().join(';');
-    }
-
-    // A node's shape in one area (area: Set of its members' pubkeys): lobes
-    // only toward its partners in that area. Shaped once per set of such
-    // partners, so a node in several areas with the same partners in each
-    // is shaped once.
-    function shaped(n, area) {
-      var own = (reach && reach.links.get(n.public_key)) || [];
-      var inArea = own.filter(function (k) { return area.has(k.pk); });
-      var sub = inArea.map(function (k) { return k.pk; }).sort().join(',');
-      var byArea = shapes.get(n.public_key);
-      if (!byArea) { byArea = new Map(); shapes.set(n.public_key, byArea); }
-      var e = byArea.get(sub);
-      if (!e) {
-        var t = terrain.get(n.public_key);
-        var cut = t && t.key === terrainKey(n) ? t.ext : null;
-        var s = shapeFor(n, reachFor(radiusOf(n), cut, lobeOf(inArea), floorM), floorM);
-        var key = shapeKey(n, s), edge = edgeCache.get(key);
-        if (!edge) { edge = shapeEdge(s); edgeCache.set(key, edge); }
-        e = { shape: s, key: key, edge: edge };
-        byArea.set(sub, e);
+    // A node's radius: the operator's for its pubkey, or for the longest
+    // configured prefix of it, else the mesh-wide one.
+    function radiusOf(n) {
+      if (!radiiKeys.length) return radiusM;
+      var pk = String(n.public_key || '').toLowerCase(), best = '';
+      for (var i = 0; i < radiiKeys.length; i++) {
+        var k = radiiKeys[i];
+        if (k.length > best.length && pk.indexOf(k) === 0) best = k;
       }
-      return e;
+      return best ? radii[best] : radiusM;
     }
+    function tubeHalfM() { return (tubeWidthM || radiusM * TUBE_RATIO) / 2; }
 
-    // Ask the terrain provider for the members it has not answered yet. Each
-    // answer reshapes that one node and queues a render, at most one a frame.
-    function requestTerrain(members) {
-      if (!opts.terrain || destroyed) return;
-      // Wait for the map config: the operator's heights, so a set height is
-      // never first computed as the default, and the terrain source.
-      if (opts.loadMapConfig && heights === null) { loadHeights(); return; }
-      // Terrain is off on this instance: there is nothing to ask for.
-      if (opts.terrain.status && opts.terrain.status() === 'off') return;
-      var items = [];
-      members.forEach(function (n) {
-        var k = terrainKey(n), t = terrain.get(n.public_key), ask = n.public_key + '|' + k;
-        if ((t && t.key === k) || terrainAsked.has(ask)) return;
-        terrainAsked.add(ask);
-        var p = position(n), h = heightOf(n);
-        var it = { pk: n.public_key, lat: p[0], lon: p[1], R: radiusOf(n), key: k };
-        it.links = partnersOf(n);
-        if (h) it.antennaM = h;
-        items.push(it);
-      });
-      if (!items.length) return;
-      var keyOf = new Map(items.map(function (it) { return [it.pk, it.key]; }));
-      Promise.resolve(opts.terrain.extentsFor(items, function (pk, ext) {
-        if (destroyed) return;
-        terrain.set(pk, { key: keyOf.get(pk), ext: ext });
-        shapes.delete(pk);
-        queueRender();
-      })).then(done, done);
-      // A member the provider did not answer is recorded as answered without
-      // terrain (its radius alone), so the next render does not ask again;
-      // asking every frame would never end. Each answer has queued its own
-      // render, so none is needed here.
-      function done() {
-        items.forEach(function (it) {
-          terrainAsked.delete(it.pk + '|' + it.key);
-          var t = terrain.get(it.pk);
-          if (!destroyed && (!t || t.key !== it.key)) terrain.set(it.pk, { key: it.key, ext: null });
-        });
-      }
-    }
-
-    var heightsAsked = false;
-    function loadHeights() {
-      if (heightsAsked) return;
-      heightsAsked = true;
+    function loadConfig() {
+      if (configState !== 'needed') return;
+      configState = 'asked';
       Promise.resolve(opts.loadMapConfig()).then(function (cfg) {
-        var h = (cfg && cfg.antennaHeights) || {}, clean = {};
-        Object.keys(h).forEach(function (k) { if (h[k] > 0) clean[String(k).toLowerCase()] = Number(h[k]); });
-        if (opts.terrain && opts.terrain.setSource) opts.terrain.setSource((cfg && cfg.terrainTiles) || null);
-        // How optimistic the reach is: the provider takes the settings
-        // before it is asked anything (requestTerrain waits for heights).
-        var c = (cfg && cfg.contours) || null;
-        if (opts.terrain && opts.terrain.setParams) opts.terrain.setParams(c);
-        var m = c && typeof c.marginKm === 'number' && c.marginKm >= 0 && c.marginKm <= 5 ? c.marginKm * 1000 : null;
-        if (m != null && opts.marginM == null && m !== marginM) {
-          marginM = m;
-          cache.clear(); groupCache.clear();
-        }
-        heights = clean;
-      }, function () { heights = {}; }).then(queueRender);
+        var c = (cfg && cfg.contours) || {};
+        var r = clampNum(c.radiusKm, MIN_RADIUS_M / 1000, MAX_RADIUS_M / 1000);
+        if (r != null && !opts.radiusM) radiusM = r * 1000;
+        var t = clampNum(c.tubeWidthKm, MIN_TUBE_M / 1000, MAX_TUBE_M / 1000);
+        if (t != null && !opts.tubeWidthM) tubeWidthM = t * 1000;
+        var own = c.radii || {};
+        Object.keys(own).forEach(function (k) {
+          var v = clampNum(own[k], MIN_RADIUS_M / 1000, MAX_RADIUS_M / 1000);
+          if (v != null && k) radii[String(k).toLowerCase()] = v * 1000;
+        });
+        radiiKeys = Object.keys(radii);
+      }, function () { /* the defaults stand */ }).then(function () {
+        configState = 'done';
+        if (!destroyed && visible) render();
+      });
     }
 
-    // How many separate areas a scope is drawn as, for the click box.
-    function groupsOf(scope) { return (drawn.get(scope) || []).length; }
+    function groupsOf(scope) { return groups.get(scope) || 0; }
     var colours = new Map(); // scope → colour, set each render
     function colourOf(scope) { return colours.get(scope) || 1; }
 
-    function queueRender() {
-      if (renderQueued) return;
-      renderQueued = true;
-      raf(function () { renderQueued = false; if (visible) render(); });
-    }
-
-    // A scope's areas: one ring list per linked group of its members
-    // (linkedGroups), each its own polygon, so groups that overlap are not
-    // cut out of each other by the even-odd fill.
-    function areas(scope, members) {
-      var area = new Set(members.map(function (n) { return n.public_key; }));
-      var groups = linkedGroups(members, reach ? reach.peers : null);
-      var entries = groups.map(function (g) { return g.map(function (n) { return shaped(n, area); }); });
-      var key = view + '|' + scope;
-      // Order-free and cheap: how many members, and the sum and xor of a hash
-      // of each member's key and its group.
-      var sum = 0, xor = 0, count = 0;
-      entries.forEach(function (g, gi) {
-        g.forEach(function (e) {
-          var h = 2166136261, k = e.key + '|' + gi;
-          for (var i = 0; i < k.length; i++) h = Math.imul(h ^ k.charCodeAt(i), 16777619);
-          sum = (sum + (h >>> 0)) % 4294967296; xor ^= h; count++;
+    // area builds, or finds in the cache, the shapes of one scope's members:
+    // an octagon each and a band for each link between two of them. The key
+    // is order-free and cheap: how many members and links, and the sum and
+    // xor of a hash of each member (key, position, radius) and each link.
+    function area(members) {
+      var idx = new Map(), items = [], pairs = [];
+      var sum = 0, xor = 0, h;
+      function mix(v) { h = Math.imul(h ^ (v | 0), 16777619); }
+      function mixStr(s) { for (var c = 0; c < s.length; c++) mix(s.charCodeAt(c)); }
+      function fold() { sum = (sum + (h >>> 0)) % 4294967296; xor ^= h; }
+      members.forEach(function (n, i) {
+        var p = position(n), r = radiusOf(n);
+        idx.set(n.public_key, i);
+        items.push({ lat: p[0], lon: p[1], r: r });
+        h = 2166136261; mixStr(n.public_key); mix(Math.round(p[0] * 1e6)); mix(Math.round(p[1] * 1e6)); mix(Math.round(r));
+        fold();
+      });
+      if (peers) {
+        members.forEach(function (n, i) {
+          (peers.get(n.public_key) || []).forEach(function (pk) {
+            var j = idx.get(pk);
+            if (j == null || j <= i) return;
+            pairs.push([i, j]);
+            h = 2166136261; mixStr(n.public_key); mix(124); mixStr(pk);
+            fold();
+          });
         });
-      });
-      var sig = count + '|' + groups.length + '|' + sum + '|' + (xor >>> 0);
-      var hit = cache.get(key);
-      if (hit && hit.sig === sig) { hit.gkeys.forEach(function (k) { groupsUsed.add(k); }); return hit.parts; }
+      }
+      var half = tubeHalfM();
+      var key = items.length + '|' + pairs.length + '|' + sum + '|' + (xor >>> 0) + '|' + Math.round(half);
+      used.add(key);
+      var e = cache.get(key);
+      if (e) return e;
       computed++;
-      var gkeys = [];
-      var parts = entries.map(function (g) {
-        var gk = view + '|' + g.map(function (e) { return e.key; }).sort().join(',');
-        gkeys.push(gk); groupsUsed.add(gk);
-        var r = groupCache.get(gk);
-        if (r) return r;
-        if (view === 'detailed') r = wrapShapes(g.map(function (e) { return e.shape; }), WRAP_GAP_M, marginM);
-        else {
-          var ring = roundOut(hullOfEdges(g.map(function (e) { return e.edge; })), marginM);
-          r = ring.length ? [ring] : [];
-        }
-        groupCache.set(gk, r);
-        return r;
-      }).filter(function (r) { return r.length; });
-      cache.set(key, { sig: sig, parts: parts, gkeys: gkeys });
-      return parts;
+      var polys = G.linkShapes(items, pairs, half);
+      e = {
+        polys: polys,
+        // One polygon per shape, filled non-zero: overlaps neither darken
+        // nor cancel.
+        multi: polys.map(function (r) { return [r]; }),
+        lines: G.outline(polys),
+        boxes: polys.map(function (r) { return G.ringsBounds([r]); }),
+        bounds: G.ringsBounds(polys),
+      };
+      cache.set(key, e);
+      return e;
     }
-    var groupsUsed = new Set();
 
-    // draw adds a scope's polygons, one per group, and returns them. Hover
-    // and pulse light them all.
+    // draw adds a scope's fill and its outline, and returns both layers.
+    // Hover and pulse light them together.
     function draw(scope, members, text) {
-      var parts = areas(scope, members);
-      var polys = [];
-      if (parts.length > 1) text += ' · ' + parts.length + ' separate groups';
-      parts.forEach(function (r) {
-        var poly = L.polygon(r, { pane: PANE, renderer: renderer, interactive: false,
-          className: 'mc-scope-area mc-reach-c' + colourOf(scope) });
-        layer.addLayer(poly);
-        var el = poly.getElement && poly.getElement();
+      var e = area(members);
+      if (!e.polys.length) return [];
+      var n = linkedGroups(members, peers).length;
+      groups.set(scope, n);
+      if (n > 1) text += ' · ' + n + ' separate groups';
+      var cls = 'mc-scope-area mc-reach-c' + colourOf(scope);
+      var fill = L.polygon(e.multi, { pane: PANE, renderer: renderer, interactive: false,
+        stroke: false, fillRule: 'nonzero', className: cls + ' mc-scope-fill' });
+      var line = L.polyline(e.lines, { pane: PANE, renderer: renderer, interactive: false,
+        fill: false, className: cls + ' mc-scope-line' });
+      var layers = [fill, line];
+      layers.forEach(function (l) {
+        layer.addLayer(l);
+        var el = l.getElement && l.getElement();
         if (el && el.setAttribute) el.setAttribute('data-scope', scope);
-        var boxes = r.map(function (ring) { return ringsBounds([ring]); });
-        hits.push({ scope: scope, polys: polys, rings: r, boxes: boxes, bounds: ringsBounds(r), text: text });
-        polys.push(poly);
       });
-      return polys;
+      hits.push({ scope: scope, layers: layers, rings: e.polys, boxes: e.boxes, bounds: e.bounds, text: text });
+      return layers;
     }
 
     function render() {
@@ -810,43 +571,30 @@
       clearHover();
       layer.clearLayers();
       drawn = new Map();
+      groups = new Map();
       hits = [];
-      groupsUsed = new Set();
-      var groups = visible ? groupNodesByScope(nodes) : new Map();
-      if (visible && !reach) { reach = linkReach(nodes, links); shapes = new Map(); }
-      var members = new Set();
-      var live = new Set();
+      used = new Set();
+      var byScope = visible ? groupNodesByScope(nodes) : new Map();
+      if (visible && configState === 'needed') loadConfig();
+      var ready = configState === 'done';
+      if (visible && ready && !peers) peers = memberLinks(nodes, links);
       var want = normRegion(only);
       list = [];
       // Over every scope in the node list, so hiding or narrowing to one
       // never recolours the rest.
-      colours = colorsFor(Array.from(groups.keys()));
-      groups.forEach(function (g, scope) {
+      colours = colorsFor(Array.from(byScope.keys()));
+      byScope.forEach(function (g, scope) {
         var all = g.observed.concat(g.configuredOnly);
         list.push({ scope: scope, colour: colourOf(scope), nodes: all.length, carrying: g.observed.length, hidden: hidden.has(scope) });
-        VIEWS.forEach(function (v) { live.add(v + '|' + scope); });
-        if ((want && scope !== want) || hidden.has(scope)) return;
-        all.forEach(function (n) { members.add(n); });
-        var polys = draw(scope, all, '#' + escapeHtml(scope) + ' · ' + plural(all.length));
-        if (polys.length) drawn.set(scope, polys);
+        if (!ready || (want && scope !== want) || hidden.has(scope)) return;
+        var layers = draw(scope, all, '#' + escapeHtml(scope) + ' · ' + plural(all.length));
+        if (layers.length) drawn.set(scope, layers);
       });
       list.sort(function (a, b) { return a.scope < b.scope ? -1 : (a.scope > b.scope ? 1 : 0); });
-      // Bounded by the scopes in the current node list: a scope that left it
-      // leaves the cache too.
-      if (visible) Array.from(cache.keys()).forEach(function (k) { if (!live.has(k)) cache.delete(k); });
-      // Groups of the scopes drawn now (hidden scopes recompute theirs).
-      if (visible) Array.from(groupCache.keys()).forEach(function (k) { if (!groupsUsed.has(k)) groupCache.delete(k); });
-      // Bounded the same way: only the edges this render used survive.
-      if (visible) {
-        var used = new Set();
-        shapes.forEach(function (byArea) { byArea.forEach(function (e) { used.add(e.key); }); });
-        Array.from(edgeCache.keys()).forEach(function (k) { if (!used.has(k)) edgeCache.delete(k); });
-      }
-      // The map config holds the margin too, so it is loaded with or
-      // without terrain.
-      if (visible && opts.loadMapConfig && heights === null) loadHeights();
-      if (visible) requestTerrain(members);
-      var info = { terrain: opts.terrain ? opts.terrain.status() : 'off', terrainUrl: opts.terrain && opts.terrain.sourceUrl ? opts.terrain.sourceUrl() : null, view: view, marginM: marginM };
+      // Bounded by the scopes drawn now: an area nothing uses leaves the
+      // cache (a hidden scope rebuilds its own when shown again).
+      if (visible && ready) Array.from(cache.keys()).forEach(function (k) { if (!used.has(k)) cache.delete(k); });
+      var info = { radiusM: radiusM };
       listeners.forEach(function (fn) { fn(list, visible, info); });
     }
 
@@ -854,11 +602,11 @@
       if (!visible || !opts.loadLinks || destroyed) return;
       var seq = ++linksSeq;
       Promise.resolve(opts.loadLinks()).then(function (edges) {
-        if (seq !== linksSeq) return;
+        if (seq !== linksSeq || destroyed) return;
         links = Array.isArray(edges) ? edges : [];
-        reach = null;
+        peers = null;
         render();
-      }, function () { /* keep the floor shapes; the next reload retries */ });
+      }, function () { /* octagons alone; the next reload retries */ });
     }
 
     // ── hover and click ──
@@ -868,7 +616,7 @@
       for (var i = 0; i < hits.length; i++) {
         var h = hits[i], b = h.bounds;
         if (lat < b[0] || lat > b[2] || lon < b[1] || lon > b[3]) continue;
-        if (inRings(h.rings, lat, lon, h.boxes)) found.push(h);
+        if (G.inAny(h.rings, lat, lon, h.boxes)) found.push(h);
       }
       return found;
     }
@@ -879,11 +627,10 @@
       if (map.hasLayer && map.hasLayer(tip)) map.closeTooltip(tip);
     }
     function hoverAt(ll) {
-      var seen = new Set();
-      var found = hitsAt(ll).filter(function (h) { if (seen.has(h.scope)) return false; seen.add(h.scope); return true; });
+      var found = hitsAt(ll);
       clearHover();
       if (!found.length) return;
-      found.forEach(function (h) { hovered = hovered.concat(h.polys); });
+      found.forEach(function (h) { hovered = hovered.concat(h.layers); });
       setClass(hovered, 'is-hovered', true);
       tip.setLatLng(ll);
       tip.setContent(found.map(function (h) { return h.text; }).join('<br>'));
@@ -896,17 +643,16 @@
       moveQueued = true;
       // Rechecked when the frame runs: a click is a move then a click, and
       // the popup it opens must not get a tooltip drawn over it.
-      raf(function () { moveQueued = false; if (moveAt && visible && !popupOpen()) hoverAt(moveAt); });
+      raf(function () { moveQueued = false; if (moveAt && visible && !destroyed && !popupOpen()) hoverAt(moveAt); });
     }
     function onOut() { moveAt = null; clearHover(); }
-    // A click inside outlines lists each scope's repeaters. A click that
+    // A click inside areas lists each scope's repeaters. A click that
     // started on another layer (a live node, a packet path) bubbles here with
     // that layer as sourceTarget: it belongs to that layer, not to us.
     function onClick(e) {
       if (!visible || !hits.length) return;
       if (e.sourceTarget && e.sourceTarget !== map) return;
-      var scopes = [];
-      hitsAt(e.latlng).forEach(function (h) { if (scopes.indexOf(h.scope) < 0) scopes.push(h.scope); });
+      var scopes = hitsAt(e.latlng).map(function (h) { return h.scope; });
       if (!scopes.length) return;
       clearHover();
       popup.setLatLng(e.latlng);
@@ -919,8 +665,8 @@
 
     return {
       layer: layer,
-      setNodes: function (l) { nodes = l || []; reach = null; render(); refreshLinks(); },
-      setLinks: function (edges) { linksSeq++; links = edges || []; reach = null; render(); },
+      setNodes: function (l) { nodes = l || []; peers = null; render(); refreshLinks(); },
+      setLinks: function (edges) { linksSeq++; links = edges || []; peers = null; render(); },
       setVisible: function (v) {
         visible = !!v;
         if (visible) { if (!map.hasLayer(layer)) layer.addTo(map); }
@@ -934,14 +680,6 @@
         render();
       },
       hidden: function () { return Array.from(hidden); },
-      setView: function (v) {
-        if (VIEWS.indexOf(v) < 0 || v === view) return;
-        view = v;
-        // The popup lists the scopes under a click on the old outlines.
-        if (popupOpen()) map.closePopup(popup);
-        render();
-      },
-      view: function () { return view; },
       scopes: function () { return list.slice(); },
       isVisible: function () { return visible; },
       onChange: function (fn) {
@@ -971,12 +709,6 @@
   function hashFlag(hash) {
     var v = hashParam(hash, 'contours');
     return v === '1' ? true : (v === '0' ? false : null);
-  }
-
-  // viewFromHash reads ?contoursView=; null when absent or not a view.
-  function viewFromHash(hash) {
-    var v = hashParam(hash, 'contoursView');
-    return VIEWS.indexOf(v) >= 0 ? v : null;
   }
 
   // hiddenFromHash reads ?contoursHide=a,b; null when absent.
@@ -1010,28 +742,11 @@
 
   // ── Scope list ───────────────────────────────────────────────────────────
 
-  // areaNote: what an area is, per view, with the margin it is drawn with.
-  function areaNote(view, marginM) {
-    var round = ((DEFAULT_FLOOR_M + (marginM != null ? marginM : AREA_MARGIN_M)) / 1000) + ' km round each.';
-    return view === 'detailed' ?
-      'Each area wraps its repeaters\' reach, filling gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km and leaving wider ones, at least ' + round :
-      'Each area spans the farthest reach of its repeaters, at least ' + round;
-  }
-  var TERRAIN_NOTE = 'A repeater\'s range is how far its signal is expected to carry over the terrain, calibrated on the nodes known to hear it, and stretched to repeaters in its area that heard it. ' +
-    'Antenna heights are the operator\'s where set, otherwise 10 m. ';
-  var TERRAIN_SOURCE = 'Terrain: AWS Terrain Tiles (Mapzen; SRTM, USGS 3DEP and others), bare earth: buildings and trees are not in it.';
-  var NO_TERRAIN_NOTE = 'Terrain unavailable: a repeater\'s range comes from how far other repeaters are known to hear it, stretched to repeaters in its area that heard it, with no terrain trimming.';
-  var TERRAIN_OFF_NOTE = 'Terrain is off on this instance: a repeater\'s range comes from how far other repeaters are known to hear it, stretched to repeaters in its area that heard it, with no terrain trimming.';
-
-  // terrainNote says how ranges were drawn, and from which elevation source.
-  function terrainNote(info) {
-    var state = info && info.terrain;
-    if (state === 'unavailable') return NO_TERRAIN_NOTE;
-    if (state === 'off') return TERRAIN_OFF_NOTE;
-    var url = info && info.terrainUrl;
-    if (!url) return TERRAIN_NOTE + TERRAIN_SOURCE;
-    var host = url.replace(/^[a-z]+:\/\//i, '').split('/')[0];
-    return TERRAIN_NOTE + 'Terrain: ' + escapeHtml(host) + ' (the operator\'s source), bare earth: buildings and trees are not in it.';
+  // areaNote says what an area is, with the radius it is drawn with.
+  function areaNote(radiusM) {
+    var km = Math.round((radiusM || DEFAULT_RADIUS_M) / 100) / 10;
+    return 'Schematic, not measured coverage: each area is an octagon ' + km + ' km round every repeater of the scope ' +
+      '(or the radius its operator set), with a thin band joining two that hear each other.';
   }
 
   function listHtml(items, opts, info) {
@@ -1047,8 +762,7 @@
       '<div class="filter-group mc-scope-list-actions"><button type="button" class="btn" data-scope-all>All</button> ' +
       '<button type="button" class="btn" data-scope-none>None</button></div>' +
       rows +
-      '<div class="mc-scope-hint">' + areaNote((info && info.view) || VIEWS[0], info && info.marginM) + ' ' +
-      terrainNote(info) + ' Click an outline to list its repeaters.</div>';
+      '<div class="mc-scope-hint">' + areaNote(info && info.radiusM) + ' Click an area to list its repeaters.</div>';
   }
 
   // mountScopeList renders a show/hide row per scope into el and keeps it in
@@ -1086,62 +800,9 @@
     return off;
   }
 
-  // ── View picker ──────────────────────────────────────────────────────────
-
-  var VIEW_LABEL = { hull: 'Convex Hull', detailed: 'Detailed' };
-  var VIEW_TITLE = {
-    hull: 'One rubber band round each scope\'s outermost reach: roughly where the region is',
-    detailed: 'Hugs each scope\'s reach, filling bays and gaps narrower than ' + (WRAP_GAP_M / 1000) + ' km; separate groups stay separate',
-  };
-
-  // mountViewPicker renders the area view buttons into el, shown while the
-  // overlay is. The URL wins, then the stored choice; a change is stored and
-  // written to the URL (the default view leaves the URL clean). The map and
-  // live pages share the stored choice and the URL key. opts: storage
-  // (defaults to localStorage), titleHtml (a heading shown above it, with
-  // it). Returns an unsubscribe.
-  function mountViewPicker(el, overlay, opts) {
-    opts = opts || {};
-    var store = opts.storage || localStorage;
-    var start = viewFromHash(location.hash);
-    if (!start) { try { start = store.getItem(VIEW_KEY); } catch (e) { start = null; } }
-    overlay.setView(VIEWS.indexOf(start) >= 0 ? start : VIEWS[0]);
-    var shown = null;
-    function paint(_, visible) {
-      el.hidden = !visible;
-      var key = visible ? overlay.view() : '';
-      if (key === shown) return;
-      shown = key;
-      el.innerHTML = !visible ? '' : (opts.titleHtml || '') +
-        '<span class="mc-scope-view-label" id="mcScopeViewLabel">Area shape</span>' +
-        '<div class="filter-group" role="group" aria-labelledby="mcScopeViewLabel">' + VIEWS.map(function (v) {
-          var on = v === overlay.view();
-          return '<button type="button" class="btn' + (on ? ' active' : '') + '" data-view="' + v + '" aria-pressed="' + on + '" title="' + VIEW_TITLE[v] + '">' + VIEW_LABEL[v] + '</button>';
-        }).join('') + '</div>';
-    }
-    el.addEventListener('click', function (e) {
-      var t = e.target, v = t && t.getAttribute && t.getAttribute('data-view');
-      if (VIEWS.indexOf(v) < 0) return;
-      overlay.setView(v);
-      try { store.setItem(VIEW_KEY, v); } catch (err) { /* private mode */ }
-      writeHash({ contoursView: v === VIEWS[0] ? null : v });
-      paint(null, overlay.isVisible());
-    });
-    var off = overlay.onChange(paint);
-    paint(null, overlay.isVisible());
-    return off;
-  }
-
   window.ScopeContours = {
     hashFlag: hashFlag,
     hiddenFromHash: hiddenFromHash,
-    viewFromHash: viewFromHash,
-    views: VIEWS.slice(),
-    wrapGapM: WRAP_GAP_M,
-    areaMarginM: AREA_MARGIN_M,
-    contourShapes: contourShapes,
-    wrapShapes: wrapShapes,
-    mountViewPicker: mountViewPicker,
     writeHashFlag: writeHashFlag,
     normRegion: normRegion,
     nodeRegionEvidence: nodeRegionEvidence,
@@ -1149,20 +810,13 @@
     configuredScopes: configuredScopes,
     carriedScopes: carriedScopes,
     scopePopupHtml: scopePopupHtml,
-    linkReach: linkReach,
+    memberLinks: memberLinks,
     linkedGroups: linkedGroups,
-    lobeOf: lobeOf,
     areaNote: areaNote,
-    reachFor: reachFor,
-    noLinkRadius: NO_LINK_RADIUS_M,
-    shapeFor: shapeFor,
-    convexHull: convexHull,
-    scopeHull: scopeHull,
-    inRings: inRings,
+    defaultRadiusM: DEFAULT_RADIUS_M,
     colorsFor: colorsFor,
     createPulser: createPulser,
     createOverlay: createOverlay,
-    sectors: SECTORS,
     mountScopeList: mountScopeList,
   };
 })();

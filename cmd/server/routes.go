@@ -779,17 +779,24 @@ func (s *Server) handleConfigMap(w http.ResponseWriter, r *http.Request) {
 	if zoom == 0 {
 		zoom = 9
 	}
-	resp := MapConfigResponse{Center: center, Zoom: zoom, AntennaHeights: cleanAntennaHeights(s.cfg.MapDefaults.AntennaHeights)}
-	if tt := s.cfg.MapDefaults.TerrainTiles; tt.Disabled || tt.URL != "" {
-		resp.TerrainTiles = &TerrainTilesResponse{Disabled: tt.Disabled, URL: tt.URL}
-	}
-	resp.Contours = cleanContours(s.cfg.MapDefaults.Contours)
+	resp := MapConfigResponse{Center: center, Zoom: zoom, Contours: cleanContours(s.cfg.MapDefaults.Contours)}
 	writeJSON(w, resp)
 }
 
-// cleanContours passes on the mapDefaults.contours fields that are in
-// range, so a typo leaves that one setting at the overlay's default rather
-// than drawing nonsense. nil when none is usable, so the response omits it.
+// The sizes the region contours accept. A radius outside the range is a typo
+// (metres for kilometres), not a radius anyone means; the overlay holds to
+// the same limits.
+const (
+	minContourRadiusKm    = 0.5
+	maxContourRadiusKm    = 30
+	minContourTubeWidthKm = 0.2
+	maxContourTubeWidthKm = 10
+	minContourKeyLen      = 8
+)
+
+// cleanContours passes on the mapDefaults.contours values that are usable,
+// so a typo leaves that one setting at the overlay's default rather than
+// drawing nonsense. nil when none is, so the response omits the block.
 func cleanContours(c ContoursConfig) *ContoursResponse {
 	in := func(v *float64, lo, hi float64) *float64 {
 		if v == nil || !(*v >= lo && *v <= hi) {
@@ -799,41 +806,27 @@ func cleanContours(c ContoursConfig) *ContoursResponse {
 		return &x
 	}
 	out := ContoursResponse{
-		BudgetPercentile: in(c.BudgetPercentile, 50, 100),
-		DefaultBudgetDb:  in(c.DefaultBudgetDb, 90, 150),
-		MaxReachKm:       in(c.MaxReachKm, 1, 50),
-		MarginKm:         in(c.MarginKm, 0, 5),
-		ReceiverHeightM:  in(c.ReceiverHeightM, 0.5, 100),
+		RadiusKm:    in(c.RadiusKm, minContourRadiusKm, maxContourRadiusKm),
+		TubeWidthKm: in(c.TubeWidthKm, minContourTubeWidthKm, maxContourTubeWidthKm),
+		Radii:       cleanContourRadii(c.Radii),
 	}
-	if c.ReachRule == "farthest" || c.ReachRule == "first" {
-		out.ReachRule = c.ReachRule
-	}
-	if out == (ContoursResponse{}) {
+	if out.RadiusKm == nil && out.TubeWidthKm == nil && out.Radii == nil {
 		return nil
 	}
 	return &out
 }
 
-// Antenna heights outside this range are not heights above ground anyone
-// configures on purpose: a typo, or an altitude above sea level.
-const (
-	minAntennaHeightM = 1
-	maxAntennaHeightM = 200
-	minAntennaKeyLen  = 8
-)
-
-// cleanAntennaHeights keeps the entries the region contours can use: keys
-// that are hex pubkeys or prefixes long enough to identify a node,
-// lowercased; heights in a plausible range. nil when nothing is left, so the
-// response omits the field.
-func cleanAntennaHeights(in map[string]float64) map[string]float64 {
+// cleanContourRadii keeps the per-repeater radii the region contours can
+// use: keys that are hex pubkeys or prefixes long enough to identify a node,
+// lowercased; radii in range. nil when nothing is left.
+func cleanContourRadii(in map[string]float64) map[string]float64 {
 	var out map[string]float64
 	for k, v := range in {
 		key := strings.ToLower(strings.TrimSpace(k))
-		if len(key) < minAntennaKeyLen || !hexPrefixRe.MatchString(key) {
+		if len(key) < minContourKeyLen || !hexPrefixRe.MatchString(key) {
 			continue
 		}
-		if !(v >= minAntennaHeightM && v <= maxAntennaHeightM) {
+		if !(v >= minContourRadiusKm && v <= maxContourRadiusKm) {
 			continue
 		}
 		if out == nil {

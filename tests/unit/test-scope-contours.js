@@ -1,5 +1,5 @@
 'use strict';
-// Unit tests for scope-contours.js: the region-scope reach overlay on the map
+// Unit tests for scope-contours.js: the region contours overlay on the map
 // and live pages. Loads the browser IIFE in a vm sandbox, the same way
 // test-map-estimated.js does, and drives the overlay with a recording Leaflet
 // stub and a fake clock.
@@ -41,59 +41,17 @@ function offset(lat, lon, eastM, northM) {
   return { lat: lat + northM / 111320, lon: lon + eastM / (111320 * Math.cos(lat * Math.PI / 180)) };
 }
 
-console.log('\n=== scope-contours.js: hull geometry ===');
+console.log('\n=== scope-contours.js: API ===');
 
-test('exposes its API', () => {
+test('exposes its API, and nothing of the old reach model', () => {
   assert.ok(SC, 'window.ScopeContours not defined');
-  for (const fn of ['normRegion', 'nodeRegionEvidence', 'groupNodesByScope', 'convexHull', 'scopeHull', 'contourShapes', 'wrapShapes', 'shapeFor', 'reachFor', 'linkReach', 'inRings', 'colorsFor', 'createPulser', 'createOverlay', 'mountViewPicker', 'viewFromHash']) {
+  for (const fn of ['normRegion', 'nodeRegionEvidence', 'groupNodesByScope', 'memberLinks', 'linkedGroups', 'areaNote', 'colorsFor', 'createPulser', 'createOverlay', 'mountScopeList', 'hashFlag', 'hiddenFromHash']) {
     assert.strictEqual(typeof SC[fn], 'function', fn + ' not exported');
   }
-});
-
-const ringPlain = (r) => JSON.parse(JSON.stringify(r));
-
-test('convexHull keeps the corners, drops inside and collinear points', () => {
-  const pts = [[0, 0], [0, 1], [1, 1], [1, 0], [0.5, 0.5], [0.2, 0.7], [0, 0.5], [1, 0.25]];
-  const ring = ringPlain(SC.convexHull(pts));
-  assert.strictEqual(ring.length, 4, JSON.stringify(ring));
-  for (const c of [[0, 0], [0, 1], [1, 1], [1, 0]]) assert.ok(ring.some(p => p[0] === c[0] && p[1] === c[1]), 'missing corner ' + c);
-});
-
-test('convexHull of fewer than three distinct points, or of a line, is empty', () => {
-  assert.deepStrictEqual(ringPlain(SC.convexHull([])), []);
-  assert.deepStrictEqual(ringPlain(SC.convexHull([[0, 0], [1, 1]])), []);
-  assert.deepStrictEqual(ringPlain(SC.convexHull([[0, 0], [1, 1], [2, 2]])), []);
-});
-
-test('the hull of one plain circle is that circle (within 0.2%)', () => {
-  const c = [40.7, -74.0];
-  const rings = SC.scopeHull([SC.shapeFor({ lat: c[0], lon: c[1] }, null, 8000)]);
-  assert.strictEqual(rings.length, 1);
-  assert.ok(rings[0].length >= 60, 'too coarse: ' + rings[0].length);
-  for (const p of rings[0]) { const d = metres(c, p); assert.ok(d > 7975 && d < 8010, 'ring point ' + Math.round(d) + ' m'); }
-});
-
-test('distant members are joined into one area, the gap between them filled', () => {
-  const a = offset(40.7, -74.0, 0, 0), b = offset(40.7, -74.0, 100000, 0);
-  const rings = SC.scopeHull([SC.shapeFor(a, null, 1000), SC.shapeFor(b, null, 1000)]);
-  assert.strictEqual(rings.length, 1);
-  const mid = offset(40.7, -74.0, 50000, 0);
-  assert.ok(SC.inRings(rings, mid.lat, mid.lon), 'midpoint not inside');
-  const off = offset(40.7, -74.0, 50000, 2000);
-  assert.ok(!SC.inRings(rings, off.lat, off.lon), 'a band 2 km wide should not be inside');
-});
-
-test('a ring of members has no hole: the empty middle is part of the area', () => {
-  const shapes = [];
-  for (let k = 0; k < 24; k++) { const t = (k / 24) * 2 * Math.PI; shapes.push(SC.shapeFor(offset(40.7, -74.0, 40000 * Math.cos(t), 40000 * Math.sin(t)), null, 1000)); }
-  const rings = SC.scopeHull(shapes);
-  assert.strictEqual(rings.length, 1);
-  assert.ok(SC.inRings(rings, 40.7, -74.0), 'the middle is outside');
-});
-
-test('unusable shapes are skipped; none at all gives no area', () => {
-  assert.deepStrictEqual(ringPlain(SC.scopeHull([])), []);
-  assert.deepStrictEqual(ringPlain(SC.scopeHull([null])), []);
+  for (const gone of ['linkReach', 'lobeOf', 'reachFor', 'shapeFor', 'scopeHull', 'wrapShapes', 'contourShapes', 'mountViewPicker', 'viewFromHash', 'views']) {
+    assert.strictEqual(SC[gone], undefined, gone + ' still exported');
+  }
+  assert.strictEqual(SC.defaultRadiusM, 4000);
 });
 
 console.log('\n=== scope-contours.js: membership ===');
@@ -252,7 +210,7 @@ test('linkedGroups splits members by the links between them, heard either way', 
     { public_key: 'x', lat: 40, lon: -74.7 },
     { public_key: 'e', lat: 41, lon: -74.0 }, { public_key: 'f', lat: 41, lon: -74.0 },
   ];
-  const r = SC.linkReach(ns, [
+  const peers = SC.memberLinks(ns, [
     { source: 'a', target: 'b', heard_by_target: 2 },
     { source: 'c', target: 'd', heard_by_source: 1 },
     // Through x, which is not a member: it forwards nothing for the scope.
@@ -265,9 +223,9 @@ test('linkedGroups splits members by the links between them, heard either way', 
   ]);
   const members = ns.filter(n => n.public_key !== 'x');
   const keys = gs => JSON.parse(JSON.stringify(gs.map(g => g.map(n => n.public_key))));
-  assert.deepStrictEqual(keys(SC.linkedGroups(members, r.peers)), [['a', 'b'], ['c', 'd'], ['e', 'f']]);
+  assert.deepStrictEqual(keys(SC.linkedGroups(members, peers)), [['a', 'b'], ['c', 'd'], ['e', 'f']]);
   assert.deepStrictEqual(keys(SC.linkedGroups(members, null)), [['a'], ['b'], ['c'], ['d'], ['e'], ['f']], 'no links yet: each alone');
-  assert.deepStrictEqual(keys(SC.linkedGroups([], r.peers)), []);
+  assert.deepStrictEqual(keys(SC.linkedGroups([], peers)), []);
 });
 
 test('the click box drops a stale carrying member and tags carrying only for listed scopes', () => {
@@ -380,20 +338,7 @@ test('scopes pulse independently; empty names are ignored; cancelAll ends all', 
   assert.strictEqual(clock.pending(), 0);
 });
 
-console.log('\n=== scope-contours.js: reach (radius, terrain, links) ===');
-
-// How far the outline reaches from a node toward a bearing, in metres: walk
-// out along the ray until it leaves the outline.
-function reachToward(rings, c, bearingDeg) {
-  const t = bearingDeg * Math.PI / 180;
-  let last = 0;
-  for (let m = 0; m <= 60000; m += 50) {
-    const q = offset(c.lat, c.lon, m * Math.sin(t), m * Math.cos(t));
-    if (!SC.inRings(rings, q.lat, q.lon)) return last;
-    last = m;
-  }
-  return last;
-}
+console.log('\n=== scope-contours.js: links ===');
 
 const HOME = { public_key: 'h0', lat: 40.0, lon: -75.3 };
 const EAST = Object.assign({ public_key: 'e1' }, offset(40.0, -75.3, 20000, 0));
@@ -404,471 +349,30 @@ const plain = (m) => JSON.parse(JSON.stringify(Array.from(m)));
 // target receiving the source, heard_by_source the reverse.
 const two = (a, b) => ({ source: a, target: b, bidirectional: true, heard_by_source: 1, heard_by_target: 1 });
 const heard = (a, b) => ({ source: a, target: b, bidirectional: false, heard_by_source: 0, heard_by_target: 1 }); // b heard a
-const RAY = (deg) => Math.round(deg / 5) % 72;   // 72 rays of 5°
+const tick = () => new Promise(r => setTimeout(r, 0));
 
-test('the radius is the 75th percentile of the distances it was heard over x 1.1 (Treebeard: ~13.9 km)', () => {
-  // Treebeard heard over its 17 real links, distances in km, all bearings
-  // east so only the distances matter here.
-  const km = [0.05, 0.9, 1.7, 1.8, 2.1, 2.1, 2.1, 2.2, 2.3, 7.3, 10.0, 10.0, 12.6, 14.9, 15.1, 15.1, 33.2];
-  const others = km.map((d, i) => Object.assign({ public_key: 'o' + i }, offset(HOME.lat, HOME.lon, d * 1000, 0)));
-  const r = SC.linkReach([HOME].concat(others), others.map(o => heard('h0', o.public_key)));
-  const R = r.radius.get('h0');
-  assert.ok(Math.abs(R - 13860) < 60, 'radius ' + R);
+test('memberLinks: a link heard in either direction joins both ends', () => {
+  const peers = SC.memberLinks([HOME, EAST, NORTH], [two('h0', 'e1'), heard('n1', 'h0')]);
+  assert.deepStrictEqual(plain(peers).sort(), [['e1', ['h0']], ['h0', ['e1', 'n1']], ['n1', ['h0']]]);
 });
 
-test('a one-way link counts only for the end that was heard', () => {
-  // EAST heard HOME: that proves how far HOME's signal goes, not EAST's.
-  const r = SC.linkReach([HOME, EAST], [heard('h0', 'e1')]);
-  assert.strictEqual(r.radius.get('h0'), 20000, 'heard over 20 km x 1.1, clamped');
-  assert.ok(!r.radius.has('e1'), 'the listener gets no radius from it');
-  assert.strictEqual((r.links.get('h0') || []).length, 1, 'a lobe toward the listener');
-  assert.ok(!r.links.has('e1'), 'no lobe from the listener back');
-  assert.deepStrictEqual(plain(r.partners.get('h0')).map(p => p.lon.toFixed(3)), [EAST.lon.toFixed(3)], 'the listener calibrates the loss budget');
-  assert.strictEqual(r.partners.get('h0')[0].pk, 'e1', 'with its key, to look up its antenna height');
-  assert.ok(!r.partners.has('e1'));
-  assert.deepStrictEqual(plain(r.peers.get('h0')), ['e1'], 'still joins the two for grouping');
-  assert.deepStrictEqual(plain(r.peers.get('e1')), ['h0']);
-  // The reverse direction, as heard_by_source.
-  const back = SC.linkReach([HOME, EAST], [{ source: 'h0', target: 'e1', heard_by_source: 4 }]);
-  assert.ok(back.radius.has('e1') && !back.radius.has('h0'), 'heard_by_source: the source heard the target');
-});
-
-test('the radius is clamped to 1-20 km; a node with no links gets 1 km', () => {
-  const near = Object.assign({ public_key: 'n1' }, offset(HOME.lat, HOME.lon, 400, 0));
-  const far = Object.assign({ public_key: 'f9' }, offset(HOME.lat, HOME.lon, 0, 40000));
-  const r = SC.linkReach([HOME, near, far, EAST], [two('h0', 'n1'), two('e1', 'f9')]);
-  assert.strictEqual(r.radius.get('h0'), 1000);
-  assert.strictEqual(r.radius.get('e1'), 20000);
-  assert.strictEqual(SC.noLinkRadius, 1000);
-});
-
-test('ambiguous links, links of unknown direction, self links and links to unplaced nodes prove nothing', () => {
-  const r = SC.linkReach([HOME, EAST, { public_key: 'u1' }], [
-    { source: 'h0', target: 'e1', bidirectional: true, heard_by_source: 1, heard_by_target: 1, ambiguous: true },
-    // bidirectional without direction counts (as the server once sent every
-    // edge, and still does for edges restored at startup) is not evidence.
-    { source: 'h0', target: 'e1', bidirectional: true },
-    { source: 'h0', target: 'e1', bidirectional: true, heard_by_source: 0, heard_by_target: 0 },
-    { source: 'h0', target: 'e1' },
-    two('h0', 'h0'), two('h0', 'u1'), two('h0', 'missing'), null,
+test('memberLinks: ambiguous links, links of unknown direction, self links and links to unplaced nodes prove nothing', () => {
+  const nowhere = { public_key: 'u1' };
+  const peers = SC.memberLinks([HOME, EAST, NORTH, nowhere], [
+    Object.assign(two('h0', 'e1'), { ambiguous: true }),
+    { source: 'h0', target: 'n1', bidirectional: true },
+    { source: 'h0', target: 'n1', bidirectional: true, heard_by_source: 0, heard_by_target: 0 },
+    two('h0', 'h0'), two('h0', 'u1'), two('h0', 'zz'), null,
   ]);
-  assert.strictEqual(r.radius.size, 0);
-  assert.strictEqual(r.links.size, 0);
-  assert.strictEqual(r.peers.size, 0);
-});
-
-test('a link lobe is its distance x 1.1 within one ray of its bearing, tapering to nothing at 11.25°', () => {
-  const r = SC.linkReach([HOME, EAST], [two('h0', 'e1')]);
-  const h = plain(SC.lobeOf(r.links.get('h0'))), e = plain(SC.lobeOf(r.links.get('e1')));
-  assert.ok(Math.abs(h[RAY(90)] - 22000) < 150, 'on bearing ' + h[RAY(90)]);
-  assert.ok(Math.abs(h[RAY(85)] - 22000) < 150 && Math.abs(h[RAY(95)] - 22000) < 150, 'one ray off ' + h[RAY(85)] + ' ' + h[RAY(95)]);
-  assert.ok(Math.abs(h[RAY(80)] - 22000 * (1 - 5 / 6.25)) < 400, '10° off ' + h[RAY(80)]);
-  assert.strictEqual(h[RAY(75)], 0, '15° off');
-  assert.ok(Math.abs(e[RAY(270)] - 22000) < 150, 'the far end gets the reverse lobe');
-});
-
-test('reachFor: terrain reach when there is one, else the radius; stretched by lobes, never under the floor', () => {
-  const cut = new Float64Array(SC.sectors).fill(8000);
-  cut[RAY(270)] = 300; cut[RAY(180)] = 100;
-  const lobe = new Float64Array(SC.sectors); lobe[RAY(90)] = 22000;
-  const out = plain(SC.reachFor(5000, cut, lobe, 250));
-  assert.strictEqual(out[RAY(0)], 8000, 'terrain reach is calibrated on its own: the radius does not cap it');
-  assert.strictEqual(out[RAY(270)], 300, 'terrain cuts');
-  assert.strictEqual(out[RAY(180)], 250, 'floor holds');
-  assert.strictEqual(out[RAY(90)], 22000, 'a proven link stretches past the radius');
-  assert.ok(plain(SC.reachFor(5000, null, null, 250)).every(v => v === 5000), 'no terrain: the radius all round');
-});
-
-test('the hull spans a terrain notch from the directions either side of it', () => {
-  // One member, reach 8 km, terrain cut to 2 km from 225° to 315°: the
-  // area's west edge is the chord between 220° and 320°, 8 km x sin 40°
-  // west, not the 2 km cut. A general area, as chosen.
-  const cut = new Float64Array(SC.sectors).fill(8000);
-  for (let d = 225; d <= 315; d += 5) cut[RAY(d)] = 2000;
-  const rings = SC.scopeHull([SC.shapeFor(HOME, SC.reachFor(8000, cut, null, 1000), 1000)]);
-  const west = reachToward(rings, HOME, 270), north = reachToward(rings, HOME, 0);
-  assert.ok(Math.abs(west - 8000 * Math.sin(40 * Math.PI / 180)) < 300, 'west ' + west);
-  assert.ok(Math.abs(north - 8000) < 100, 'north ' + north);
-});
-
-test('a far link\'s tip is a corner of the area', () => {
-  const lobe = plain(SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0')));
-  const rings = SC.scopeHull([SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)]);
-  const tip = offset(HOME.lat, HOME.lon, 22000, 0);
-  assert.ok(rings[0].some(p => metres([tip.lat, tip.lon], p) < 60), 'no vertex at the lobe tip');
-  assert.ok(SC.inRings(rings, EAST.lat, EAST.lon), 'the linked node is outside');
-});
-
-test('a linked node off the 5° rays is still inside, with room past it, in both views', () => {
-  // Rays sit every 5°; a partner between two of them got a lobe that fell
-  // short of it (to ~86% of its distance at 2.5° off), leaving it just
-  // outside a corner. Real case: Hazelwood Amon Sûl -> Frisbeepeater.
-  for (const deg of [2.5, 37.5, 62, 118.7, 211.2, 333.3]) {
-    const t = deg * Math.PI / 180;
-    const far = Object.assign({ public_key: 'p1' }, offset(HOME.lat, HOME.lon, 30000 * Math.sin(t), 30000 * Math.cos(t)));
-    const past = offset(HOME.lat, HOME.lon, 31500 * Math.sin(t), 31500 * Math.cos(t));
-    const lobe = SC.lobeOf(SC.linkReach([HOME, far], [two('h0', 'p1')]).links.get('h0'));
-    const shape = SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000);
-    for (const [view, rings] of [['hull', SC.scopeHull([shape])], ['detailed', SC.wrapShapes([shape])]]) {
-      assert.ok(SC.inRings(rings, far.lat, far.lon), view + ': partner at ' + deg + '° is outside');
-      assert.ok(SC.inRings(rings, past.lat, past.lon), view + ': no room past the partner at ' + deg + '°');
-    }
-  }
-});
-
-// The guarantee the floor exists for: every member has at least 1 km of
-// area all round it, edge members included.
-function assertKmAround(rings, n, label) {
-  for (let d = 0; d < 360; d += 5) {
-    const t = d * Math.PI / 180, q = offset(n.lat, n.lon, 990 * Math.sin(t), 990 * Math.cos(t));
-    assert.ok(SC.inRings(rings, q.lat, q.lon), label + ': less than 1 km of area at ' + d + '°');
-  }
-}
-
-test('every member has at least 1 km of area all round, even boxed in by a ridge 300 m away', () => {
-  const boxed = new Float64Array(SC.sectors).fill(300);   // terrain cuts every direction to 300 m
-  const members = [
-    SC.shapeFor(HOME, SC.reachFor(8000, boxed, null, 1000), 1000),
-    SC.shapeFor(EAST, SC.reachFor(1000, null, null, 1000), 1000),
-    SC.shapeFor(FAR, SC.reachFor(20000, null, null, 1000), 1000),
-  ];
-  const rings = SC.scopeHull(members);
-  for (const n of [HOME, EAST, FAR]) assertKmAround(rings, n, n.public_key);
-});
-
-// Metres from p to the nearest point of ring's edge, in a local projection.
-function edgeDist(ring, p) {
-  const kx = 111320 * Math.cos(p[0] * Math.PI / 180), ky = 111320;
-  let best = Infinity;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const ax = (ring[j][1] - p[1]) * kx, ay = (ring[j][0] - p[0]) * ky;
-    const bx = (ring[i][1] - p[1]) * kx, by = (ring[i][0] - p[0]) * ky;
-    const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
-    const t = l2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / l2)) : 0;
-    best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy));
-  }
-  return best;
-}
-// The largest turn, in degrees, at any vertex of a ring: a sharp corner
-// turns a lot at one vertex, a rounded one a little at each.
-function sharpestTurn(ring) {
-  let worst = 0;
-  const kx = Math.cos(ring[0][0] * Math.PI / 180);
-  for (let i = 0; i < ring.length; i++) {
-    const a = ring[(i + ring.length - 1) % ring.length], b = ring[i], c = ring[(i + 1) % ring.length];
-    const t1 = Math.atan2(b[0] - a[0], (b[1] - a[1]) * kx), t2 = Math.atan2(c[0] - b[0], (c[1] - b[1]) * kx);
-    let d = Math.abs(t2 - t1) * 180 / Math.PI;
-    if (d > 180) d = 360 - d;
-    worst = Math.max(worst, d);
-  }
-  return worst;
-}
-function assertAround(rings, n, m, label) {
-  for (let d = 0; d < 360; d += 5) {
-    const t = d * Math.PI / 180, q = offset(n.lat, n.lon, m * Math.sin(t), m * Math.cos(t));
-    assert.ok(SC.inRings(rings, q.lat, q.lon), label + ': less than ' + m + ' m of area at ' + d + '°');
-  }
-}
-
-test('the hull with a 2 km margin: 2 km past the bare hull everywhere, corners rounded', () => {
-  const r = SC.linkReach([HOME, EAST, FAR], [two('h0', 'e1'), two('h0', 'f1')]);
-  const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, SC.lobeOf(r.links.get(n.public_key)), 1000), 1000));
-  const bare = SC.scopeHull(shapes)[0], rings = SC.scopeHull(shapes, 2000), ring = rings[0];
-  assert.strictEqual(rings.length, 1);
-  for (const p of ring) {
-    const dd = edgeDist(bare, p);
-    assert.ok(dd > 1980 && dd < 2020, 'a vertex ' + Math.round(dd) + ' m from the bare hull');
-  }
-  for (const p of bare) assert.ok(SC.inRings(rings, p[0], p[1]), 'a bare corner is outside');
-  assert.ok(sharpestTurn(ring) <= 5.5, 'a corner turns ' + sharpestTurn(ring).toFixed(1) + '° at once');
-  for (const n of [HOME, EAST, FAR]) assertAround(rings, n, 2990, n.public_key);
-  assert.deepStrictEqual(SC.scopeHull(shapes, 0), SC.scopeHull(shapes), 'no margin, no change');
-});
-
-test('Detailed with a 2 km margin: about 2 km past the bare area, a lobe tip rounded', () => {
-  const lobe = SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0'));
-  const shapes = [SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)];
-  const bare = SC.wrapShapes(shapes), rings = SC.wrapShapes(shapes, undefined, 2000);
-  assert.strictEqual(rings.length, 1);
-  assertAround(rings, HOME, 2990, 'home');
-  // 2 km past the lobe's tip (22 km east), and 2 km either side of it.
-  for (const [e, n] of [[23900, 0], [22000, 1900], [22000, -1900]]) {
-    const q = offset(HOME.lat, HOME.lon, e, n);
-    assert.ok(SC.inRings(rings, q.lat, q.lon), 'no margin round the tip at ' + e + ',' + n);
-  }
-  const out = offset(HOME.lat, HOME.lon, 24700, 0);
-  assert.ok(!SC.inRings(rings, out.lat, out.lon), 'more than ~2 km past the tip');
-  for (const p of rings[0]) {
-    const dd = Math.min.apply(null, bare.map(b => edgeDist(b, p)));
-    assert.ok(dd > 1900 && dd < 2700, 'a vertex ' + Math.round(dd) + ' m from the bare area');
-  }
-});
-
-test('the overlay draws both views with the 2 km margin: 3 km round a lone repeater', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const o = SC.createOverlay(L, map, {});
-  const lone = { public_key: 'z1', lat: 40.0, lon: -75.3, transported_scopes: ['#solo'] };
-  o.setNodes([lone]); o.setVisible(true);
-  for (const view of ['hull', 'detailed']) {
-    o.setView(view);   // Convex Hull is already drawn: a no-op
-    const rings = rec.polygons[rec.polygons.length - 1].rings;
-    assertAround(rings, lone, 2950, view);
-    const out = offset(lone.lat, lone.lon, 3400, 0);
-    assert.ok(!SC.inRings(rings, out.lat, out.lon), view + ': more than 3 km round it');
-  }
-  assert.strictEqual(SC.areaMarginM, 2000);
-});
-
-test('linked nodes sit inside the area they extend', () => {
-  const r = SC.linkReach([HOME, EAST, FAR], [two('h0', 'e1'), two('h0', 'f1')]);
-  const shapes = [HOME, EAST, FAR].map(n => SC.shapeFor(n, SC.reachFor(r.radius.get(n.public_key) || 1000, null, SC.lobeOf(r.links.get(n.public_key)), 1000), 1000));
-  const rings = SC.scopeHull(shapes);
-  for (const n of [HOME, EAST, FAR]) assert.ok(SC.inRings(rings, n.lat, n.lon), n.public_key + ' outside its own area');
-});
-
-test('inRings: even-odd, so a hole is outside', () => {
-  const outer = [[0, 0], [0, 10], [10, 10], [10, 0]], hole = [[4, 4], [4, 6], [6, 6], [6, 4]];
-  assert.strictEqual(SC.inRings([outer, hole], 2, 2), true);
-  assert.strictEqual(SC.inRings([outer, hole], 5, 5), false);
-  assert.strictEqual(SC.inRings([outer, hole], 20, 5), false);
-  // Per-ring boxes skip rings that cannot hold the point, same answers.
-  const far = [[50, 50], [50, 60], [60, 60], [60, 50]];
-  const rings = [outer, hole, far], boxes = [[0, 0, 10, 10], [4, 4, 6, 6], [50, 50, 60, 60]];
-  for (const p of [[2, 2], [5, 5], [20, 5], [55, 55], [5, 55], [55, 5]]) {
-    assert.strictEqual(SC.inRings(rings, p[0], p[1], boxes), SC.inRings(rings, p[0], p[1]), 'at ' + p);
-  }
-});
-
-console.log('\n=== scope-contours.js: reach field (contourShapes, what the detailed view wraps) ===');
-
-const circles = (pts, R) => pts.map(p => SC.shapeFor(p, null, R));
-
-test('no shapes, or only unusable ones, give no rings', () => {
-  assert.deepStrictEqual(ringPlain(SC.contourShapes([])), []);
-  assert.deepStrictEqual(ringPlain(SC.contourShapes([null, { lat: NaN, lon: 1, minExt: 1000 }])), []);
-});
-
-test('one circle gives one ring at its radius, within 5%', () => {
-  const c = [40.7, -74.0];
-  const rings = SC.contourShapes(circles([{ lat: c[0], lon: c[1] }], 8000));
-  assert.strictEqual(rings.length, 1);
-  assert.ok(rings[0].length >= 16, 'ring too coarse: ' + rings[0].length + ' points');
-  for (const p of rings[0]) assert.ok(Math.abs(metres(c, p) - 8000) <= 400, 'ring point ' + Math.round(metres(c, p)) + ' m from the node');
-});
-
-test('far-apart circles give two rings, overlapping ones one', () => {
-  const a = offset(40.7, -74.0, 0, 0);
-  assert.strictEqual(SC.contourShapes(circles([a, offset(40.7, -74.0, 100000, 0)], 8000)).length, 2);
-  const b = offset(40.7, -74.0, 5000, 0);
-  const rings = SC.contourShapes(circles([a, b], 8000));
-  assert.strictEqual(rings.length, 1);
-  const lons = rings[0].map(p => p[1]);
-  assert.ok(Math.min(...lons) < a.lon && Math.max(...lons) > b.lon, 'the merged outline reaches past both');
-});
-
-test('members round an empty middle give an outer ring and a hole', () => {
-  const pts = [];
-  for (let k = 0; k < 24; k++) { const t = (k / 24) * 2 * Math.PI; pts.push(offset(40.7, -74.0, 40000 * Math.cos(t), 40000 * Math.sin(t))); }
-  const rings = SC.contourShapes(circles(pts, 8000));
-  assert.strictEqual(rings.length, 2);
-  assert.ok(!SC.inRings(rings, 40.7, -74.0), 'the middle is not reached');
-});
-
-test('distant clusters keep full resolution', () => {
-  const nyc = { lat: 40.7, lon: -74.0 }, ams = { lat: 52.37, lon: 4.9 };
-  const rings = SC.contourShapes(circles([nyc, ams], 8000));
-  assert.strictEqual(rings.length, 2);
-  for (const r of rings) {
-    const c = metres([nyc.lat, nyc.lon], r[0]) < 100000 ? nyc : ams;
-    for (const p of r) assert.ok(Math.abs(metres([c.lat, c.lon], p) - 8000) <= 400);
-  }
-});
-
-test('the outline follows the reach: short to the west, 8 km north, a lobe east', () => {
-  const cut = new Float64Array(SC.sectors).fill(8000);
-  for (let d = 225; d <= 315; d += 5) cut[RAY(d)] = 2000;
-  const lobe = plain(SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0')));
-  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(8000, cut, lobe, 1000), 1000)]);
-  assert.strictEqual(rings.length, 1);
-  const west = reachToward(rings, HOME, 270), north = reachToward(rings, HOME, 0), east = reachToward(rings, HOME, 90);
-  assert.ok(Math.abs(west - 2000) < 250, 'west ' + west);
-  assert.ok(Math.abs(north - 8000) < 400, 'north ' + north);
-  // The lobe runs to 22 km (the link x 1.1); its last few hundred metres are
-  // narrower than a grid cell, so the drawn tip stops up to a cell or two
-  // short, but always past the linked node at 20 km.
-  assert.ok(east >= 20000 && east <= 22500, 'east ' + east);
-  assert.ok(SC.inRings(rings, EAST.lat, EAST.lon), 'the linked node is outside');
-});
-
-test('an edge slanting across the rays (a ridge line) is not pushed out', () => {
-  // Terrain cuts every westward ray at a north-south line 3 km west: the
-  // reach edge slants across the rays, up to 60° off them here.
-  const cut = new Float64Array(SC.sectors).fill(30000);
-  for (let d = 210; d <= 330; d += 5) cut[RAY(d)] = 3000 / Math.abs(Math.sin(d * Math.PI / 180));
-  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(8000, cut, null, 1000), 1000)]);
-  // How far past the ridge line the outline reaches, along a row: walking
-  // west, the last point inside. Grid cells are 600 m here.
-  const past = (dn) => {
-    let x = -2000;
-    while (x > -6000) { const q = offset(HOME.lat, HOME.lon, x - 10, dn); if (!SC.inRings(rings, q.lat, q.lon)) break; x -= 10; }
-    return -x - 3000;
-  };
-  const out = [-4000, -2000, 0, 2000, 4000].map(past);
-  assert.ok(out.every((m) => m < 150), 'metres past the ridge line: ' + out.join(', '));
-});
-
-test('a lone link\'s lobe is narrow and stays attached to its 1 km circle', () => {
-  const lobe = plain(SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0')));
-  const rings = SC.contourShapes([SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)]);
-  assert.strictEqual(rings.length, 1, 'the lobe came loose from the circle');
-  const on = reachToward(rings, HOME, 90), off = reachToward(rings, HOME, 80), far = reachToward(rings, HOME, 70);
-  assert.ok(on > 20000, 'on the link ' + on);
-  assert.ok(off < 7000, '10° off the link ' + off);
-  assert.ok(far < 2500, '20° off the link ' + far);
-});
-
-test('detailed: every member has at least 1 km of area all round, even boxed in by terrain', () => {
-  const boxed = new Float64Array(SC.sectors).fill(300);
-  const rings = SC.contourShapes([
-    SC.shapeFor(HOME, SC.reachFor(8000, boxed, null, 1000), 1000),
-    SC.shapeFor(EAST, SC.reachFor(1000, null, null, 1000), 1000),
-  ]);
-  for (const n of [HOME, EAST]) assertKmAround(rings, n, n.public_key);
-});
-
-console.log('\n=== scope-contours.js: detailed view (wrapShapes, shrink-wrap) ===');
-
-// selfCrosses: whether any two non-adjacent edges of a ring cross.
-function selfCrosses(ring) {
-  const n = ring.length;
-  const crossP = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-  for (let i = 0; i < n; i++) {
-    const a = ring[i], b = ring[(i + 1) % n];
-    for (let j = i + 2; j < n; j++) {
-      if (i === 0 && j === n - 1) continue;
-      const c = ring[j], d = ring[(j + 1) % n];
-      if (crossP(a, b, c) * crossP(a, b, d) < 0 && crossP(c, d, a) * crossP(c, d, b) < 0) return true;
-    }
-  }
-  return false;
-}
-
-test('members whose reach comes within 15 km are joined; further apart they stay two areas', () => {
-  assert.strictEqual(SC.wrapGapM, 15000);
-  const a = offset(40.7, -74.0, 0, 0);
-  // Reach 1 km each: centres 12 km apart leave a 10 km gap, 30 km apart 28 km.
-  const near = SC.wrapShapes(circles([a, offset(40.7, -74.0, 12000, 0)], 1000));
-  assert.strictEqual(near.length, 1, 'a 10 km gap should be bridged');
-  const mid = offset(40.7, -74.0, 6000, 0);
-  assert.ok(SC.inRings(near, mid.lat, mid.lon), 'the gap is part of the area');
-  assert.ok(!SC.inRings(SC.contourShapes(circles([a, offset(40.7, -74.0, 12000, 0)], 1000)), mid.lat, mid.lon), 'detailed leaves the gap');
-  const far = SC.wrapShapes(circles([a, offset(40.7, -74.0, 30000, 0)], 1000));
-  assert.strictEqual(far.length, 2, 'a 28 km gap should not be bridged');
-});
-
-test('the gap is measured between reach edges, not between repeaters', () => {
-  // 30 km apart, but each reaches 8 km toward the other: a 14 km gap.
-  const rings = SC.wrapShapes(circles([offset(40.7, -74.0, 0, 0), offset(40.7, -74.0, 30000, 0)], 8000));
-  assert.strictEqual(rings.length, 1);
-});
-
-test('the middle of a group is filled, and a bay narrower than 15 km too', () => {
-  const tri = [offset(40.7, -74.0, 0, 0), offset(40.7, -74.0, 12000, 0), offset(40.7, -74.0, 6000, 10000)];
-  const rings = SC.wrapShapes(circles(tri, 1000));
-  assert.strictEqual(rings.length, 1);
-  const c = offset(40.7, -74.0, 6000, 3300);
-  assert.ok(SC.inRings(rings, c.lat, c.lon), 'the middle of the triangle is outside');
-  // A U of members 6 km apart, 12 km across (a 10 km gap): its bay is
-  // filled. One 16 km across (14 km gap, its diagonal 15.9 km) is only
-  // filled as far as its corners bridge.
-  const u = [[0, 0], [6000, 0], [12000, 0], [0, 6000], [12000, 6000], [0, 12000], [12000, 12000]].map(p => offset(40.7, -74.0, p[0], p[1]));
-  const ur = SC.wrapShapes(circles(u, 1000));
-  const bay = offset(40.7, -74.0, 6000, 9000);
-  assert.ok(SC.inRings(ur, bay.lat, bay.lon), 'the bay is outside');
-});
-
-test('a lone repeater\'s spokes are wrapped: the notch between them is filled while narrower than 15 km', () => {
-  // One repeater, 1 km round it, with link lobes 20 km long every 60°: what
-  // the live map showed (one central repeater, a star of proven links).
-  const lobe = new Float64Array(SC.sectors);
-  for (let b = 0; b < 360; b += 60) for (let k = -2; k <= 2; k++) lobe[RAY(b + 5 * k + 360)] = Math.max(lobe[RAY(b + 5 * k + 360)], 20000 * (1 - Math.abs(5 * k) / 11.25));
-  const shapes = [SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000)];
-  const wrap = SC.wrapShapes(shapes), det = SC.contourShapes(shapes);
-  // Between two spokes, 30° off each: 6 km out the gap is 6 km wide, 22 km
-  // out (past the tips) 22 km.
-  const near = offset(HOME.lat, HOME.lon, 6000 * Math.sin(Math.PI / 6), 6000 * Math.cos(Math.PI / 6));
-  assert.ok(!SC.inRings(det, near.lat, near.lon), 'detailed fills the notch');
-  assert.ok(SC.inRings(wrap, near.lat, near.lon), 'wrap leaves the notch between spokes open');
-  const far = offset(HOME.lat, HOME.lon, 19000 * Math.sin(Math.PI / 6), 19000 * Math.cos(Math.PI / 6));
-  assert.ok(!SC.inRings(wrap, far.lat, far.lon), 'wrap fills between spokes where they are 19 km apart');
-  assert.ok(reachToward(wrap, HOME, 0) >= 18000, 'the spoke itself is cut short');
-});
-
-test('a long link lobe stays a lobe: no big triangle toward its tip', () => {
-  const lobe = plain(SC.lobeOf(SC.linkReach([HOME, EAST], [two('h0', 'e1')]).links.get('h0')));
-  const shapes = [SC.shapeFor(HOME, SC.reachFor(1000, null, lobe, 1000), 1000), SC.shapeFor(NORTH, null, 1000)];
-  const wrap = SC.wrapShapes(shapes), hull = SC.scopeHull(shapes);
-  const between = offset(HOME.lat, HOME.lon, 11000, 3000);
-  assert.ok(SC.inRings(hull, between.lat, between.lon), 'the general view fills it (the contrast this view is for)');
-  assert.ok(!SC.inRings(wrap, between.lat, between.lon), 'wrap filled the triangle to the lobe tip');
-  assert.ok(reachToward(wrap, HOME, 90) > 20000, 'the lobe itself is kept');
-});
-
-test('wrap contains what each member reaches, and 1 km round every member', () => {
-  const rnd = prng(11);
-  const shapes = [];
-  for (let i = 0; i < 25; i++) {
-    const p = offset(40.7, -74.0, (rnd() - 0.5) * 60000, (rnd() - 0.5) * 60000);
-    const cut = new Float64Array(SC.sectors).fill(30000);
-    for (let k = 0; k < 20; k++) cut[Math.floor(rnd() * SC.sectors)] = 500;
-    shapes.push(Object.assign(SC.shapeFor(p, SC.reachFor(1000 + rnd() * 9000, cut, null, 1000), 1000), { _p: p }));
-  }
-  const wrap = SC.wrapShapes(shapes);
-  for (const s of shapes) assertKmAround(wrap, s._p, 'member');
-  // Every point a member reaches on both rays either side of it (2% in,
-  // which is as close as a grid outline is drawn) is inside the wrap.
-  // Between a ray cut to the floor and a long one the shape is a sliver
-  // narrower than a grid cell, and the terrain there is not known anyway.
-  const reaches = (s, q) => {
-    const kx = 111320 * Math.cos(s.lat * Math.PI / 180);
-    const dx = (q.lon - s.lon) * kx, dy = (q.lat - s.lat) * 111320, d = Math.sqrt(dx * dx + dy * dy);
-    let b = Math.atan2(dx, dy); if (b < 0) b += 2 * Math.PI;
-    const i = Math.floor(b / (2 * Math.PI / SC.sectors)) % SC.sectors;
-    return d < Math.min(s.ext[i], s.ext[(i + 1) % SC.sectors]) * 0.98;
-  };
-  let checked = 0;
-  for (let k = 0; k < 3000; k++) {
-    const q = offset(40.7, -74.0, (rnd() - 0.5) * 80000, (rnd() - 0.5) * 80000);
-    if (!shapes.some((s) => reaches(s, q))) continue;
-    checked++;
-    assert.ok(SC.inRings(wrap, q.lat, q.lon), 'a reached point is outside the wrap');
-  }
-  assert.ok(checked > 100, 'too few points checked: ' + checked);
-});
-
-test('wrap rings never cross themselves', () => {
-  const rnd = prng(3);
-  const pts = [];
-  for (let i = 0; i < 40; i++) pts.push(offset(40.7, -74.0, (rnd() - 0.5) * 70000, (rnd() - 0.5) * 70000));
-  const rings = SC.wrapShapes(pts.map(p => SC.shapeFor(p, SC.reachFor(1000 + rnd() * 6000, null, null, 1000), 1000)));
-  assert.ok(rings.length >= 1);
-  rings.forEach((r, i) => assert.ok(!selfCrosses(r), 'ring ' + i + ' crosses itself'));
-});
-
-test('co-located and collinear members do not break the wrap', () => {
-  const a = offset(40.7, -74.0, 0, 0);
-  assert.strictEqual(SC.wrapShapes(circles([a, a, a], 1000)).length, 1);
-  const line = [0, 10000, 20000, 30000].map(x => offset(40.7, -74.0, x, 0));
-  const rings = SC.wrapShapes(circles(line, 1000));
-  assert.strictEqual(rings.length, 1, 'collinear members 8 km apart should be one area');
-  assert.deepStrictEqual(ringPlain(SC.wrapShapes([])), []);
+  assert.strictEqual(peers.size, 0, JSON.stringify(plain(peers)));
+  assert.strictEqual(SC.memberLinks([HOME], null).size, 0);
 });
 
 console.log('\n=== scope-contours.js: overlay ===');
 
 // Recording Leaflet stub: enough of L for createOverlay.
 function fakeLeaflet() {
-  const rec = { polygons: [], panes: {}, renderers: 0, tip: null, tipOpen: false, handlers: {} };
+  const rec = { polygons: [], lines: [], panes: {}, renderers: 0, tip: null, tipOpen: false, handlers: {} };
   function classList() {
     const s = new Set();
     return { add: c => s.add(c), remove: c => s.delete(c), contains: c => s.has(c) };
@@ -889,6 +393,13 @@ function fakeLeaflet() {
       const el = { classList: classList(), setAttribute: (k, v) => { attrs[k] = String(v); }, getAttribute: k => attrs[k] };
       const p = { rings, options: opts, getElement: () => el };
       rec.polygons.push(p);
+      return p;
+    },
+    polyline(lines, opts) {
+      const attrs = {};
+      const el = { classList: classList(), setAttribute: (k, v) => { attrs[k] = String(v); }, getAttribute: k => attrs[k] };
+      const p = { lines, options: opts, getElement: () => el };
+      rec.lines.push(p);
       return p;
     },
     popup(opts) {
@@ -925,8 +436,13 @@ const NODES = [
 ];
 // Links that make #nyc one area (a1, a2 and a3 carry or declare it).
 const NYC_LINKS = [two('a1', 'a2'), two('a2', 'a3')];
-// The polygons drawn by the last render.
+// The layers drawn by the last render: a fill and an outline per scope.
 const drawnNow = o => Array.from(o.layer._layers);
+const fillsNow = o => drawnNow(o).filter(l => l.rings);
+// A fill's shapes: one ring each (the polygon is [[ring], [ring], ...]).
+const shapesOf = fill => fill.rings.map(poly => poly[0]);
+const inFill = (fill, lat, lon) => G.inAny(shapesOf(fill), lat, lon);
+const G = sandbox.window.ScopeGeometry;
 
 test('hidden overlay computes nothing and fetches no links', () => {
   const { L, map, rec } = fakeLeaflet();
@@ -938,7 +454,7 @@ test('hidden overlay computes nothing and fetches no links', () => {
   assert.strictEqual(loads, 0);
 });
 
-test('visible overlay draws one non-interactive outline per scope (members linked) in its own SVG pane', () => {
+test('visible overlay draws one non-interactive area per scope, a fill and an outline, in its own SVG pane', () => {
   const { L, map, rec } = fakeLeaflet();
   const o = SC.createOverlay(L, map, {});
   o.setNodes(NODES); o.setLinks(NYC_LINKS);
@@ -948,14 +464,26 @@ test('visible overlay draws one non-interactive outline per scope (members linke
   assert.strictEqual(rec.renderers, 1, 'one SVG renderer, so CSS classes apply on canvas maps');
   // ct, li, ny, nyc: carried or configured, each one area.
   assert.strictEqual(rec.polygons.length, 4);
-  assert.ok(rec.polygons.every(p => !/observed|configured/.test(p.options.className)), 'no kind of area any more');
-  for (const p of rec.polygons) {
-    assert.strictEqual(p.options.interactive, false, 'outlines must never take pointer events');
+  assert.strictEqual(rec.lines.length, 4);
+  for (const p of rec.polygons.concat(rec.lines)) {
+    assert.strictEqual(p.options.interactive, false, 'areas must never take pointer events');
     assert.strictEqual(p.options.pane, 'mcScopeContoursPane');
     assert.ok(p.options.renderer && p.options.renderer._svg);
+    assert.ok(/\bmc-scope-area\b/.test(p.options.className));
+  }
+  for (const p of rec.polygons) {
+    assert.strictEqual(p.options.stroke, false, 'the fill has no stroke: no lines between overlapping shapes');
+    assert.strictEqual(p.options.fillRule, 'nonzero', 'overlapping shapes must not cancel');
+    assert.ok(/\bmc-scope-fill\b/.test(p.options.className));
+  }
+  for (const l of rec.lines) {
+    assert.strictEqual(l.options.fill, false);
+    assert.ok(/\bmc-scope-line\b/.test(l.options.className));
+    assert.ok(l.lines.length >= 1 && l.lines.every(x => x.length >= 2));
   }
   // ct<script>, li, ny, nyc in name order: nyc is the fourth colour.
   assert.ok(rec.polygons.some(p => /mc-reach-c4\b/.test(p.options.className)));
+  assert.ok(rec.lines.some(p => /mc-reach-c4\b/.test(p.options.className)));
 });
 
 test('scopes() lists every scope with its counts, sorted, and onChange reports it', () => {
@@ -971,21 +499,24 @@ test('scopes() lists every scope with its counts, sorted, and onChange reports i
   assert.deepStrictEqual(seen[seen.length - 1], [4, true]);
 });
 
-test('links are loaded once shown, and change the shape', () => {
+test('links are loaded once shown, and add the band between two members', () => {
   const { L, map, rec } = fakeLeaflet();
-  const nodes = [Object.assign({ transported_scopes: ['#home'] }, HOME), EAST];
+  const nodes = [Object.assign({ transported_scopes: ['#home'] }, HOME), Object.assign({ transported_scopes: ['#home'] }, EAST)];
   let loads = 0;
   let resolve;
   const o = SC.createOverlay(L, map, { loadLinks: () => { loads++; return new Promise(r => { resolve = r; }); } });
   o.setNodes(nodes);
   o.setVisible(true);
   assert.strictEqual(loads, 1);
+  const mid = offset(HOME.lat, HOME.lon, 10000, 0);
   const before = rec.polygons[rec.polygons.length - 1];
-  assert.ok(reachToward(before.rings, HOME, 90) < 1100 + SC.areaMarginM, 'floor circle (and margin) before links arrive');
-  resolve([{ source: 'h0', target: 'e1', bidirectional: true, heard_by_source: 1, heard_by_target: 1 }]);
+  assert.strictEqual(shapesOf(before).length, 2, 'two octagons before links arrive');
+  assert.ok(!inFill(before, mid.lat, mid.lon));
+  resolve([two('h0', 'e1')]);
   return Promise.resolve().then(() => Promise.resolve()).then(() => {
     const after = rec.polygons[rec.polygons.length - 1];
-    assert.ok(reachToward(after.rings, HOME, 90) > 18000, 'lobe after links arrive: ' + reachToward(after.rings, HOME, 90));
+    assert.strictEqual(shapesOf(after).length, 3, 'and the band once they have');
+    assert.ok(inFill(after, mid.lat, mid.lon), 'the band covers the midpoint');
   });
 });
 
@@ -1028,13 +559,25 @@ test('unchanged members and links reuse the cache; a moved node recomputes only 
   assert.strictEqual(o.stats().computed, first + 1, 'only the moved node\'s scope recomputed');
 });
 
-test('a new link recomputes only the scopes whose members it touches', () => {
+test('a new link rebuilds only the scopes both its ends belong to', () => {
   const { L, map } = fakeLeaflet();
   const o = SC.createOverlay(L, map, {});
   o.setVisible(true); o.setNodes(NODES); o.setLinks([]);
   const base = o.stats().computed;
-  o.setLinks([{ source: 'a4', target: 'a3', bidirectional: true, heard_by_source: 1, heard_by_target: 1 }]); // touches ct (a4) and nyc and li (a3)
-  assert.strictEqual(o.stats().computed, base + 3);
+  o.setLinks([two('a4', 'a3')]); // a4 is in ct only, a3 in nyc and li: no scope holds both
+  assert.strictEqual(o.stats().computed, base, 'a link to a non-member changes no area');
+  o.setLinks([two('a4', 'a3'), two('a1', 'a3')]); // both in nyc
+  assert.strictEqual(o.stats().computed, base + 1);
+});
+
+test('scopes with the same members share one area', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, {});
+  o.setVisible(true);
+  o.setNodes([Object.assign({ transported_scopes: ['#one', '#two'] }, HOME), Object.assign({ transported_scopes: ['#one', '#two'] }, EAST)]);
+  assert.strictEqual(rec.polygons.length, 2);
+  assert.strictEqual(o.stats().computed, 1);
+  assert.strictEqual(o.stats().cached, 1);
 });
 
 test('the cache drops scopes that disappear', () => {
@@ -1059,339 +602,153 @@ test('setVisible(false) takes the layer off the map and empties the list', () =>
   assert.deepStrictEqual(seen[seen.length - 1], [0, false]);
 });
 
-console.log('\n=== scope-contours.js: terrain ===');
+console.log('\n=== scope-contours.js: schematic areas ===');
 
-// Fake terrain provider: answers asynchronously, as the real one does, with
-// a cut to 2 km west (225-315°) of every repeater asked about.
-function fakeTerrain(opts) {
-  opts = opts || {};
-  const t = { calls: [], state: opts.state || 'ok', pending: [] };
-  // release() answers the oldest request still waiting.
-  t.release = () => t.pending.shift()();
-  t.status = () => t.state;
-  t.sources = [];
-  t.setSource = (src) => t.sources.push(src);
-  t.paramsSet = [];
-  t.setParams = (c) => t.paramsSet.push({ c, before: t.calls.length });
-  t.sourceUrl = () => opts.url || null;
-  t.extentsFor = (items, onProgress) => {
-    t.calls.push(items.map(it => ({ pk: it.pk, R: Math.round(it.R) })));
-    const answer = () => items.forEach(it => {
-      const ext = new Float64Array(SC.sectors).fill(it.R);
-      for (let d = 225; d <= 315; d += 5) ext[RAY(d)] = 2000;
-      onProgress(it.pk, ext);
-    });
-    if (opts.defer) return new Promise(r => { t.pending.push(() => { answer(); r(); }); });
-    return Promise.resolve().then(answer);
-  };
-  return t;
-}
-const tick = () => new Promise(r => setTimeout(r, 0));
+const scopedAs = (n, s) => Object.assign({ transported_scopes: [s] }, n);
+const lastFill = rec => rec.polygons[rec.polygons.length - 1];
+const cornerDist = (ring, n) => ring.map(p => metres(p, [n.lat, n.lon]));
 
-const T_NODES = [
-  Object.assign({ transported_scopes: ['#home'] }, HOME),
-  Object.assign({ transported_scopes: ['#east'] }, EAST),
-  Object.assign({ default_scope: '#gone' }, FAR),
-];
+test('a lone repeater is an octagon, 4 km to its corners, outlined once', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, {});
+  o.setNodes([scopedAs(HOME, '#home')]); o.setVisible(true);
+  const shapes = shapesOf(lastFill(rec));
+  assert.strictEqual(shapes.length, 1);
+  assert.strictEqual(shapes[0].length, 8);
+  cornerDist(shapes[0], HOME).forEach(d => assert.ok(Math.abs(d - 4000) < 15, 'corner at ' + d.toFixed(0) + ' m'));
+  const lines = rec.lines[rec.lines.length - 1].lines;
+  assert.strictEqual(lines.length, 1);
+  assert.strictEqual(lines[0].length, 9, 'a closed ring');
+});
 
-test('terrain is asked for the members of drawn scopes only, with each one\'s radius', () => {
-  const { L, map } = fakeLeaflet();
-  const t = fakeTerrain();
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
+test('opts.radiusM and opts.tubeWidthM set the sizes', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, { radiusM: 1500, tubeWidthM: 600 });
+  o.setNodes([scopedAs(HOME, '#home'), scopedAs(EAST, '#home')]); o.setLinks([two('h0', 'e1')]); o.setVisible(true);
+  const fill = lastFill(rec);
+  cornerDist(shapesOf(fill)[0], HOME).forEach(d => assert.ok(Math.abs(d - 1500) < 10, d.toFixed(0)));
+  const at = (n) => { const p = offset(HOME.lat, HOME.lon, 10000, n); return inFill(fill, p.lat, p.lon); };
+  assert.ok(at(250) && at(-250), 'inside a 600 m band');
+  assert.ok(!at(320) && !at(-320), 'outside it');
+});
+
+test('a band joins two members that hear each other, a third of the radius wide: linked, not covered', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, {});
+  o.setNodes([scopedAs(HOME, '#home'), scopedAs(EAST, '#home')]); o.setLinks([heard('h0', 'e1')]); o.setVisible(true);
+  const fill = lastFill(rec);
+  assert.strictEqual(shapesOf(fill).length, 3);
+  const at = (n) => { const p = offset(HOME.lat, HOME.lon, 10000, n); return inFill(fill, p.lat, p.lon); };
+  assert.ok(at(0) && at(600) && at(-600), 'the band is about 670 m either side');
+  assert.ok(!at(700) && !at(-700) && !at(2000), 'and no wider');
+  // One outline round octagon, band and octagon: no line across the joins.
+  const lines = rec.lines[rec.lines.length - 1].lines;
+  const shapes = shapesOf(fill);
+  lines.forEach(l => l.forEach((p, i) => {
+    if (!i) return;
+    const m = [(l[i - 1][0] + p[0]) / 2, (l[i - 1][1] + p[1]) / 2];
+    const inside = shapes.filter(r => G.inAny([r], m[0] + 1e-7, m[1] + 1e-7) && G.inAny([r], m[0] - 1e-7, m[1] - 1e-7)).length;
+    assert.ok(inside === 0, 'an outline piece runs inside a shape');
+  }));
+});
+
+test('no band where the octagons already meet, through a non-member, or without a known link', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, {});
+  const relay = Object.assign({ public_key: 'r9' }, offset(HOME.lat, HOME.lon, 10000, 0));
+  // NORTH is 6 km off: two 4 km octagons overlap. EAST is linked only
+  // through r9, which is not in the scope. FAR has no link at all.
+  o.setNodes([scopedAs(HOME, '#home'), scopedAs(NORTH, '#home'), scopedAs(EAST, '#home'), scopedAs(FAR, '#home'), relay]);
+  o.setLinks([two('h0', 'n1'), two('h0', 'r9'), two('r9', 'e1')]);
   o.setVisible(true);
-  o.setHidden(['gone']);
+  const fill = lastFill(rec);
+  assert.strictEqual(shapesOf(fill).length, 4, 'four octagons, no band');
+  assert.ok(!inFill(fill, relay.lat, relay.lon), 'nothing is drawn through a repeater that does not forward the scope');
+});
+
+test('nothing is drawn until the map config has answered; then its radius, band width and per-repeater radii apply', () => {
+  const { L, map, rec } = fakeLeaflet();
+  let answer, asked = 0;
+  const infos = [];
+  const o = SC.createOverlay(L, map, { loadMapConfig: () => { asked++; return new Promise(r => { answer = r; }); } });
+  o.onChange((list, visible, info) => infos.push([list.length, info.radiusM]));
+  o.setNodes([scopedAs(HOME, '#home'), scopedAs(EAST, '#home'), scopedAs(Object.assign({}, FAR, { public_key: 'F1AB' }), '#home')]);
   o.setLinks([two('h0', 'e1')]);
-  o.setNodes(T_NODES);
+  assert.strictEqual(asked, 0, 'not asked while hidden');
+  o.setVisible(true);
+  o.setNodes([scopedAs(HOME, '#home'), scopedAs(EAST, '#home'), scopedAs(Object.assign({}, FAR, { public_key: 'F1AB' }), '#home')]);
+  assert.strictEqual(asked, 1, 'asked once');
+  assert.strictEqual(rec.polygons.length, 0, 'drawn at the default before the config said');
+  assert.deepStrictEqual(infos[infos.length - 1], [1, 4000], 'the list is there meanwhile');
+  // h0 matches both 'h' and 'h0': the longer wins. Keys match in any case.
+  answer({ contours: { radiusKm: 6, tubeWidthKm: 1, radii: { h: 9, H0: 2, f1: 10, zz: 3 } } });
   return tick().then(() => {
-    const asked = t.calls.flat().map(c => c.pk + ':' + c.R).sort();
-    assert.deepStrictEqual(asked, ['e1:20000', 'h0:20000'], 'asked ' + asked.join(' '));
+    const fill = lastFill(rec);
+    const shapes = shapesOf(fill);
+    assert.strictEqual(shapes.length, 4, 'three octagons and a band');
+    cornerDist(shapes[0], HOME).forEach(d => assert.ok(Math.abs(d - 2000) < 10, 'h0 at its own 2 km: ' + d.toFixed(0)));
+    cornerDist(shapes[1], EAST).forEach(d => assert.ok(Math.abs(d - 6000) < 20, 'e1 at the mesh-wide 6 km: ' + d.toFixed(0)));
+    cornerDist(shapes[2], FAR).forEach(d => assert.ok(Math.abs(d - 10000) < 30, 'F1AB at 10 km: ' + d.toFixed(0)));
+    const at = (n) => { const p = offset(HOME.lat, HOME.lon, 8000, n); return inFill(fill, p.lat, p.lon); };
+    assert.ok(at(420) && !at(520), 'a 1 km band');
+    assert.deepStrictEqual(infos[infos.length - 1], [1, 6000]);
+    assert.strictEqual(asked, 1);
   });
 });
 
-test('the floor is 1 km by default: the overlay keeps every member 1 km inside its border', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const t = fakeTerrain();
-  t.extentsFor = (items, onP) => Promise.resolve().then(() => items.forEach(it => onP(it.pk, new Float64Array(SC.sectors).fill(100))));
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
-  o.setVisible(true);
-  const ns = [Object.assign({ transported_scopes: ['#x'] }, HOME), Object.assign({ transported_scopes: ['#x'] }, EAST)];
-  o.setNodes(ns);
-  return tick().then(() => {
-    // Unlinked: each in its own area.
-    for (const n of ns) assertKmAround(drawnNow(o).find(p => SC.inRings(p.rings, n.lat, n.lon)).rings, n, n.public_key);
-  });
-});
-
-test('a terrain answer reshapes that repeater\'s area', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const t = fakeTerrain();
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
-  o.setVisible(true);
-  o.setNodes([T_NODES[0], EAST]);   // EAST: no scope, but placed, so a link to it counts
-  o.setLinks([two('h0', 'e1')]);    // R = 20 km
-  const westBefore = () => reachToward(rec.polygons[rec.polygons.length - 1].rings, HOME, 270);
-  return tick().then(() => {
-    // Cut to 2 km from 225° to 315°: the area's west edge becomes the chord
-    // between 220° and 320°, 20 km x sin 40° ~ 12.9 km, from 20 km, plus
-    // the 2 km margin.
-    const west = westBefore();
-    assert.ok(Math.abs(west - 20000 * Math.sin(40 * Math.PI / 180) - SC.areaMarginM) < 400, 'west ' + west);
-  });
-});
-
-test('an answer for a node that has since moved is ignored', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const t = fakeTerrain({ defer: true });
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
-  o.setVisible(true);
-  o.setLinks([two('h0', 'e1')]);
-  o.setNodes([T_NODES[0], EAST]);
-  const moved = Object.assign({}, T_NODES[0], { lat: HOME.lat + 0.05 });
-  o.setNodes([moved, EAST]);
-  t.release();   // the answer for the old position, the first request
-  return tick().then(() => {
-    const p = rec.polygons[rec.polygons.length - 1];
-    const west = reachToward(p.rings, moved, 270);
-    assert.ok(west > 10000, 'a stale terrain cut was applied: west ' + west);
-  });
-});
-
-test('the request carries the nodes that heard it, which set its loss budget', () => {
-  const { L, map } = fakeLeaflet();
-  const t = fakeTerrain();
-  const seen = [];
-  t.extentsFor = ((orig) => (items, onP) => { items.forEach(it => seen.push(it)); return orig(items, onP); })(t.extentsFor);
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
-  o.setVisible(true);
-  o.setLinks([two('h0', 'e1')]);
-  o.setNodes([T_NODES[0], EAST]);
-  return tick().then(() => {
-    const h = seen.filter(it => it.pk === 'h0').pop();
-    assert.ok(h && !h.antennaM, 'no height was set');
-    assert.strictEqual(typeof h.R, 'number', 'the radius, for when terrain is missing');
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(h.links)), [{ lat: EAST.lat, lon: EAST.lon }]);
-  });
-});
-
-test('an operator height (longest matching prefix) is sent too, and requests wait for it', () => {
-  const { L, map } = fakeLeaflet();
-  const t = fakeTerrain();
-  const seen = [];
-  t.extentsFor = ((orig) => (items, onP) => { items.forEach(it => seen.push(it)); return orig(items, onP); })(t.extentsFor);
-  let resolveHeights;
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadMapConfig: () => new Promise(r => { resolveHeights = r; }) }, sync));
-  o.setVisible(true);
-  o.setNodes([Object.assign({}, T_NODES[0], { public_key: 'h0aaaaaaaabbbb' })]);
-  assert.strictEqual(seen.length, 0, 'asked before the heights were known');
-  resolveHeights({ center: [0, 0], zoom: 9, antennaHeights: { 'H0AAAAAA': 15, 'h0aaaaaaaa': 25 } });
-  return tick().then(tick).then(() => {
-    const h = seen.pop();
-    assert.ok(h, 'never asked');
-    assert.strictEqual(h.antennaM, 25, 'the longer prefix should win');
-    assert.ok(Array.isArray(h.links), 'the budget still needs the links');
-  });
-});
-
-test('the listeners carry their configured antenna heights to the budget', () => {
-  const { L, map } = fakeLeaflet();
-  const t = fakeTerrain();
-  const seen = [];
-  t.extentsFor = ((orig) => (items, onP) => { items.forEach(it => seen.push(it)); return orig(items, onP); })(t.extentsFor);
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadMapConfig: () => Promise.resolve({ antennaHeights: { e1: 37 } }) }, sync));
-  o.setVisible(true);
-  o.setLinks([two('h0', 'e1'), two('h0', 'n1')]);
-  o.setNodes([T_NODES[0], EAST, NORTH]);
-  return tick().then(tick).then(() => {
-    const h = seen.filter(it => it.pk === 'h0').pop();
-    assert.ok(h, 'never asked');
-    const byLon = new Map(h.links.map(b => [b.lon.toFixed(4), b.antennaM]));
-    assert.strictEqual(byLon.get(EAST.lon.toFixed(4)), 37, 'EAST at its configured 37 m');
-    assert.strictEqual(byLon.get(NORTH.lon.toFixed(4)), undefined, 'NORTH at the default');
-  });
-});
-
-test('mapDefaults.contours goes to the terrain provider before it is asked anything', () => {
-  const { L, map } = fakeLeaflet();
-  const t = fakeTerrain();
-  const contours = { budgetPercentile: 75, reachRule: 'first', receiverHeightM: 2 };
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadMapConfig: () => Promise.resolve({ contours }) }, sync));
-  o.setVisible(true);
-  o.setNodes([T_NODES[0]]);
-  return tick().then(tick).then(() => {
-    assert.strictEqual(t.paramsSet.length, 1, 'setParams calls: ' + t.paramsSet.length);
-    assert.deepStrictEqual(t.paramsSet[0], { c: contours, before: 0 });
-    assert.ok(t.calls.length > 0, 'never asked');
-  });
-});
-
-test('mapDefaults.contours.marginKm sets the margin in both views, terrain or not, and the hint says so', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const o = SC.createOverlay(L, map, Object.assign({ loadMapConfig: () => Promise.resolve({ contours: { marginKm: 0.5 } }) }, sync));
-  let hint = '';
-  o.onChange((items, visible, info) => { hint = JSON.stringify(info); });
-  const lone = { public_key: 'z1', lat: 45.0, lon: -100.0, transported_scopes: ['#solo'] };
-  o.setNodes([lone]); o.setVisible(true);
-  return tick().then(tick).then(() => {
-    for (const view of ['hull', 'detailed']) {
-      o.setView(view);
-      const rings = rec.polygons[rec.polygons.length - 1].rings;
-      assertAround(rings, lone, 1450, view);
-      const out = offset(lone.lat, lone.lon, 1900, 0);
-      assert.ok(!SC.inRings(rings, out.lat, out.lon), view + ': the 2 km margin is still drawn');
-    }
-    assert.ok(/"marginM":500/.test(hint), 'info: ' + hint);
-    assert.ok(/at least 1\.5 km round each/.test(SC.areaNote('hull', 500)), SC.areaNote('hull', 500));
-    assert.ok(/at least 3 km round each/.test(SC.areaNote('detailed')), 'default: ' + SC.areaNote('detailed'));
-  });
-});
-
-// Phlm.sh Amon Dîn's case: a repeater whose long links are all to hilltop
-// repeaters in none of its areas. Five neighbours 1 km round it keep its
-// radius at 1.1 km; PEAK, 40 km east, would stretch a 44 km lobe.
-const PEAK = Object.assign({ public_key: 'pk' }, offset(HOME.lat, HOME.lon, 40000, 0));
-const NEARS = [0, 72, 144, 216, 288].map((d, i) => Object.assign({ public_key: 'nb' + i },
-  offset(HOME.lat, HOME.lon, 1000 * Math.sin(d * Math.PI / 180), 1000 * Math.cos(d * Math.PI / 180))));
-const PEAK_LINKS = NEARS.map(n => two('h0', n.public_key)).concat([two('h0', 'pk')]);
-function areaOf(o, rec, scope) { o.setOnly(scope); return rec.polygons[rec.polygons.length - 1].rings; }
-
-test('a link to a repeater outside the area does not stretch it, in both views', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const o = SC.createOverlay(L, map, sync);
-  o.setVisible(true);
-  o.setLinks(PEAK_LINKS);
-  o.setNodes([Object.assign({ default_scope: '#solo' }, HOME), Object.assign({ transported_scopes: ['#peak'] }, PEAK)].concat(NEARS));
-  for (const view of ['hull', 'detailed']) {
-    o.setView(view);
-    const east = reachToward(areaOf(o, rec, 'solo'), HOME, 90);
-    assert.ok(east < 1100 + SC.areaMarginM + 400, view + ': stretched toward a partner in another area, east ' + east);
-  }
-});
-
-test('a link to a repeater in the same area still stretches it past the partner', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const o = SC.createOverlay(L, map, sync);
-  o.setVisible(true);
-  o.setLinks(PEAK_LINKS);
-  o.setNodes([Object.assign({ default_scope: '#solo' }, HOME), Object.assign({ default_scope: '#solo' }, PEAK)].concat(NEARS));
-  for (const view of ['hull', 'detailed']) {
-    o.setView(view);
-    const rings = areaOf(o, rec, 'solo');
-    const past = offset(PEAK.lat, PEAK.lon, 1500, 0);
-    assert.ok(SC.inRings(rings, past.lat, past.lon), view + ': no room past the partner');
-  }
-});
-
-test('a repeater in two areas is shaped for each: only partners in that area count', () => {
-  // HOME is in #a and #b; PEAK, its partner, only in #b.
-  const { L, map, rec } = fakeLeaflet();
-  const o = SC.createOverlay(L, map, sync);
-  o.setVisible(true);
-  o.setLinks(PEAK_LINKS);
-  o.setNodes([Object.assign({ transported_scopes: ['#a', '#b'] }, HOME),
-    Object.assign({ transported_scopes: ['#c'] }, PEAK)].concat(NEARS));
-  assert.ok(reachToward(areaOf(o, rec, 'a'), HOME, 90) < 1100 + SC.areaMarginM + 400, '#a: stretched toward a partner in #c');
-  o.setNodes([Object.assign({ transported_scopes: ['#a', '#b'] }, HOME),
-    Object.assign({ transported_scopes: ['#a'] }, PEAK)].concat(NEARS));
-  assert.ok(SC.inRings(areaOf(o, rec, 'a'), PEAK.lat, PEAK.lon), '#a: its partner is outside');
-  assert.ok(reachToward(areaOf(o, rec, 'b'), HOME, 90) < 1100 + SC.areaMarginM + 400, '#b: stretched toward a partner in #a only');
-});
-
-test('a repeater configured for a scope is a member like one seen carrying it: links between them stretch the area', () => {
-  // #m: HOME carries it; PEAK, 40 km east and linked to HOME, is only configured for it.
-  for (const view of ['hull', 'detailed']) {
+test('config values out of range are ignored, and a failed config leaves the defaults', () => {
+  const run = (cfg) => {
     const { L, map, rec } = fakeLeaflet();
-    const o = SC.createOverlay(L, map, sync);
-    o.setVisible(true);
-    o.setLinks(PEAK_LINKS);
-    o.setNodes([Object.assign({ transported_scopes: ['#m'] }, HOME), Object.assign({ default_scope: '#m' }, PEAK)].concat(NEARS));
-    o.setView(view);
-    rec.polygons.length = 0;
-    const rings = areaOf(o, rec, 'm');
-    assert.strictEqual(rec.polygons.length, 1, view + ': one area for the scope');
-    const past = offset(PEAK.lat, PEAK.lon, 1500, 0);
-    assert.ok(SC.inRings(rings, past.lat, past.lon), view + ': stops short of the configured repeater');
-    assert.ok(SC.inRings(rings, HOME.lat, HOME.lon), view + ': the carrying repeater outside');
-    const mid = offset(HOME.lat, HOME.lon, 20000, 0);
-    map.fire('mousemove', { latlng: { lat: mid.lat, lng: mid.lon } });
-    assert.strictEqual(rec.tip.content, '#m · 2 nodes', view);
-  }
+    const o = SC.createOverlay(L, map, { loadMapConfig: cfg });
+    o.setNodes([scopedAs(HOME, '#home')]); o.setVisible(true);
+    return tick().then(() => cornerDist(shapesOf(lastFill(rec))[0], HOME)[0]);
+  };
+  return run(() => ({ contours: { radiusKm: 400, tubeWidthKm: -1, radii: { h0: 0.01, e1: 'big' } } }))
+    .then(d => assert.ok(Math.abs(d - 4000) < 15, 'out of range: ' + d.toFixed(0)))
+    .then(() => run(() => Promise.reject(new Error('offline'))))
+    .then(d => assert.ok(Math.abs(d - 4000) < 15, 'failed: ' + d.toFixed(0)))
+    .then(() => run(() => null))
+    .then(d => assert.ok(Math.abs(d - 4000) < 15, 'no config: ' + d.toFixed(0)));
 });
 
-test('a new link changes what the budget is calibrated on, so it is asked again', () => {
-  const { L, map } = fakeLeaflet();
-  const t = fakeTerrain();
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
-  o.setVisible(true);
-  o.setNodes([T_NODES[0], EAST, NORTH]);
-  o.setLinks([two('h0', 'e1')]);
-  return tick().then(() => {
-    const before = t.calls.flat().filter(c => c.pk === 'h0').length;
-    o.setLinks([two('h0', 'e1'), two('h0', 'n1')]);
-    return tick().then(() => assert.ok(t.calls.flat().filter(c => c.pk === 'h0').length > before, 'not asked again'));
-  });
-});
-
-// The terrain model's antenna height is the 10 m default unless the operator
-// set it, not a fact about the mast, and a viewer cannot change it: the click
-// box leaves it out.
-test('the click box does not show the antenna height the terrain model used', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const t = fakeTerrain();
-  const meta = { h0: { antennaM: 23.6, source: 'links' }, e1: { antennaM: 25, source: 'set' } };
-  t.extentsFor = ((orig) => (items, onP) => orig(items, (pk, ext) => onP(pk, ext, meta[pk] || { antennaM: 10, source: 'default' })))(t.extentsFor);
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t }, sync));
-  o.setVisible(true);
-  o.setNodes([T_NODES[0], Object.assign({ transported_scopes: ['#home'] }, EAST), Object.assign({ transported_scopes: ['#home'] }, NORTH)]);
-  return tick().then(() => {
-    map.fire('click', { latlng: { lat: HOME.lat, lng: HOME.lon }, sourceTarget: map });
-    const html = rec.popup.content;
-    assert.ok(/#home<\/strong>/.test(html), html);
-    assert.ok(!/mast|antenna/i.test(html), 'antenna height shown: ' + html);
-  });
-});
-
-// Two groups of a scope's repeaters with no two-way link between them: no
-// repeater forwarding the scope is known to bridge the gap, so the area must
-// not paint it.
 const WEST = [{ public_key: 'w1', name: 'West One', lat: 40, lon: -75.30 }, { public_key: 'w2', name: 'West Two', lat: 40, lon: -75.29 }];
 const EASTS = [{ public_key: 'x1', name: 'East One', lat: 40, lon: -75.00 }, { public_key: 'x2', name: 'East Two', lat: 40, lon: -74.99 }];
 const scoped = (ns, s) => ns.map(n => Object.assign({ transported_scopes: [s] }, n));
 
-test('unlinked groups of one scope get separate outlines, not one area over the gap, in both views', () => {
-  for (const view of ['hull', 'detailed']) {
-    const { L, map } = fakeLeaflet();
-    const o = SC.createOverlay(L, map, Object.assign({ view }, sync));
-    o.setNodes(scoped(WEST.concat(EASTS), '#us'));
-    o.setLinks([two('w1', 'w2'), two('x1', 'x2')]);
-    o.setVisible(true);
-    let polys = drawnNow(o);
-    assert.strictEqual(polys.length, 2, view + ': ' + polys.length + ' outlines');
-    assert.ok(polys.every(p => !SC.inRings(p.rings, 40, -75.145)), view + ': the gap is painted');
-    for (const n of WEST.concat(EASTS)) assert.ok(polys.some(p => SC.inRings(p.rings, n.lat, n.lon)), view + ': ' + n.name + ' outside');
-    assert.ok(polys.every(p => p.getElement().getAttribute('data-scope') === 'us'));
-    // A link across the gap joins them.
-    o.setLinks([two('w1', 'w2'), two('x1', 'x2'), two('w2', 'x1')]);
-    polys = drawnNow(o);
-    assert.strictEqual(polys.length, 1, view + ': linked, one outline');
-    assert.ok(SC.inRings(polys[0].rings, 40, -75.145), view + ': the linked gap is part of the area');
-  }
+test('unlinked groups of one scope leave the gap between them empty; a link across it draws a band', () => {
+  const { L, map, rec } = fakeLeaflet();
+  const o = SC.createOverlay(L, map, sync);
+  o.setNodes(scoped(WEST.concat(EASTS), '#us'));
+  o.setLinks([two('w1', 'w2'), two('x1', 'x2')]);
+  o.setVisible(true);
+  assert.strictEqual(fillsNow(o).length, 1, 'one fill a scope');
+  let fill = fillsNow(o)[0];
+  assert.strictEqual(shapesOf(fill).length, 4);
+  assert.ok(!inFill(fill, 40, -75.145), 'the gap is painted');
+  for (const n of WEST.concat(EASTS)) assert.ok(inFill(fill, n.lat, n.lon), n.name + ' outside');
+  assert.ok(drawnNow(o).every(p => p.getElement().getAttribute('data-scope') === 'us'));
+  o.setLinks([two('w1', 'w2'), two('x1', 'x2'), two('w2', 'x1')]);
+  fill = fillsNow(o)[0];
+  assert.strictEqual(shapesOf(fill).length, 5);
+  assert.ok(inFill(fill, 40, -75.145), 'the link across the gap is drawn');
+  assert.ok(!inFill(fill, 40.02, -75.145), 'as a band, not as an area: 2 km off it is empty');
 });
 
 test('a split scope is hovered, pulsed and listed once, and the click box says how many groups', () => {
   const { L, map, rec } = fakeLeaflet();
   let now = 0; const timers = [];
   const o = SC.createOverlay(L, map, Object.assign({ pulseMs: 100, setTimeout: (fn, ms) => { timers.push([now + ms, fn]); return timers.length; }, clearTimeout: () => {} }, sync));
-  // Close enough that the two areas overlap between them, still unlinked.
+  // Close enough that the two groups' octagons overlap, still unlinked.
   const near = [WEST[0], WEST[1], Object.assign({}, EASTS[0], { lon: -75.25 }), Object.assign({}, EASTS[1], { lon: -75.24 })];
   o.setNodes(scoped(near, '#us'));
   o.setLinks([two('w1', 'w2'), two('x1', 'x2')]);
   o.setVisible(true);
-  assert.strictEqual(drawnNow(o).length, 2);
+  assert.strictEqual(drawnNow(o).length, 2, 'a fill and an outline');
   map.fire('mousemove', { latlng: { lat: 40, lng: -75.27 } });
   assert.strictEqual(rec.tip.content, '#us · 4 nodes · 2 separate groups', rec.tip.content);
-  assert.strictEqual(drawnNow(o).filter(p => p.getElement().classList.contains('is-hovered')).length, 2, 'both groups lit');
+  assert.strictEqual(drawnNow(o).filter(p => p.getElement().classList.contains('is-hovered')).length, 2, 'fill and outline lit');
   o.pulse('#us');
-  assert.strictEqual(drawnNow(o).filter(p => p.getElement().classList.contains('is-pulsing')).length, 2, 'both groups pulse');
+  assert.strictEqual(drawnNow(o).filter(p => p.getElement().classList.contains('is-pulsing')).length, 2, 'fill and outline pulse');
   map.fire('click', { latlng: { lat: 40, lng: -75.27 }, sourceTarget: map });
   const html = rec.popup.content;
   assert.strictEqual(html.split('#us</strong>').length - 1, 1, 'listed once: ' + html);
@@ -1405,111 +762,26 @@ test('the click box mentions groups only when a scope is split', () => {
   assert.ok(/3 separate groups/.test(SC.scopePopupHtml(['us'], ns, () => 3)));
 });
 
-test('the list says when terrain is unavailable or off, and credits the source when it is used', () => {
-  const run = (state, url) => {
-    const { S } = listSandbox('#/map');
-    const { L, map } = fakeLeaflet();
-    const o = S.createOverlay(L, map, Object.assign({ terrain: fakeTerrain({ state, url }) }, sync));
-    const el = fakeListEl();
-    S.mountScopeList(el, o);
-    o.setNodes(NODES); o.setVisible(true);
-    return el.innerHTML;
-  };
-  assert.ok(/Terrain unavailable/.test(run('unavailable')));
-  const off = run('off');
-  assert.ok(/Terrain is off on this instance/.test(off) && !/AWS Terrain Tiles/.test(off), off);
-  const ok = run('ok');
-  assert.ok(/AWS Terrain Tiles/.test(ok) && !/Terrain unavailable/.test(ok), ok);
-  const other = run('ok', 'https://dem.example.org/t/{z}/{x}/{y}.png');
-  assert.ok(/Terrain: dem\.example\.org/.test(other) && !/AWS Terrain Tiles/.test(other), other);
-});
-
-test('the map config sets the terrain source before any terrain is asked for', () => {
-  const { L, map } = fakeLeaflet();
-  const t = fakeTerrain();
-  const order = [];
-  t.setSource = (src) => order.push(['source', JSON.parse(JSON.stringify(src))]);
-  t.extentsFor = ((orig) => (items, onP) => { order.push(['ask']); return orig(items, onP); })(t.extentsFor);
-  let resolve;
-  const o = SC.createOverlay(L, map, Object.assign({ terrain: t, loadMapConfig: () => new Promise(r => { resolve = r; }) }, sync));
-  o.setVisible(true);
-  o.setNodes([T_NODES[0]]);
-  resolve({ terrainTiles: { url: 'https://t.example.org/{z}/{x}/{y}.png' } });
-  return tick().then(tick).then(() => {
-    assert.deepStrictEqual(order[0], ['source', { url: 'https://t.example.org/{z}/{x}/{y}.png' }]);
-    assert.ok(order.findIndex(x => x[0] === 'ask') > 0, 'asked for terrain before the source was set: ' + JSON.stringify(order));
-  });
-});
-
-// Frames run by hand, so provider calls can be counted per frame.
-function manualFrames() {
-  const queue = [];
-  return {
-    raf: (fn) => queue.push(fn),
-    run(n) {
-      let p = Promise.resolve();
-      for (let i = 0; i < n; i++) p = p.then(() => { queue.splice(0).forEach(f => f()); }).then(tick);
-      return p;
-    },
-  };
-}
-
-test('terrain off: the overlay asks the provider nothing, frame after frame', () => {
-  const { L, map } = fakeLeaflet();
-  const t = fakeTerrain({ state: 'off' });
-  let calls = 0;
-  t.extentsFor = () => { calls++; return Promise.resolve(new Map()); };
-  const frames = manualFrames();
-  const o = SC.createOverlay(L, map, { terrain: t, raf: frames.raf, loadMapConfig: () => Promise.resolve({ terrainTiles: { disabled: true } }) });
-  o.setVisible(true);
-  o.setLinks([two('h0', 'e1')]);
-  o.setNodes(T_NODES);
-  return tick().then(() => frames.run(10)).then(() => {
-    assert.strictEqual(calls, 0, calls + ' provider calls in 10 frames');
-  });
-});
-
-test('a member the provider does not answer is asked once, not every frame', () => {
-  const { L, map } = fakeLeaflet();
-  const t = fakeTerrain();
-  let calls = 0;
-  t.extentsFor = () => { calls++; return Promise.resolve(new Map()); };
-  const frames = manualFrames();
-  const o = SC.createOverlay(L, map, { terrain: t, raf: frames.raf });
-  o.setVisible(true);
-  o.setLinks([two('h0', 'e1')]);
-  o.setNodes(T_NODES);
-  return tick().then(() => frames.run(10)).then(() => {
-    assert.strictEqual(calls, 1, calls + ' provider calls in 10 frames');
-  });
-});
-
-test('after destroy, nothing is drawn or asked: late answers and queued frames are dropped', () => {
+test('after destroy, nothing is drawn or asked: a late config answer and queued frames are dropped', () => {
   const { L, map, rec } = fakeLeaflet();
-  const t = fakeTerrain();
-  let calls = 0, answer = null;
-  t.extentsFor = (items, onP) => {
-    calls++;
-    return new Promise(r => { answer = () => { items.forEach(it => onP(it.pk, new Float64Array(SC.sectors).fill(500))); r(); }; });
-  };
-  const frames = manualFrames();
-  let linkLoads = 0;
-  const o = SC.createOverlay(L, map, { terrain: t, raf: frames.raf, loadLinks: () => { linkLoads++; return [two('h0', 'e1')]; } });
+  let answer, linkLoads = 0;
+  const frames = [];
+  const o = SC.createOverlay(L, map, { raf: fn => frames.push(fn), loadMapConfig: () => new Promise(r => { answer = r; }), loadLinks: () => { linkLoads++; return [two('h0', 'e1')]; } });
+  const nodes = [scopedAs(HOME, '#home'), scopedAs(EAST, '#home')];
   o.setVisible(true);
-  o.setNodes(T_NODES);
-  return tick().then(() => frames.run(1)).then(() => {
-    assert.ok(calls >= 1 && answer, 'terrain was asked for');
-    const asked = calls, loadsBefore = linkLoads;
-    const drawn = rec.polygons.length;
+  o.setNodes(nodes);
+  map.fire('mousemove', { latlng: { lat: HOME.lat, lng: HOME.lon } });
+  return tick().then(() => {
+    const loadsBefore = linkLoads, drawn = rec.polygons.length;
     o.destroy();
-    answer();
-    return tick().then(() => frames.run(5)).then(() => {
-      assert.strictEqual(calls, asked, (calls - asked) + ' provider calls after destroy');
+    answer({ contours: { radiusKm: 6 } });
+    return tick().then(() => {
+      frames.splice(0).forEach(f => f());
       assert.strictEqual(rec.polygons.length, drawn, 'drew after destroy');
-      o.setNodes(T_NODES.slice(0, 1));
-      return frames.run(2);
+      assert.strictEqual(rec.tipOpen, false, 'hovered after destroy');
+      o.setNodes(nodes.slice(0, 1));
+      return tick();
     }).then(() => {
-      assert.strictEqual(calls, asked, 'setNodes after destroy asked the provider');
       assert.strictEqual(rec.polygons.length, drawn, 'setNodes after destroy drew');
       assert.strictEqual(linkLoads, loadsBefore, 'setNodes after destroy reloaded the links');
     });
@@ -1816,188 +1088,32 @@ test('hiddenFromHash parses the list, null when absent', () => {
   assert.strictEqual(SC.hiddenFromHash('#/map?contours=1'), null);
 });
 
-console.log('\n=== scope-contours.js: area views ===');
-
-test('views are hull (default) and detailed', () => {
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(SC.views)), ['hull', 'detailed']);
-  const { L, map } = fakeLeaflet();
-  assert.strictEqual(SC.createOverlay(L, map, {}).view(), 'hull');
-  assert.strictEqual(SC.createOverlay(L, map, { view: 'detailed' }).view(), 'detailed');
-  for (const gone of ['general', 'wrap', 'bogus']) assert.strictEqual(SC.createOverlay(L, map, { view: gone }).view(), 'hull', gone);
-});
-
-// Two members of one scope 30 km apart, 1 km reach each: a 28 km gap, which
-// the hull spans and the detailed view, filling only gaps under 15 km, does
-// not.
-const GAP_NODES = [
-  Object.assign({ public_key: 'g1', transported_scopes: ['#gap'] }, offset(40.7, -74.0, 0, 0)),
-  Object.assign({ public_key: 'g2', transported_scopes: ['#gap'] }, offset(40.7, -74.0, 30000, 0)),
-];
-const GAP_MID = offset(40.7, -74.0, 15000, 0);
-
-// Unlinked, so two groups: neither view draws the 28 km gap between them,
-// and switching view redraws them.
-test('setView redraws in that view; an unlinked pair stays two areas in both', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const o = SC.createOverlay(L, map, sync);
-  o.setNodes(GAP_NODES); o.setVisible(true);
-  const hull = drawnNow(o).map(p => JSON.stringify(p.rings));
-  assert.strictEqual(hull.length, 2, 'hull: two areas');
-  assert.ok(drawnNow(o).every(p => !SC.inRings(p.rings, GAP_MID.lat, GAP_MID.lon)), 'hull drew the gap');
-  o.setView('detailed');
-  assert.strictEqual(o.view(), 'detailed');
-  assert.strictEqual(drawnNow(o).length, 2, 'detailed: two areas');
-  assert.ok(drawnNow(o).every(p => !hull.includes(JSON.stringify(p.rings))), 'detailed redrew');
-  assert.ok(drawnNow(o).every(p => !SC.inRings(p.rings, GAP_MID.lat, GAP_MID.lon)), 'detailed drew the gap');
-  // Hover follows the drawn view.
-  map.fire('mousemove', { latlng: { lat: GAP_MID.lat, lng: GAP_MID.lon } });
-  assert.strictEqual(rec.tipOpen, false, 'hovering the gap names the scope');
-  map.fire('mousemove', { latlng: { lat: GAP_NODES[1].lat, lng: GAP_NODES[1].lon } });
-  assert.strictEqual(rec.tipOpen, true);
-});
-
-test('each view is cached: switching back computes nothing, an unknown view changes nothing', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const o = SC.createOverlay(L, map, {});
-  o.setNodes(NODES); o.setVisible(true);
-  const hull = o.stats().computed;
-  o.setView('detailed');
-  const afterDetailed = o.stats().computed;
-  assert.ok(afterDetailed > hull);
-  o.setView('hull'); o.setView('detailed');
-  assert.strictEqual(o.stats().computed, afterDetailed, 'a view seen before was recomputed');
-  const drawn = rec.polygons.length;
-  o.setView('wrap'); o.setView('detailed');
-  assert.strictEqual(rec.polygons.length, drawn, 'no redraw for an unknown or unchanged view');
-});
-
-test('a hidden overlay computes no view; switching view closes the click box', () => {
-  const { L, map, rec } = fakeLeaflet();
-  const o = SC.createOverlay(L, map, {});
-  o.setNodes(NODES);
-  o.setView('detailed');
-  assert.strictEqual(o.stats().computed, 0);
-  o.setVisible(true);
-  map.fire('click', { latlng: { lat: 40.70, lng: -74.00 }, sourceTarget: map });
-  assert.strictEqual(rec.popup._onMap, true);
-  o.setView('hull');
-  assert.strictEqual(rec.popup._onMap, false);
-});
-
-test('the list hint says what an area is in the current view', () => {
+test('the list hint says the areas are schematic, with the radius in use', () => {
+  assert.ok(/^Schematic, not measured coverage: each area is an octagon 4 km round/.test(SC.areaNote()), SC.areaNote());
+  assert.ok(/octagon 2\.5 km round/.test(SC.areaNote(2500)));
   const { S } = listSandbox('#/map');
   const { L, map } = fakeLeaflet();
-  const o = S.createOverlay(L, map, {});
   const el = fakeListEl();
+  const o = S.createOverlay(L, map, { loadMapConfig: () => ({ contours: { radiusKm: 7 } }) });
   S.mountScopeList(el, o);
   o.setNodes(NODES); o.setVisible(true);
-  assert.ok(/farthest reach/.test(el.innerHTML));
-  o.setView('detailed');
-  assert.ok(/narrower than 15 km/.test(el.innerHTML), el.innerHTML);
+  return tick().then(() => {
+    assert.ok(/octagon 7 km round every repeater/.test(el.innerHTML), el.innerHTML);
+    assert.ok(/thin band joining two that hear each other/.test(el.innerHTML));
+    assert.ok(/Click an area to list its repeaters\./.test(el.innerHTML));
+    assert.ok(!/terrain|Terrain|Convex|Detailed/.test(el.innerHTML), 'the old model is still described');
+  });
 });
 
-const viewButton = (v) => ({ getAttribute: k => (k === 'data-view' ? v : null) });
-
-test('the view picker shows Convex Hull and Detailed while the overlay is shown, the current one pressed', () => {
-  const { S } = listSandbox('#/map');
-  const { L, map } = fakeLeaflet();
-  const o = S.createOverlay(L, map, {});
-  const el = fakeListEl();
-  S.mountViewPicker(el, o);
-  o.setNodes(NODES);
-  assert.strictEqual(el.hidden, true, 'hidden while the overlay is off');
-  o.setVisible(true);
-  assert.strictEqual(el.hidden, false);
-  assert.strictEqual((el.innerHTML.match(/data-view="/g) || []).length, 2);
-  assert.ok(/class="btn active" data-view="hull" aria-pressed="true"[^>]*>Convex Hull</.test(el.innerHTML), el.innerHTML);
-  assert.ok(/data-view="detailed" aria-pressed="false"[^>]*>Detailed</.test(el.innerHTML), el.innerHTML);
-  assert.ok(/Area shape/.test(el.innerHTML));
-  o.setVisible(false);
-  assert.strictEqual(el.hidden, true);
-});
-
-test('picking a view switches it, stores it, and writes it to the URL; the default clears the URL', () => {
-  const { S, ctx, store } = listSandbox('#/map?contours=1');
-  const { L, map } = fakeLeaflet();
-  const o = S.createOverlay(L, map, {});
-  const el = fakeListEl();
-  S.mountViewPicker(el, o);
-  o.setNodes(NODES); o.setVisible(true);
-  el.fire('click', viewButton('detailed'));
-  assert.strictEqual(o.view(), 'detailed');
-  assert.strictEqual(store['meshcore-scope-contours-view'], 'detailed');
-  assert.ok(/[?&]contoursView=detailed\b/.test(ctx.location.hash) && /contours=1/.test(ctx.location.hash), ctx.location.hash);
-  assert.ok(/class="btn active" data-view="detailed"/.test(el.innerHTML));
-  el.fire('click', viewButton('hull'));
-  assert.strictEqual(store['meshcore-scope-contours-view'], 'hull');
-  assert.ok(!/contoursView/.test(ctx.location.hash), ctx.location.hash);
-  el.fire('click', viewButton('wrap'));
-  el.fire('click', { getAttribute: () => null });
-  assert.strictEqual(o.view(), 'hull');
-});
-
-test('the starting view comes from the URL first, then the stored choice', () => {
-  const start = (hash, stored) => {
-    const { S } = listSandbox(hash, stored);
-    const { L, map } = fakeLeaflet();
-    const o = S.createOverlay(L, map, {});
-    S.mountViewPicker(fakeListEl(), o);
-    return o.view();
-  };
-  assert.strictEqual(start('#/map?contoursView=detailed', { 'meshcore-scope-contours-view': 'hull' }), 'detailed');
-  assert.strictEqual(start('#/map', { 'meshcore-scope-contours-view': 'detailed' }), 'detailed');
-  // Choices stored by the three-view picker that came before.
-  assert.strictEqual(start('#/map?contoursView=wrap', { 'meshcore-scope-contours-view': 'general' }), 'hull');
-  assert.strictEqual(start('#/map'), 'hull');
-});
-
-test('the view picker takes an optional heading (live puts REGION SCOPES above it)', () => {
-  const { S } = listSandbox('#/live');
-  const { L, map } = fakeLeaflet();
-  const o = S.createOverlay(L, map, {});
-  const el = fakeListEl();
-  S.mountViewPicker(el, o, { titleHtml: '<h3 class="legend-title">REGION SCOPES</h3>' });
-  o.setNodes(NODES); o.setVisible(true);
-  assert.ok(el.innerHTML.startsWith('<h3 class="legend-title">REGION SCOPES</h3>') && /Area shape/.test(el.innerHTML), el.innerHTML);
-  o.setVisible(false);
-  assert.strictEqual(el.innerHTML, '', 'heading hidden with the picker');
-});
-
-test('the map and live pages share one stored view', () => {
-  const { S, store } = listSandbox('#/map');
-  const { L, map } = fakeLeaflet();
-  const onMap = S.createOverlay(L, map, {});
-  const mapEl = fakeListEl();
-  S.mountViewPicker(mapEl, onMap);
-  onMap.setNodes(NODES); onMap.setVisible(true);
-  mapEl.fire('click', viewButton('detailed'));
-  const { S: S2 } = listSandbox('#/live', store);
-  const onLive = S2.createOverlay(L, map, {});
-  S2.mountViewPicker(fakeListEl(), onLive);
-  assert.strictEqual(onLive.view(), 'detailed');
-});
-
-test('in Detailed, a pulse lights a scope drawn as two separate areas', () => {
-  const clock = fakeClock();
+test('an old ?contoursView= link still opens, and the stored view is not read', () => {
+  const { S, store } = listSandbox('#/map?contours=1&contoursView=detailed', { 'meshcore-scope-contours-view': 'detailed' });
+  assert.strictEqual(S.hashFlag('#/map?contours=1&contoursView=detailed'), true);
   const { L, map, rec } = fakeLeaflet();
-  const o = SC.createOverlay(L, map, { view: 'detailed', pulseMs: 1500, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
-  // Two repeaters 60 km apart: Detailed leaves them as two areas.
-  const far = offset(40.0, -75.3, 60000, 0);
-  o.setNodes([{ public_key: 'd1', lat: 40.0, lon: -75.3, transported_scopes: ['#two'] }, { public_key: 'd2', lat: far.lat, lon: far.lon, transported_scopes: ['#two'] }]);
-  o.setVisible(true);
-  const polys = drawnNow(o);
-  assert.strictEqual(polys.length, 2, 'Detailed drew ' + polys.length + ' areas');
-  o.pulse('two');
-  assert.ok(polys.every(p => p.getElement().classList.contains('is-pulsing')));
-  clock.advance(1600);
-  assert.ok(polys.every(p => !p.getElement().classList.contains('is-pulsing')));
-});
-
-test('viewFromHash reads ?contoursView=, null when absent or unknown', () => {
-  assert.strictEqual(SC.viewFromHash('#/map?contoursView=detailed'), 'detailed');
-  assert.strictEqual(SC.viewFromHash('#/map?contoursView=wrap'), null);
-  assert.strictEqual(SC.viewFromHash('#/map?contours=1'), null);
-  assert.strictEqual(SC.viewFromHash('#/map?contoursView=x'), null);
+  const o = S.createOverlay(L, map, {});
+  S.mountScopeList(fakeListEl(), o);
+  o.setNodes(NODES); o.setVisible(true);
+  assert.strictEqual(rec.polygons.length, 4);
+  assert.strictEqual(store['meshcore-scope-contours-view'], 'detailed', 'left alone');
 });
 
 console.log('\n=== scope-contours.js: performance ===');
@@ -2016,29 +1132,31 @@ const SCmain = (() => {
   return win.ScopeContours;
 })();
 
-// 2,000 nodes in 32 scopes, with 2,800 links shaped like a real mesh.
+// 2,000 nodes in 32 scopes over 200 km, with 2,800 links. Each link goes
+// from a node to the nearest of 30 others picked at random (a few km to a
+// few tens of km, like a real mesh), and the far end is put in the near
+// end's scope too, so every link is between two members and draws a band:
+// the worst case for this overlay.
 function perfMesh() {
   const rnd = prng(42);
   const nodes = [];
   for (let i = 0; i < 2000; i++) {
     const p = offset(40.7, -74.0, (rnd() - 0.5) * 200000, (rnd() - 0.5) * 200000);
-    const s1 = '#s' + Math.floor(rnd() * 32), s2 = 's' + Math.floor(rnd() * 32);
-    nodes.push({ public_key: 'k' + i, lat: p.lat, lon: p.lon, transported_scopes: [s1], declared_regions: [s2] });
+    // Carried, with no reported list: a list would rule out the scopes it
+    // does not name, and the far ends below could not join.
+    const s1 = '#s' + Math.floor(rnd() * 32), s2 = '#s' + Math.floor(rnd() * 32);
+    nodes.push({ public_key: 'k' + i, lat: p.lat, lon: p.lon, transported_scopes: s1 === s2 ? [s1] : [s1, s2] });
   }
-  // Links shaped like a real mesh (measured on a 104-node instance: 1.41
-  // links per placed node, median 4.5 km, p90 16 km, max 36 km): each link
-  // goes from a node to a point at a log-normal distance in a random
-  // direction, ending on a node placed there.
   const edges = [];
   for (let i = 0; i < 2800; i++) {
     const a = nodes[Math.floor(rnd() * 2000)];
-    const u = Math.max(1e-6, rnd()), v = rnd();
-    const z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-    const km = Math.min(40, 4.5 * Math.exp(0.98 * z));
-    const t = rnd() * 2 * Math.PI;
-    const q = offset(a.lat, a.lon, km * 1000 * Math.sin(t), km * 1000 * Math.cos(t));
-    const b = { public_key: 'x' + i, lat: q.lat, lon: q.lon };
-    nodes.push(b);
+    let b = null, best = Infinity;
+    for (let c = 0; c < 30; c++) {
+      const q = nodes[Math.floor(rnd() * 2000)];
+      const d = (q.lat - a.lat) ** 2 + (q.lon - a.lon) ** 2;
+      if (q !== a && d < best) { best = d; b = q; }
+    }
+    if (b.transported_scopes.indexOf(a.transported_scopes[0]) < 0) b.transported_scopes.push(a.transported_scopes[0]);
     edges.push({ source: a.public_key, target: b.public_key, bidirectional: true, heard_by_source: 1, heard_by_target: 1 });
   }
   return { nodes, edges };
@@ -2047,14 +1165,14 @@ function perfMesh() {
 // Same shape as test-hop-path-inference.js: let the JIT settle, then the
 // median of 5 full rebuilds (a fresh overlay each, so nothing is cached),
 // then one rebuild of the same nodes, cached.
-function timeRebuild(view) {
+function timeRebuild() {
   const { nodes, edges } = perfMesh();
-  const { L, map } = fakeLeaflet();
-  for (let w = 0; w < 2; w++) { const warm = SCmain.createOverlay(L, map, { view }); warm.setVisible(true); warm.setLinks(edges); warm.setNodes(nodes); }
+  const { L, map, rec } = fakeLeaflet();
+  for (let w = 0; w < 2; w++) { const warm = SCmain.createOverlay(L, map, {}); warm.setVisible(true); warm.setLinks(edges); warm.setNodes(nodes); }
   const times = [];
   let o = null;
   for (let r = 0; r < 5; r++) {
-    o = SCmain.createOverlay(L, map, { view });
+    o = SCmain.createOverlay(L, map, {});
     o.setVisible(true);
     o.setLinks(edges);
     const t0 = process.hrtime.bigint();
@@ -2064,52 +1182,40 @@ function timeRebuild(view) {
   times.sort((a, b) => a - b);
   const t1 = process.hrtime.bigint();
   o.setNodes(nodes.slice());
-  return { median: times[2], cachedMs: Number(process.hrtime.bigint() - t1) / 1e6, computed: o.stats().computed, links: edges.length };
+  const cachedMs = Number(process.hrtime.bigint() - t1) / 1e6;
+  const shapes = rec.polygons.slice(-32).reduce((n, p) => n + p.rings.length, 0);
+  return { median: times[2], cachedMs, computed: o.stats().computed, links: edges.length, shapes };
 }
 
-// Targets per view. The assertion allows twice the target locally and four
-// times it on CI (GitHub sets CI=true): shared runners measured the hull
-// view at 29-79 ms against its 30 ms target, which failed nightly builds
-// at random while a local run stays near 29 ms.
+// The assertion allows twice the target locally and four times it on CI
+// (GitHub sets CI=true): shared runners measured the old hull view at 29-79
+// ms against a 30 ms target, which failed nightly builds at random.
+// The model this replaced took ~28 ms (hull) and ~300 ms (Detailed, with
+// path-loss reach) on its own benchmark mesh, before any terrain tile was
+// fetched or walked.
 const PERF_HEADROOM = process.env.CI ? 4 : 2;
-// Detailed rose from 260 ms when lobes started counting only toward
-// partners in the same area: none of this mesh's partners are in one (2% on
-// a real 190-node instance), so members merge into fewer clusters (512 grids
-// rather than 296) and small reaches get finer cells (11.2M vertices rather
-// than 4.9M).
-// This mesh links no member to another, so since each linked group gets its
-// own area every member is a lone outline: 2,000 of them, not 32. That is
-// the worst case (a carrying repeater got the packet from a hop that also
-// forwards the scope, so real members link). Hull stays near its ~20 ms
-// (~28 ms) through one hull per lone shape without a sort and a mitred
-// point at each shallow margin corner; Detailed fell from ~185 to ~105 ms,
-// its grids now one small group each.
-[['hull', 30], ['detailed', 400]].forEach(([view, target]) => {
-  test('2,000 nodes with 2,800 mesh-shaped links across 32 scopes, ' + view + ' view: median rebuild within budget', () => {
-    const r = timeRebuild(view);
-    console.log('     (median ' + r.median.toFixed(1) + ' ms over 5 runs (target ' + target + ' ms, limit ' + PERF_HEADROOM * target + ') for ' + r.computed + ' outlines over ' + r.links + ' links; cached rebuild ' + r.cachedMs.toFixed(1) + ' ms)');
-    assert.ok(r.computed >= 32);
-    assert.ok(r.median < PERF_HEADROOM * target, 'median ' + r.median.toFixed(1) + ' ms, limit ' + PERF_HEADROOM * target + ' ms');
-  });
+const PERF_TARGET_MS = 60;
+test('2,000 nodes with 2,800 links between members across 32 scopes: median rebuild within budget', () => {
+  const r = timeRebuild();
+  console.log('     (median ' + r.median.toFixed(1) + ' ms over 5 runs (target ' + PERF_TARGET_MS + ' ms, limit ' + PERF_HEADROOM * PERF_TARGET_MS + ') for ' + r.computed + ' areas, ' + r.shapes + ' shapes, over ' + r.links + ' links; cached rebuild ' + r.cachedMs.toFixed(1) + ' ms)');
+  assert.ok(r.computed >= 32);
+  assert.ok(r.shapes > 4000, 'bands were drawn: ' + r.shapes + ' shapes');
+  assert.ok(r.median < PERF_HEADROOM * PERF_TARGET_MS, 'median ' + r.median.toFixed(1) + ' ms, limit ' + PERF_HEADROOM * PERF_TARGET_MS + ' ms');
+  assert.ok(r.cachedMs < r.median, 'the cached rebuild is not cheaper');
 });
 
-['hull', 'detailed'].forEach((view) => test('a hover hit test over 32 outlines takes under 1 ms, ' + view + ' view', () => {
-  const rnd = prng(7);
-  const nodes = [];
-  for (let i = 0; i < 2000; i++) {
-    const p = offset(40.7, -74.0, (rnd() - 0.5) * 200000, (rnd() - 0.5) * 200000);
-    nodes.push({ public_key: 'k' + i, lat: p.lat, lon: p.lon, transported_scopes: ['#s' + Math.floor(rnd() * 32)], declared_regions: ['s' + Math.floor(rnd() * 32)] });
-  }
+test('a hover hit test over 32 areas takes under 1 ms', () => {
+  const { nodes, edges } = perfMesh();
   const { L, map } = fakeLeaflet();
-  const o = SCmain.createOverlay(L, map, { raf: fn => fn(), view });
-  o.setVisible(true); o.setNodes(nodes);
+  const o = SCmain.createOverlay(L, map, { raf: fn => fn() });
+  o.setVisible(true); o.setLinks(edges); o.setNodes(nodes);
   const N = 200;
   const t0 = process.hrtime.bigint();
   for (let k = 0; k < N; k++) map.fire('mousemove', { latlng: { lat: 40.7 + (k % 20) * 0.01, lng: -74.0 + (k % 7) * 0.01 } });
   const per = Number(process.hrtime.bigint() - t0) / 1e6 / N;
   console.log('     (' + per.toFixed(3) + ' ms per hit test)');
   assert.ok(per < 1, per.toFixed(3) + ' ms');
-}));
+});
 
 Promise.all(pending).then(() => {
   console.log(`\n${passed} passed, ${failed} failed`);
