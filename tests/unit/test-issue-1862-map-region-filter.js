@@ -56,6 +56,13 @@ function makeSandbox(stored) {
   vm.runInContext(fs.readFileSync('public/scope-geometry.js', 'utf8'), ctx);
   vm.runInContext(fs.readFileSync('public/scope-contours.js', 'utf8'), ctx);
   for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
+  // map.js's render path (index.html order) uses the tile-provider module's
+  // hooks. Stub the two the sandbox needs — loading the full module would
+  // drag the Leaflet layer control into a mock that doesn't support it.
+  // (PR #2386 CI catch: map.js calls MC_isDarkTheme() during page render.)
+  ctx.window.MC_isDarkTheme = () => false;
+  ctx.window.MC_resolveTile = () => ({ type: 'light', id: null, url: 'https://tiles.example/{z}/{x}/{y}.png', attribution: 'test', maxZoom: 19, refUrl: null, invertFilter: null });
+  for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
   vm.runInContext(fs.readFileSync('public/map.js', 'utf8'), ctx);
   for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
   return ctx;
@@ -372,6 +379,11 @@ async function makePage(opts) {
   // contours; index.html loads it before map.js.
   vm.runInContext(fs.readFileSync('public/scope-geometry.js', 'utf8'), ctx);
   vm.runInContext(fs.readFileSync('public/scope-contours.js', 'utf8'), ctx);
+  for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
+  // Same tile-provider stubs as the first harness above — map.js page render
+  // depends on them (index.html load order).
+  ctx.window.MC_isDarkTheme = () => false;
+  ctx.window.MC_resolveTile = () => ({ type: 'light', id: null, url: 'https://tiles.example/{z}/{x}/{y}.png', attribution: 'test', maxZoom: 19, refUrl: null, invertFilter: null });
   for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
   vm.runInContext(fs.readFileSync('public/map.js', 'utf8'), ctx);
   for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
