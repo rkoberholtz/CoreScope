@@ -531,8 +531,7 @@
             <label for="mcRegionFilter" class="sr-only">Show nodes with evidence for a region scope</label>
             <select id="mcRegionFilter" title="Show nodes that declare a region scope or were seen carrying its traffic">${regionFilterOptionsHtml([], filters.regionScope)}</select>
             <div id="mcRegionHint" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
-            <label for="mcScopeContours" title="Outline where each region scope reaches: each repeater's range is how far its signal is expected to carry over the terrain, calibrated on the nodes known to hear it, and stretched to repeaters in its area that heard it. Each area covers the repeaters configured for the scope or seen carrying its traffic; groups of them with no known link between them get separate areas. Click an outline to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Region contours</label>
-            <div id="mcScopeView" class="mc-scope-view" hidden></div>
+            <label for="mcScopeContours" title="Mark where each region scope is: an octagon of a fixed radius round every repeater configured for the scope or seen carrying its traffic, and a thin band between two that hear each other. Schematic, not measured coverage. Click an area to list its repeaters. Follows the picked region."><input type="checkbox" id="mcScopeContours"> Region contours</label>
             <div id="mcScopeList" class="mc-scope-list" hidden></div>
           </fieldset>
           <fieldset class="mc-section">
@@ -733,19 +732,15 @@
     if (filters.clustering && clusterGroup) clusterGroup.addTo(map);
     routeLayer = L.layerGroup().addTo(map);
     if (window.ScopeContours) {
-      // Reach follows the neighbor graph: one bulk call, shared through
+      // The bands follow the neighbor graph: one bulk call, shared through
       // api()'s cache, fetched only while the contours are on.
       reachOverlay = window.ScopeContours.createOverlay(L, map, {
         loadLinks: () => api('/analytics/neighbor-graph', { ttl: CLIENT_TTL.analyticsRF }).then(d => (d && d.edges) || []),
-        // Path loss over elevation tiles sets each repeater's reach;
-        // antenna heights the operator set in config replace the 10 m default.
-        terrain: window.TerrainReach ? window.TerrainReach.shared() : null,
+        // mapDefaults.contours: the octagon radius, the operator's own
+        // radius for a repeater, the band width.
         loadMapConfig: () => api('/config/map', { ttl: 3600 }),
       });
       reachOverlay.setOnly(filters.regionScope);
-      // Convex hull or detailed (shrink-wrapped) areas; set before the overlay is
-      // shown, so only the chosen view is computed.
-      window.ScopeContours.mountViewPicker(document.getElementById('mcScopeView'), reachOverlay);
       window.ScopeContours.mountScopeList(document.getElementById('mcScopeList'), reachOverlay);
       reachOverlay.setVisible(filters.scopeContours);
     }

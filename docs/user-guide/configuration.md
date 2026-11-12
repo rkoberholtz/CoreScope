@@ -136,35 +136,30 @@ Initial map center and zoom level.
 
 ### Region contours
 
-Optional `mapDefaults` settings tune the [region contours](map.md#region-contours) overlay:
+Optional `mapDefaults.contours` settings size the [region contours](map.md#region-contours) overlay:
 
 ```json
 "mapDefaults": {
   "center": [37.45, -122.0],
   "zoom": 9,
-  "antennaHeights": {
-    "a1b2c3d4": 20,
-    "e5f60718": 35
-  },
-  "terrainTiles": false,
   "contours": {
-    "budgetPercentile": 75,
-    "reachRule": "first",
-    "marginKm": 0.5
+    "radiusKm": 5,
+    "tubeWidthKm": 1,
+    "radii": {
+      "a1b2c3d4": 2,
+      "e5f60718": 12
+    }
   }
 }
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `mapDefaults.antennaHeights` | — | Metres above ground of antennas you know, keyed by public key or a unique hex prefix of at least 8 characters. Used instead of the 10 m default at both ends of a path: for a repeater whose reach is drawn, and for a node that heard one. A listener on a tall building or tower that is taken for 10 m makes the path it heard look lossier than it was, which makes the reach too big. Heights outside 1–200 m and non-hex keys are ignored. |
-| `mapDefaults.terrainTiles` | AWS Terrain Tiles | Where the browser fetches elevation (Terrarium PNGs). `false` turns terrain off, so no elevation requests leave the browser. A URL template containing `{z}`, `{x}` and `{y}` names another source; anything else means the default. |
-| `mapDefaults.contours.budgetPercentile` | 90 | Which percentile of the loss over a repeater's known links sets its budget (50–100). Lower is more conservative: the reach stops nearer its typical links than its best ones. |
-| `mapDefaults.contours.defaultBudgetDb` | 120 | The budget for a repeater heard by fewer than two placed nodes (90–150). |
-| `mapDefaults.contours.maxReachKm` | 30 | How far any reach can go (1–50). |
-| `mapDefaults.contours.reachRule` | `farthest` | `farthest`: each direction reaches the farthest point within budget, so a hilltop beyond a valley counts and the valley before it is drawn as reached. `first`: each direction stops where the loss first goes over budget, so the reach ends at the first ridge that shadows it. |
-| `mapDefaults.contours.marginKm` | 2 | How far each area is grown past its repeaters' reach (0–5). |
-| `mapDefaults.contours.receiverHeightM` | 10 | The receiver height the reach is drawn for (0.5–100): 10 m is roughly a rooftop repeater, 2 m someone on the ground with a handheld. |
+| `mapDefaults.contours.radiusKm` | 4 | The radius of the octagon drawn round every repeater of a scope (0.5–30). |
+| `mapDefaults.contours.tubeWidthKm` | a third of the radius | The width of the band drawn between two repeaters that hear each other (0.2–10). It is never wider than the smaller octagon it joins. |
+| `mapDefaults.contours.radii` | — | Your own radius, in km (0.5–30), for repeaters whose reach you know, keyed by public key or a unique hex prefix of at least 8 characters. The longest matching prefix wins. |
+
+The settings of the earlier reach model (`mapDefaults.antennaHeights`, `mapDefaults.terrainTiles`, and the `budgetPercentile`, `defaultBudgetDb`, `maxReachKm`, `reachRule`, `marginKm` and `receiverHeightM` fields of `contours`) are no longer used. A config that still has them loads as before.
 
 A value out of range is ignored, and that setting keeps its default.
 

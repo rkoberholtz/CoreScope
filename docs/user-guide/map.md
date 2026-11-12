@@ -56,37 +56,27 @@ Click a node marker, then click **Show Route** in the popup to see the paths pac
 
 ## Region contours
 
-**Region contours** outlines where each MeshCore region scope reaches. Turn it on under **Region Scope** in the map controls. Each scope gets one coloured area per group of its repeaters joined by links, heard in either direction. Two groups with no known link between them get separate areas, because a scoped flood only crosses between them through a repeater that forwards the scope.
+**Region contours** marks where each MeshCore region scope is. Turn it on under **Region Scope** in the map controls. Each scope gets one coloured area, drawn around the repeaters that belong to it.
+
+The area is schematic. It shows which repeaters carry a scope and which of them hear each other. It is not a coverage map: CoreScope doesn't know how far a repeater's signal really carries.
 
 - **Hover** an area to name the scopes under the cursor.
-- **Click** an area to list the repeaters configured for each scope or seen carrying its traffic, and how many separate groups a split scope has.
-- **View**: **Convex Hull** (the default) draws everything between a group's farthest edges. **Detailed** shrink-wraps the group's combined reach, filling gaps narrower than 15 km.
+- **Click** an area to list the repeaters configured for each scope or seen carrying its traffic, and how many separate groups the scope has.
 - **Scope list**: tick or untick scopes to show or hide them. Colours are handed out in name order, so hiding a scope never recolours the others.
 
 The overlay needs no configuration to appear, but what it can show depends on what your instance knows about each repeater's regions. See [What puts a repeater in a region](#what-puts-a-repeater-in-a-region).
 
 ### How an area is drawn
 
-Each repeater's reach is worked out in 72 directions:
-
-- **With terrain**, the reach in each direction is the farthest point where the path loss stays within what the repeater is known to manage. Path loss is free-space loss plus the loss over the worst ridge in the way, using elevation data your browser fetches (see [`mapDefaults.terrainTiles`](configuration.md#region-contours)). What the repeater manages is learned from the nodes known to have heard it: the 90th percentile of the loss over their paths, or 120 dB when fewer than two are known. A hilltop beyond a valley is reached, and the valley before it is drawn as reached too. Reach goes out to 30 km. Antennas count as 10 m above ground unless you set their heights with [`mapDefaults.antennaHeights`](configuration.md#region-contours). All of this can be made more conservative with [`mapDefaults.contours`](configuration.md#region-contours).
-- **Without terrain** (turned off, or the tiles can't be fetched), the reach is a circle: 1.1 × the 75th percentile of the distances it was heard over, kept between 1 and 20 km. A repeater nobody is known to hear gets 1 km.
-- A link counts only in the direction it was heard, because hearing a repeater proves how far its signal goes, not how far the listener's does.
-- **Repeaters in the same area that heard it** always stretch the reach out to them: evidence beats the model.
-- Every repeater keeps at least 1 km of reach, and every area is grown by a margin with rounded corners: 2 km unless set with `mapDefaults.contours.marginKm`.
+- **An octagon round every repeater of the scope.** Its corners are 4 km from the repeater unless you set another radius with [`mapDefaults.contours.radiusKm`](configuration.md#region-contours). If you know a site reaches further or less far, give that repeater its own radius with `mapDefaults.contours.radii`.
+- **A thin band between two of the scope's repeaters that hear each other**, when their octagons don't already meet. A link counts when it was heard in at least one direction. The band is narrower than an octagon on purpose: a link shows the far end heard the near one, not that the ground between them is covered.
+- **Nothing between repeaters with no known link.** A scoped flood only crosses from one repeater to another through a repeater that forwards the scope, so a link through a repeater outside the scope draws no band. The click box says how many separate groups of linked repeaters a scope has.
 
 Repeaters without a GPS position can't be placed and aren't drawn.
 
-#### How well it matches
+#### Why it is schematic
 
-`scripts/validate-reach.js` checks the reach against an instance's own data. It hides each known reception in turn, rebuilds the sender's reach without it, and checks whether the listener is inside. On one live mesh (870 receptions):
-
-| Reach | Listener inside | Mean area | A plain circle of the same area | A circle needs |
-|---|---|---|---|---|
-| Distance radius only | 69% | 807 km² | 72% | 19% less area |
-| Path loss over terrain | 80% | 1,115 km² | 75% | 42% more area |
-
-A plain line-of-sight cut did worse than a circle of the same size, because a fifth to almost half of the real links have no line of sight.
+Earlier versions estimated each repeater's reach from terrain, path loss and link distances. Checked against the receptions a live mesh had actually logged (870 of them, each hidden in turn), the best model put 80% of listeners inside the drawn reach, where a plain circle of the same area put 75%. It also drew areas well past where people on the ground could be heard, with an edge that looked measured. The octagons make no such claim.
 
 ### What puts a repeater in a region
 
@@ -106,16 +96,15 @@ Scoped packets carry a code derived from the region name, not the name itself. C
 
 - **No repeater reports it and it isn't in `hashRegions`.** Add the name to `hashRegions`, or turn on `autoRegionKeys` (which only helps once some repeater has reported the name).
 - **Its repeaters have no GPS position.**
-- **The instance restarted in the last few minutes.** The link graph is rebuilt about 5 minutes after startup; until then link directions aren't known, so reaches fall back to the defaults and areas may be split into more groups than usual. Reload the page after that.
+- **The instance restarted in the last few minutes.** The link graph is rebuilt about 5 minutes after startup; until then few links are known, so bands are missing and a scope counts more separate groups than usual. Reload the page after that.
 - **A newer report replaced the old one.** The newest reported list wins, so a region removed from a repeater's list drops out of its area.
 
 ### Known limits
 
 - Being seen carrying a scope never expires for a repeater that has never reported a list, so on an instance that keeps packets for a long time an old scope can linger.
-- **Detailed** is drawn on a grid: its edge can sit about 0.3 km past the hull on 30 km reaches, and its margin round a repeater can fall up to about 150 m short of 2 km.
-- The terrain is bare earth: buildings and trees aren't in it.
-- The defaults catch the most known receptions, but those are heard by fixed repeaters and observers, mostly on rooftops, which hear past ridges that someone on the ground doesn't. If the areas look too big where you know the coverage, see [`mapDefaults.contours`](configuration.md#region-contours).
-- The radius rule, floor, wrap gap, default view and pulse duration are fixed for now.
+- The radius is the same for every repeater unless you set its own: a hilltop site and one in a valley look alike.
+- A band shows a link CoreScope has seen, however long. A rare long link draws a long band.
+- The pulse duration on the Live page is fixed for now.
 
 ### Links
 
@@ -124,10 +113,9 @@ The overlay's state is kept in the URL, so a shared link opens as you had it:
 | Parameter | Meaning |
 |-----------|---------|
 | `contours=1` / `contours=0` | Region contours on or off |
-| `contoursView=detailed` | Detailed view (Convex Hull when absent) |
 | `contoursHide=a,b` | Scopes hidden from the overlay |
 
-For example: `#/map?contours=1&contoursView=detailed`.
+For example: `#/map?contours=1&contoursHide=us`.
 
 ## Popups
 
