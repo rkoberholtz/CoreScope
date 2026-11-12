@@ -44,7 +44,7 @@ console.log('\n=== scope-geometry.js ===');
 
 test('loads on its own and exposes its API', () => {
   assert.ok(G, 'window.ScopeGeometry not defined');
-  for (const fn of ['octagon', 'tube', 'convexHull', 'linkShapes', 'outline', 'inAny', 'ringsBounds']) {
+  for (const fn of ['octagon', 'roundedOctagon', 'tube', 'convexHull', 'linkShapes', 'outline', 'inAny', 'ringsBounds']) {
     assert.strictEqual(typeof G[fn], 'function', fn);
   }
   assert.strictEqual(G.mPerDeg, 111320);
@@ -60,6 +60,32 @@ test('octagon: 8 corners at the radius, flat sides to the compass points, anticl
   assert.strictEqual(r.filter((p) => Math.abs(local(p)[1] - north) < 1).length, 2, 'two corners on the north side');
   assert.ok(area(r) > 0, 'anticlockwise in east/north');
   assert.ok(Math.abs(area(r) - 2 * Math.SQRT2 * 4000 * 4000) < 1000, 'area of a regular octagon');
+});
+
+test('roundedOctagon: flat sides where the octagon has them, corners rounded off inside it', () => {
+  const r = G.roundedOctagon(O.lat, O.lon, 4000), sharp = oct(O, 4000);
+  assert.ok(r.length > 16 && r.length <= 40, 'points: ' + r.length);
+  const apothem = 4000 * Math.cos(Math.PI / 8);
+  const pts = r.map(local);
+  assert.ok(Math.abs(Math.max(...pts.map((p) => p[1])) - apothem) < 1, 'north side stays put');
+  assert.ok(Math.abs(Math.max(...pts.map((p) => p[0])) - apothem) < 1, 'east side stays put');
+  assert.ok(Math.abs(Math.min(...pts.map((p) => p[0])) + apothem) < 1, 'west side stays put');
+  const d = r.map((p) => metres(p, [O.lat, O.lon]));
+  assert.ok(Math.min(...d) > apothem - 1, 'never inside the flat sides: ' + Math.min(...d));
+  assert.ok(Math.max(...d) < 3950 && Math.max(...d) > 3850, 'corners pulled in, a little: ' + Math.max(...d));
+  r.forEach((p) => assert.ok(G.inAny([oct(O, 4001)], p[0], p[1]), 'outside the sharp octagon'));
+  assert.ok(area(r) > Math.PI * apothem * apothem && area(r) < area(sharp), 'between the inscribed circle and the octagon');
+  // Convex and anticlockwise: every turn is to the left.
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length], c = pts[(i + 2) % pts.length];
+    assert.ok((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]) > -1e-6, 'turn ' + i);
+  }
+  // No corner turns more than 15 degrees: it reads as round.
+  const turns = pts.map((a, i) => {
+    const b = pts[(i + 1) % pts.length], c = pts[(i + 2) % pts.length];
+    return Math.abs(Math.atan2(c[1] - b[1], c[0] - b[0]) - Math.atan2(b[1] - a[1], b[0] - a[0]));
+  }).map((t) => Math.min(t, 2 * Math.PI - t) * 180 / Math.PI);
+  assert.ok(Math.max(...turns) < 15.01, 'sharpest turn ' + Math.max(...turns).toFixed(1));
 });
 
 test('convexHull keeps the corners only, anticlockwise', () => {
@@ -98,7 +124,9 @@ test('linkShapes: one octagon per member, a tube only where two linked octagons 
     { lat: near.lat, lon: near.lon, r: 4000 }, { lat: lone.lat, lon: lone.lon, r: 4000 }];
   const polys = G.linkShapes(items, [[0, 1], [0, 2]], 700);
   assert.strictEqual(polys.length, 5, '4 octagons + 1 tube');
-  assert.strictEqual(polys.filter((p) => p.length === 8).length >= 4, true);
+  const rounded = G.roundedOctagon(O.lat, O.lon, 4000).length;
+  assert.strictEqual(polys.filter((p) => p.length === rounded).length, 4, 'members are rounded octagons');
+  assert.ok(polys[4].length <= 10, 'the band is a plain strip: its ends are inside the octagons');
   const mid = offset(O, 10000, 0);
   assert.ok(G.inAny(polys, mid.lat, mid.lon), 'the tube covers the midpoint of the far link');
   assert.strictEqual(G.linkShapes(items, [], 700).length, 4, 'no links, no tubes');
@@ -171,14 +199,14 @@ test('inAny tests each shape on its own (overlaps stay inside) and ringsBounds b
   assert.ok(box[0] < O.lat && box[2] > O.lat && box[1] < O.lon && box[3] > b[0][1] - 0.1);
 });
 
-test('2,000 shapes in a row are outlined in well under 100 ms', () => {
+test('2,000 rounded shapes in a row are outlined in well under 100 ms', () => {
   const polys = [];
-  for (let i = 0; i < 2000; i++) polys.push(oct(offset(O, i * 3000, (i % 7) * 900), 4000));
+  for (let i = 0; i < 2000; i++) { const p = offset(O, i * 3000, (i % 7) * 900); polys.push(G.roundedOctagon(p.lat, p.lon, 4000)); }
   G.outline(polys);
   const t0 = process.hrtime.bigint();
   const lines = G.outline(polys);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-  console.log(`     outline of 2,000 overlapping octagons: ${ms.toFixed(1)} ms, ${lines.length} lines`);
+  console.log(`     outline of 2,000 overlapping rounded octagons: ${ms.toFixed(1)} ms, ${lines.length} lines`);
   assert.ok(lines.length > 0);
   assert.ok(ms < 100, ms.toFixed(1) + ' ms');
 });

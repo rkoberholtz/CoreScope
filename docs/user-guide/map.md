@@ -68,7 +68,7 @@ The overlay needs no configuration to appear, but what it can show depends on wh
 
 ### How an area is drawn
 
-- **An octagon round every repeater of the scope.** Its corners are 4 km from the repeater unless you set another radius with [`mapDefaults.contours.radiusKm`](configuration.md#region-contours). If you know a site reaches further or less far, give that repeater its own radius with `mapDefaults.contours.radii`.
+- **An octagon with rounded corners round every repeater of the scope.** It is 4 km in radius (its flat sides are 3.7 km from the repeater) unless you set another radius with [`mapDefaults.contours.radiusKm`](configuration.md#region-contours). If you know a site reaches further or less far, give that repeater its own radius with `mapDefaults.contours.radii`.
 - **A thin band between two of the scope's repeaters that hear each other**, when their octagons don't already meet. A link counts when it was heard in at least one direction. The band is narrower than an octagon on purpose: a link shows the far end heard the near one, not that the ground between them is covered.
 - **Nothing between repeaters with no known link.** A scoped flood only crosses from one repeater to another through a repeater that forwards the scope, so a link through a repeater outside the scope draws no band. The click box says how many separate groups of linked repeaters a scope has.
 

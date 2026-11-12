@@ -21,7 +21,7 @@
    says which evidence each member has.
 
    The area is schematic, drawn from what is known and nothing more:
-   - an octagon of a fixed radius round every member: one radius for the
+   - an octagon with rounded corners, of a fixed radius, round every member: one radius for the
      whole mesh (4 km unless mapDefaults.contours.radiusKm says otherwise),
      or the member's own from mapDefaults.contours.radii, set by an operator
      who knows the site;
