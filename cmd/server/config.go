@@ -100,15 +100,7 @@ type Config struct {
 	MapDefaults struct {
 		Center []float64 `json:"center"`
 		Zoom   int       `json:"zoom"`
-		// AntennaHeights: metres above ground of antennas the operator
-		// knows, by pubkey or unique hex prefix (>= 8 chars). The region
-		// contours use them at both ends of a path, in place of 10 m.
-		AntennaHeights map[string]float64 `json:"antennaHeights,omitempty"`
-		// TerrainTiles: where the region contours fetch elevation from
-		// (Terrarium PNGs). false turns terrain off; a URL template with
-		// {z}, {x} and {y} names another source; unset is AWS Terrain Tiles.
-		TerrainTiles TerrainTiles `json:"terrainTiles,omitempty"`
-		// Contours: how optimistic the region contours' reach is
+		// Contours: the sizes the region contours are drawn with
 		// (cleanContours has the ranges); unset fields keep the overlay's
 		// defaults.
 		Contours ContoursConfig `json:"contours,omitempty"`
@@ -1324,39 +1316,12 @@ func (c *Config) RegionFallbackMaxHops() int {
 	return regionFallbackMaxHopsDefault
 }
 
-// ContoursConfig is mapDefaults.contours. Pointers, so a field set to 0
-// (a margin of 0 km) is told apart from one not set.
+// ContoursConfig is mapDefaults.contours: the octagon drawn round every
+// repeater of a region scope, the band between two that hear each other,
+// and the operator's own radius for a repeater, by pubkey or unique hex
+// prefix (>= 8 chars). Pointers, so a field not set is told apart from 0.
 type ContoursConfig struct {
-	BudgetPercentile *float64 `json:"budgetPercentile,omitempty"`
-	DefaultBudgetDb  *float64 `json:"defaultBudgetDb,omitempty"`
-	MaxReachKm       *float64 `json:"maxReachKm,omitempty"`
-	ReachRule        string   `json:"reachRule,omitempty"`
-	MarginKm         *float64 `json:"marginKm,omitempty"`
-	ReceiverHeightM  *float64 `json:"receiverHeightM,omitempty"`
-}
-
-// TerrainTiles is mapDefaults.terrainTiles: Disabled for false, URL for a
-// usable template, neither for the default source. It never fails the
-// config: a value it cannot use means the default.
-type TerrainTiles struct {
-	Disabled bool
-	URL      string
-}
-
-func (t *TerrainTiles) UnmarshalJSON(b []byte) error {
-	*t = TerrainTiles{}
-	var on bool
-	if json.Unmarshal(b, &on) == nil {
-		t.Disabled = !on
-		return nil
-	}
-	var u string
-	if json.Unmarshal(b, &u) == nil {
-		u = strings.TrimSpace(u)
-		if (strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://")) &&
-			strings.Contains(u, "{z}") && strings.Contains(u, "{x}") && strings.Contains(u, "{y}") {
-			t.URL = u
-		}
-	}
-	return nil
+	RadiusKm    *float64           `json:"radiusKm,omitempty"`
+	TubeWidthKm *float64           `json:"tubeWidthKm,omitempty"`
+	Radii       map[string]float64 `json:"radii,omitempty"`
 }

@@ -1077,33 +1077,17 @@ type ThemeResponse struct {
 type MapConfigResponse struct {
 	Center []float64 `json:"center"`
 	Zoom   int       `json:"zoom"`
-	// AntennaHeights: validated mapDefaults.antennaHeights (see
-	// cleanAntennaHeights); omitted when none are configured.
-	AntennaHeights map[string]float64 `json:"antennaHeights,omitempty"`
-	// TerrainTiles: mapDefaults.terrainTiles when it is not the default
-	// source; omitted otherwise.
-	TerrainTiles *TerrainTilesResponse `json:"terrainTiles,omitempty"`
-	// Contours: the usable fields of mapDefaults.contours (see
+	// Contours: the usable values of mapDefaults.contours (see
 	// cleanContours); omitted when none is set.
 	Contours *ContoursResponse `json:"contours,omitempty"`
 }
 
-// ContoursResponse tunes the region contours' reach; a field left out keeps
-// the overlay's default.
+// ContoursResponse sizes the region contours; a field left out keeps the
+// overlay's default. Radii is keyed by lowercase pubkey or hex prefix.
 type ContoursResponse struct {
-	BudgetPercentile *float64 `json:"budgetPercentile,omitempty"`
-	DefaultBudgetDb  *float64 `json:"defaultBudgetDb,omitempty"`
-	MaxReachKm       *float64 `json:"maxReachKm,omitempty"`
-	ReachRule        string   `json:"reachRule,omitempty"`
-	MarginKm         *float64 `json:"marginKm,omitempty"`
-	ReceiverHeightM  *float64 `json:"receiverHeightM,omitempty"`
-}
-
-// TerrainTilesResponse tells the region contours to skip terrain
-// (disabled) or which Terrarium URL template to fetch instead.
-type TerrainTilesResponse struct {
-	Disabled bool   `json:"disabled,omitempty"`
-	URL      string `json:"url,omitempty"`
+	RadiusKm    *float64           `json:"radiusKm,omitempty"`
+	TubeWidthKm *float64           `json:"tubeWidthKm,omitempty"`
+	Radii       map[string]float64 `json:"radii,omitempty"`
 }
 
 type ClientConfigResponse struct {
