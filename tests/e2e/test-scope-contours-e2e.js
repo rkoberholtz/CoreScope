@@ -180,14 +180,15 @@ const EDGES = [
     assert(style.lineStroke !== 'none' && style.lineStroke !== 'rgb(51, 136, 255)' && style.fillFill === style.lineStroke, 'not coloured by its CSS variable: ' + JSON.stringify(style));
   });
 
-  await step('a repeater is an octagon 4 km round it, and the list says the areas are schematic', async () => {
+  await step('a repeater is a round-cornered octagon 4 km round it, and the list says the areas are schematic', async () => {
     // Daly South (37.74, -122.30) is #south-bay's only member.
     assert(await insideAt('south-bay', 37.74, -122.30 + 3 * KM_LON), '3 km east of Daly South is outside');
     assert(await insideAt('south-bay', 37.74 + 3 * KM_LAT, -122.30), '3 km north of Daly South is outside');
     assert(!(await insideAt('south-bay', 37.74, -122.30 + 4.5 * KM_LON)), '4.5 km east of Daly South is inside');
     assert(!(await insideAt('south-bay', 37.74 - 4.5 * KM_LAT, -122.30)), '4.5 km south of Daly South is inside');
     const d = await page.$eval(lineOf('south-bay'), (el) => el.getAttribute('d'));
-    assert((d.match(/L/g) || []).length === 8 && (d.match(/M/g) || []).length === 1, 'not one eight-sided outline: ' + d);
+    // Rounded corners: more than the eight points of a plain octagon.
+    assert((d.match(/L/g) || []).length >= 16 && (d.match(/M/g) || []).length === 1, 'not one round-cornered outline: ' + d);
     const hint = await page.$eval('#mcScopeList .mc-scope-hint', (el) => el.textContent);
     assert(/Schematic, not measured coverage/.test(hint) && /octagon 4 km round every repeater/.test(hint), 'hint: ' + hint);
     assert(!/[Tt]errain|Convex|Detailed/.test(hint), 'the old model is described: ' + hint);
